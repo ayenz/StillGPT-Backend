@@ -55,7 +55,22 @@ export const conversationView = (c: ConversationRow) => ({
   updated_at: iso(c.updatedAt),
 });
 
-export const artifactView = (a: Artifact) => ({ id: a.id, name: a.name, mime_type: a.mimeType, size: a.size, kind: a.kind, url: a.url });
+export const artifactView = (a: Artifact) => ({
+  id: a.id,
+  name: a.name,
+  mime_type: a.mimeType,
+  size: a.size,
+  kind: a.kind,
+  url: a.url,
+  thumbnail_url: a.thumbnailUrl ?? null,
+  preview_url: a.previewUrl ?? null,
+});
+
+/** `url`, `thumbnail_url`, `preview_url` for a stored file id. */
+const mediaUrls = (store: MediaStore, fileId: string, mimeType: string) => {
+  const u = store.urls(fileId, mimeType);
+  return { url: u.url, thumbnail_url: u.thumbnailUrl, preview_url: u.previewUrl };
+};
 
 export const fileView = (f: StoredFile, store: MediaStore) => ({
   id: f.id,
@@ -63,7 +78,7 @@ export const fileView = (f: StoredFile, store: MediaStore) => ({
   mime_type: f.mimeType,
   size: f.size,
   kind: f.kind,
-  url: store.signedUrl(f.id),
+  ...mediaUrls(store, f.id, f.mimeType),
   created_at: iso(f.createdAt),
 });
 
@@ -73,11 +88,11 @@ export function messageView(m: MessageRow, store: MediaStore) {
     role: m.role,
     content: m.content.map((b) => {
       if (b.type === 'text') return { type: 'text' as const, text: b.text };
-      if (b.type === 'image') return { type: 'image' as const, file_id: b.fileId, mime_type: b.mimeType, url: store.signedUrl(b.fileId) };
-      return { type: 'file' as const, file_id: b.fileId, filename: b.filename, mime_type: b.mimeType, url: store.signedUrl(b.fileId) };
+      if (b.type === 'image') return { type: 'image' as const, file_id: b.fileId, mime_type: b.mimeType, ...mediaUrls(store, b.fileId, b.mimeType) };
+      return { type: 'file' as const, file_id: b.fileId, filename: b.filename, mime_type: b.mimeType, ...mediaUrls(store, b.fileId, b.mimeType) };
     }),
     artifacts: m.artifacts.map((a) =>
-      artifactView({ id: a.fileId, name: a.name, mimeType: a.mimeType, size: a.size, kind: a.kind ?? artifactKind(a.mimeType), url: store.signedUrl(a.fileId) }),
+      artifactView({ id: a.fileId, name: a.name, mimeType: a.mimeType, size: a.size, kind: a.kind ?? artifactKind(a.mimeType), ...store.urls(a.fileId, a.mimeType) }),
     ),
     model: m.model,
     credits: m.credits,

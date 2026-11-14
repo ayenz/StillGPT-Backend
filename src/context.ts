@@ -8,6 +8,7 @@ import { ConversationTitler } from './core/titler.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
 import { MediaStore } from './core/storage.js';
+import { probeFfmpeg } from './core/variants.js';
 import { TurnRunner } from './core/turns.js';
 import { UsageService } from './core/usage.js';
 import { WebhookService } from './core/webhooks.js';
@@ -61,7 +62,9 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const bus = new EventBus();
   const agents = new AgentPool(db, qoder, log, config.QODER_ENVIRONMENT_ID);
   const models = new ModelRegistry(db, qoder, config.MODEL_ALIASES, log.child({ mod: 'models' }));
-  const store = new MediaStore(db, config.MEDIA_DIR, config.PUBLIC_BASE_URL, config.MEDIA_SIGNING_SECRET!, config.MEDIA_URL_TTL_SEC);
+  const ffmpeg = config.FFMPEG_PATH && (await probeFfmpeg(config.FFMPEG_PATH)) ? config.FFMPEG_PATH : null;
+  if (!ffmpeg) log.warn('media.ffmpeg_unavailable', { path: config.FFMPEG_PATH, effect: 'videos get no thumbnail_url/preview_url' });
+  const store = new MediaStore(db, config.MEDIA_DIR, config.PUBLIC_BASE_URL, config.MEDIA_SIGNING_SECRET!, config.MEDIA_URL_TTL_SEC, ffmpeg);
   const usage = new UsageService(db);
   const conversations = new ConversationService(db);
   const auth = new AuthService(db, config.JWT_SECRET);

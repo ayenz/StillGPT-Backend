@@ -12,6 +12,10 @@ export interface Artifact {
   kind: 'image' | 'video' | 'audio' | 'file';
   /** Signed, time-limited URL that works without auth headers (<img>/<video>). */
   url: string;
+  /** Small WebP (fits 400px; a still frame for videos) for gallery tiles. null when the type has none. */
+  thumbnailUrl?: string | null;
+  /** Medium WebP (fits 1280px; a still frame / poster for videos). null when the type has none. */
+  previewUrl?: string | null;
 }
 
 export interface Credits {

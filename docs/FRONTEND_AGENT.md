@@ -1,25 +1,25 @@
-# Frontend agent brief — StillGPT PWA
+# Frontend agent brief — QodeRouter PWA
 
-You are building the **web app (PWA)** for StillGPT, our "personal LLM" backend. The backend is finished and deployed;
+You are building the **web app (PWA)** for QodeRouter, our "personal LLM" backend. The backend is finished and deployed;
 your job is the client only. Do not change the backend. If the API seems to be missing something, write it down in
 `BACKEND_REQUESTS.md` in the frontend repo and work around it.
 
 ## Source of truth
 
 Read these first, in this order (they are in the backend repo `docs/`):
-1. `FRONTEND_GUIDE.md` — the flows and UI behaviour we want.
+1. `FRONTEND_GUIDE.md` — the flows and UI behaviour we want (Indonesian).
 2. `API.md` — the exact request/response contract of every endpoint. **When this brief and API.md disagree, API.md wins.**
 
 Environments:
 - Production API: `https://qrouter.ayenz.my.id/api/v1`
 - Local backend: `http://localhost:8790/api/v1` (run the backend repo with `npm run dev`; ask the owner for a test account)
 
-Make the API base URL a build-time env var (`VITE_API_BASE_URL`). Never ship API keys (`sg_…`) in the client; the PWA
+Make the API base URL a build-time env var (`VITE_API_BASE_URL`). Never ship API keys (`qr_…`) in the client; the PWA
 always uses email/password login → access + refresh tokens.
 
 ## Product scope (MVP)
 
-The app should feel like a mainstream AI chat app. UI language: **English**. Keep all UI strings in one i18n file so other languages (e.g. Indonesian) can be added later.
+The app should feel like a mainstream AI chat app. UI language: **Bahasa Indonesia**.
 
 1. **Login** (no sign-up screen — accounts are created by an admin), logout, profile (display name, change password with
    current password), credit usage this month (`GET /me`).
@@ -28,17 +28,17 @@ The app should feel like a mainstream AI chat app. UI language: **English**. Kee
      New chats are auto-titled (ChatGPT style): apply the `conversation.title` SSE event to the sidebar/header; if it
      did not arrive, refetch the list a few seconds after the first `turn.completed`. Manual rename = `PATCH title`.
    - Message view with Markdown rendering (code blocks with copy button, tables, links), streaming replies,
-     a "thinking…" indicator, tool chips from `tool.started`/`tool.completed` (e.g. "Searching the web…", "Reading the document…",
-     "Creating an image…"), and inline artifacts (images, videos, files) from `artifact` events.
+     a "thinking…" indicator, tool chips from `tool.started`/`tool.completed` (e.g. "Mencari di web…", "Membaca dokumen…",
+     "Membuat gambar…"), and inline artifacts (images, videos, files) from `artifact` events.
    - Composer: textarea (Enter = send, Shift+Enter = newline), attach photos/documents (upload first via `POST /files`,
      show previews and upload progress), Stop button (`POST …/interrupt`), send disabled while a turn is running.
    - Model picker per conversation: show **aliases** from `GET /models` first (`default`, `smart`, `fast`, `cheap`),
-     raw models under "More". Changing it calls `PATCH /conversations/:id`.
+     raw models under "Lainnya". Changing it calls `PATCH /conversations/:id`.
    - Error states for every code in API.md §11 (`409 conversation_busy`, `429 credit_limit_exceeded`, `413`, upstream errors with a retry button).
 3. **Create image** page
    - Prompt textarea + **✨ Enhance** button (`POST /prompts/enhance`, `kind:"image"`): replaces the textarea content with
      `prompt`, preselects `size`, keeps `original` for a **↩ Undo** button; show a small note when `enhanced` is false.
-     Optional "Purpose" field sent as `purpose` (e.g. poster, fashion catalogue, Instagram post).
+     Optional "Tujuan" field sent as `purpose` (e.g. poster, katalog fashion, Instagram post).
    - Size/ratio picker (sizes from API.md §8), provider selector (`auto` default; hide `folax` when unavailable per `image_providers`).
    - Optional input images (max 3) for edits → forces provider `qoder`.
    - Result grid (Folax returns 2 images), download buttons, "use as video first frame" action.

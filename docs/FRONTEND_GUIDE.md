@@ -1,49 +1,49 @@
-# Frontend Integration Guide — StillGPT
+# Panduan Integrasi Frontend — QodeRouter
 
-For: the frontend team (PWA now, Flutter later).
-Backend version: 0.1 · November 2026 · The full API reference is in the appendix (Part B).
+Untuk: tim frontend (PWA sekarang, Flutter nanti).
+Versi backend: 0.1 · November 2026 · Referensi API lengkap ada di lampiran (Bagian B).
 
 ---
 
-## 1. Overview
+## 1. Gambaran singkat
 
-StillGPT is our "personal LLM" backend. The frontend app only needs to talk to **one** server:
+QodeRouter adalah backend "personal LLM" kita. Aplikasi frontend cukup bicara dengan **satu** server:
 
-| App feature | Main endpoint |
+| Fitur di aplikasi | Endpoint utama |
 |---|---|
-| Login, profile, credit quota | `/auth/*`, `/me`, `/usage` |
-| Chat (text) with streamed answers | `/conversations`, `/conversations/:id/messages` (SSE) |
-| Send photos / documents (PDF, DOCX, XLSX, CSV, …) to a chat | `/files`, then reference the `file_id` in the message |
-| **✨ Enhance** button for image/video prompts | `/prompts/enhance` |
-| Generate images | `/images` |
-| Generate videos | `/videos` + `/jobs/:id` |
-| Model list / model picker | `/models` |
+| Login, profil, kuota kredit | `/auth/*`, `/me`, `/usage` |
+| Chat (teks) dengan jawaban mengalir (streaming) | `/conversations`, `/conversations/:id/messages` (SSE) |
+| Kirim foto / dokumen (PDF, DOCX, XLSX, CSV, …) ke chat | `/files` lalu sebut `file_id` di pesan |
+| Tombol **✨ Enhance** prompt gambar/video | `/prompts/enhance` |
+| Generate gambar | `/images` |
+| Generate video | `/videos` + `/jobs/:id` |
+| Daftar model / pilihan model | `/models` |
 
-- **Production base URL:** `https://qrouter.ayenz.my.id/api/v1`
-- **Local base URL:** `http://localhost:8790/api/v1`
-- All JSON uses **snake_case**. Times are ISO-8601 UTC.
-- Every response has an `X-Request-Id` header — include it when reporting bugs.
+- **Base URL produksi:** `https://qrouter.ayenz.my.id/api/v1`
+- **Base URL lokal:** `http://localhost:8790/api/v1`
+- Semua JSON memakai **snake_case**. Waktu dalam ISO-8601 UTC.
+- Setiap respons punya header `X-Request-Id` — sertakan saat melapor bug.
 
-> The backend stores conversation context itself. The frontend **only sends the new message** and never resends the history.
+> Backend menyimpan konteks percakapan sendiri. Frontend **hanya mengirim pesan baru**, tidak pernah mengirim ulang riwayat.
 
 ---
 
-## 2. Login and tokens
+## 2. Login dan token
 
-There is no public sign-up: accounts are created by an admin (`POST /admin/users`). The app only needs a login screen.
+Tidak ada pendaftaran publik: akun dibuat oleh admin (`POST /admin/users`). Aplikasi hanya perlu layar login.
 
 ```
 POST /auth/login     {email, password}          → {user, access_token, expires_in: 900, refresh_token}
-POST /auth/refresh   {refresh_token}            → {access_token, expires_in, refresh_token}   (refresh token ROTATES)
+POST /auth/refresh   {refresh_token}            → {access_token, expires_in, refresh_token}   (refresh token BERGANTI)
 POST /auth/logout    {refresh_token}            → 204
 ```
 
-Mandatory rules:
-1. Keep the **access token in memory only**. Store the refresh token in IndexedDB/`localStorage` (PWA) or `flutter_secure_storage` (Flutter).
-2. When the app opens → call `/auth/refresh`.
-3. If any request gets a `401` → refresh **once** and retry the request. If the refresh also fails → go to the login screen.
-4. **Only one refresh may run at a time** (use a single shared promise). The refresh token rotates every time it is used,
-   so two parallel refreshes will invalidate each other.
+Aturan wajib:
+1. Simpan **access token di memori saja**. Simpan refresh token di IndexedDB/`localStorage` (PWA) atau `flutter_secure_storage` (Flutter).
+2. Saat aplikasi dibuka → panggil `/auth/refresh`.
+3. Jika request apa pun mendapat `401` → refresh **sekali**, ulangi request. Jika refresh juga gagal → ke layar login.
+4. **Hanya boleh satu proses refresh berjalan** (pakai satu promise bersama). Refresh token berganti setiap kali dipakai,
+   jadi dua refresh paralel akan saling membatalkan.
 
 ```ts
 let refreshing: Promise<string> | null = null;
@@ -54,7 +54,7 @@ async function getFreshToken(): Promise<string> {
   }).then(async (r) => {
     if (!r.ok) throw new Error('logged_out');
     const t = await r.json();
-    await store.setRefresh(t.refresh_token);   // store the NEW one
+    await store.setRefresh(t.refresh_token);   // simpan yang BARU
     memory.accessToken = t.access_token;
     return t.access_token;
   }).finally(() => (refreshing = null));
@@ -64,30 +64,30 @@ async function getFreshToken(): Promise<string> {
 
 ---
 
-## 3. Streaming chat
+## 3. Chat dengan streaming
 
-### 3.1 Flow
-1. Create a conversation: `POST /conversations {model?: "default", profile?: "assistant"}` → `conv_…`
-2. Send a message with streaming:
+### 3.1 Alur
+1. Buat percakapan: `POST /conversations {model?: "default", profile?: "assistant"}` → `conv_…`
+2. Kirim pesan dengan streaming:
    `POST /conversations/:id/messages` + header `Accept: text/event-stream`, body `{text, attachments?: [file_id]}`
-3. Read SSE events until `turn.completed`.
+3. Baca event SSE sampai `turn.completed`.
 
-The browser's built-in `EventSource` **cannot** POST and cannot send an `Authorization` header — use `fetch`
-and read `response.body` (e.g. the `eventsource-parser` or `@microsoft/fetch-event-source` package).
+`EventSource` bawaan browser **tidak bisa** POST dan tidak bisa mengirim header `Authorization` — pakai `fetch`
+dan baca `response.body` (mis. paket `eventsource-parser` atau `@microsoft/fetch-event-source`).
 
-### 3.2 Events to handle
+### 3.2 Event yang perlu ditangani
 
-| Event | What the UI does |
+| Event | Yang dilakukan UI |
 |---|---|
-| `turn.started` | create an empty answer bubble; store `message_id` |
-| `thinking` | show a "thinking…" indicator |
-| `text.delta` | **append** `text` to the bubble (render Markdown) |
-| `tool.started` / `tool.completed` | optional: status chip, e.g. "🔎 Searching the web…", "🖼️ Generating image…" |
-| `artifact` | show the image/video/file (`artifact.url` can be used directly in `<img>`/`<video>`) |
-| `model.fallback` | optional: small notice "model X unavailable, using Y" |
-| `error` | show the error message in the bubble (a `turn.completed` event still follows) |
-| `conversation.title` | auto-generated title for a new chat (like ChatGPT): update the title in the sidebar/header, ideally with a short typing animation |
-| `turn.completed` | final: replace the bubble content with the full `text`, re-enable the send button |
+| `turn.started` | buat gelembung jawaban kosong; simpan `message_id` |
+| `thinking` | tampilkan indikator "sedang berpikir…" |
+| `text.delta` | **tambahkan** `text` ke gelembung (render Markdown) |
+| `tool.started` / `tool.completed` | opsional: chip status, mis. "🔎 Mencari di web…", "🖼️ Membuat gambar…" |
+| `artifact` | tampilkan gambar/video/file (`artifact.url` bisa langsung dipakai di `<img>`/`<video>`) |
+| `model.fallback` | opsional: info kecil "model X tidak tersedia, memakai Y" |
+| `error` | tampilkan pesan error di gelembung (event `turn.completed` tetap menyusul) |
+| `conversation.title` | judul otomatis chat baru (kayak ChatGPT): update judul di sidebar/header, idealnya pakai animasi ketik singkat |
+| `turn.completed` | final: ganti isi gelembung dengan `text` lengkap, aktifkan lagi tombol kirim |
 
 ```ts
 import { createParser } from 'eventsource-parser';
@@ -98,10 +98,10 @@ async function sendMessage(convId: string, text: string, attachments: string[], 
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({ text, attachments }),
   });
-  if (res.status === 409) return ui.toast('Still answering the previous message');
+  if (res.status === 409) return ui.toast('Masih menjawab pesan sebelumnya');
   const parser = createParser({
     onEvent(ev) {
-      ui.lastEventId = ev.id;                       // for reconnecting
+      ui.lastEventId = ev.id;                       // untuk reconnect
       const data = JSON.parse(ev.data);
       switch (ev.event) {
         case 'turn.started': ui.startAssistant(data.message_id); break;
@@ -123,134 +123,162 @@ async function sendMessage(convId: string, text: string, attachments: string[], 
 }
 ```
 
-### 3.3 Dropped connections & reopening the app
-- **Closing the tab / losing signal does not cancel the answer.** The answer is still generated and saved on the server.
-- When the connection drops: `GET /conversations/:id/stream` with the header `Last-Event-ID: <last id>` (backoff 1 s → 2 s → 5 s).
-  - `200` → keep appending events.
-  - `204` → the answer is already finished: reload `GET /conversations/:id/messages`.
-- When the app is reopened: `GET …/messages` returns `running_turn` ≠ `null` if a turn is still running → connect to `/stream` without `Last-Event-ID` (the event history is replayed from the start).
+### 3.3 Putus koneksi & buka ulang aplikasi
+- **Menutup tab / sinyal hilang tidak membatalkan jawaban.** Jawaban tetap dibuat dan disimpan di server.
+- Saat koneksi putus: `GET /conversations/:id/stream` dengan header `Last-Event-ID: <id terakhir>` (backoff 1 s → 2 s → 5 s).
+  - `200` → lanjutkan menambah event.
+  - `204` → jawaban sudah selesai: muat ulang `GET /conversations/:id/messages`.
+- Saat aplikasi dibuka ulang: `GET …/messages` mengembalikan `running_turn` ≠ `null` jika masih berjalan → sambung ke `/stream` tanpa `Last-Event-ID` (riwayat event diputar ulang dari awal).
 
-### 3.4 Miscellaneous
-- **Stop** button: `POST /conversations/:id/interrupt`.
-- A conversation can only process one message at a time → `409 conversation_busy`. Disable the send button while streaming.
-- Conversation list: `GET /conversations?limit=20&before=<next_cursor>` (newest first). The title is filled in automatically from the first message.
-- Change the model or system prompt mid-conversation: `PATCH /conversations/:id` — the context is preserved.
+### 3.4 Lain-lain
+- Tombol **Stop**: `POST /conversations/:id/interrupt`.
+- Satu percakapan hanya bisa memproses satu pesan sekaligus → `409 conversation_busy`. Nonaktifkan tombol kirim selama streaming.
+- Daftar percakapan: `GET /conversations?limit=20&before=<next_cursor>` (terbaru dulu). Judul terisi otomatis dari pesan pertama.
+- Ganti model atau system prompt di tengah percakapan: `PATCH /conversations/:id` — konteks tetap tersimpan.
 
 ---
 
-## 4. Photos & documents
+## 4. Foto & dokumen
 
-1. Upload first: `POST /files` (multipart, field `file`, max 20 MB) → `{id, filename, mime_type, size, url}`
-2. Reference it in the message: `{text: "Summarize this document", attachments: ["file_…"]}`
+1. Upload dulu: `POST /files` (multipart, field `file`, maks 20 MB) → `{id, filename, mime_type, size, url}`
+2. Sebut di pesan: `{text: "Ringkas dokumen ini", attachments: ["file_…"]}`
 
-| Type | Behavior | Limit |
+| Jenis | Perilaku | Batas |
 |---|---|---|
-| Photos (png, jpg, webp, gif) | seen directly by the model | 20 MB upload; > 7 MB is sent as a file |
-| Documents (pdf, docx, xlsx, csv, txt, md, …) | read by the agent in a sandbox | **5 MB** per document (`413 attachment_too_large` on send) |
+| Foto (png, jpg, webp, gif) | dilihat langsung oleh model | 20 MB upload; > 7 MB dikirim sebagai file |
+| Dokumen (pdf, docx, xlsx, csv, txt, md, …) | dibaca agent di sandbox | **5 MB** per dokumen (`413 attachment_too_large` saat kirim) |
 
-Show attachment previews using the `url` from the upload response. Document analysis takes 8–20 seconds — show an indicator based on the `tool.started` event.
+Tampilkan preview lampiran memakai `thumbnail_url ?? url` dari respons upload (lihat §6.1). Analisa dokumen butuh 8–20 detik — tampilkan indikator dari event `tool.started`.
 
 ---
 
-## 5. Images, videos, and the ✨ Enhance button
+## 5. Gambar, video, dan tombol ✨ Enhance
 
-### 5.1 ✨ Enhance button (improve the prompt)
-In the image/video generation form, place a **✨ Enhance** button next to the text area.
+### 5.1 Tombol ✨ Enhance (perbaiki prompt)
+Di form generate gambar/video, letakkan tombol **✨ Enhance** di samping text area.
 
 ```
 POST /prompts/enhance  {prompt, kind: "image" | "video", purpose?: "poster", style?, model?}
 → {prompt, original, aspect_ratio, size?, ratio?, seconds?, enhanced, model, credits}
 ```
 
-Required UI behavior:
-1. Click → button shows loading (2–10 seconds).
-2. **Replace the text area content** with `prompt` from the response.
-3. Auto-select the size: image → `size`; video → `ratio` and `seconds` (the user can still change them).
-4. Keep `original` so there is a **↩ Revert** button.
-5. If `enhanced: false`, the prompt is unchanged — show a notice "prompt used as is".
+Perilaku UI yang diminta:
+1. Klik → tombol loading (2–10 detik).
+2. **Ganti isi text area** dengan `prompt` dari respons.
+3. Pilih otomatis ukuran: gambar → `size`; video → `ratio` dan `seconds` (user tetap boleh mengubah).
+4. Simpan `original` agar ada tombol **↩ Kembalikan**.
+5. Jika `enhanced: false`, prompt tidak berubah — tampilkan info "prompt sudah dipakai apa adanya".
 
-Prompts may be in Indonesian; the enhanced result is always in English. For promotional content (e.g. plus-size clothing),
-fill in `purpose` (`"poster"`, `"fashion catalog"`) — the enhancer will use fashion-industry terminology so the image
-generator refuses less often. The `model` field is optional: leave it empty for the server default (currently Kimi-K3.1-Pro).
+Prompt boleh bahasa Indonesia; hasil enhance selalu bahasa Inggris. Untuk konten promosi (mis. baju ukuran besar),
+isi `purpose` (`"poster"`, `"fashion catalog"`) — enhancer akan memakai istilah industri fashion sehingga generator
+gambar lebih jarang menolak. Field `model` opsional: biarkan kosong untuk default server (saat ini Kimi-K3.1-Pro).
 
-### 5.2 Generate images
+### 5.2 Generate gambar
 ```
 POST /images {prompt, size?: "1024x1024", provider?: "auto" | "qoder" | "folax", input_file_ids?: [..], enhance?: false}
 → 200 job {id, status: "completed" | "failed", outputs: [{url, mime_type, …}], error}
 ```
-- Waits until finished (Folax ~10 seconds, Qoder ~20–30 seconds). To avoid waiting: `async: true` → `202`, then follow the job (5.4).
-- `provider: "auto"` (default): uses **Folax** (fast, 2 images per request); on failure it automatically falls back to **Qoder**.
-- **Photo edit/merge** (`input_file_ids`, max 3) always uses Qoder.
-- Qoder sizes: `1024x1024, 1536x1024, 1024x1536, 768x1024, 1024x768, 1024x1280, 1280x1024, 1024x1792, 1792x1024, 2560x1080`.
-  Folax only supports 1:1, 4:3, 3:4, 16:9, 9:16 (other sizes are rounded to the nearest ratio).
-- A `failed` status is still HTTP 200 — always check `status` and `error.message`.
+- Menunggu sampai selesai (Folax ~10 detik, Qoder ~20–30 detik). Untuk tidak menunggu: `async: true` → `202`, lalu ikuti job (5.4).
+- `provider: "auto"` (default): pakai **Folax** (cepat, 2 gambar per permintaan); jika gagal otomatis pindah ke **Qoder**.
+- **Edit/gabung foto** (`input_file_ids`, maks 3) selalu memakai Qoder.
+- Ukuran Qoder: `1024x1024, 1536x1024, 1024x1536, 768x1024, 1024x768, 1024x1280, 1280x1024, 1024x1792, 1792x1024, 2560x1080`.
+  Folax hanya 1:1, 4:3, 3:4, 16:9, 9:16 (ukuran lain dibulatkan ke rasio terdekat).
+- Status `failed` tetap HTTP 200 — selalu cek `status` dan `error.message`.
 
-### 5.3 Generate videos
+### 5.3 Generate video
 ```
 POST /videos {prompt, seconds?: 5, resolution?: "1080P", ratio?: "16:9", audio?: true,
               first_frame_file_id?, last_frame_file_id?, reference_file_ids?: [..], enhance?}
 → 202 job {id: "vid_…", status: "queued"}
 ```
-- Automatic mode: text only → *text-to-video*; with `first_frame_file_id` → animate a photo (optionally + `last_frame_file_id`); with `reference_file_ids` (1–10) → consistent character/product.
-- Duration 2–30 seconds, resolution 480P/720P/1080P, ratio 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.
-- **Slow: usually 3–8 minutes, up to 30 minutes.** Cannot be cancelled. The server processes one video at a time;
-  if the Qoder queue is full, the server retries automatically (the job stays `in_progress`).
+- Mode otomatis: teks saja → *text-to-video*; ada `first_frame_file_id` → animasikan foto (bisa + `last_frame_file_id`); ada `reference_file_ids` (1–10) → karakter/produk konsisten.
+- Durasi 2–30 detik, resolusi 480P/720P/1080P, rasio 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.
+- **Lama: biasanya 3–8 menit, bisa sampai 30 menit.** Tidak bisa dibatalkan. Server memproses satu video sekaligus;
+  jika antrean Qoder penuh, server otomatis mencoba lagi (job tetap `in_progress`).
 
-### 5.4 Following a job (async images & videos)
-- `GET /jobs/:id/events` (SSE): `progress {status, progress}` events, then `completed` / `failed` containing the full job.
-- Or poll `GET /jobs/:id` every 5–10 seconds.
-- `progress` (0–100) is a **time estimate**, not real progress; it holds at ≤ 95 until finished.
-- History: `GET /jobs?kind=video&limit=20`.
+### 5.4 Mengikuti job (gambar async & video)
+- `GET /jobs/:id/events` (SSE): event `progress {status, progress}`, lalu `completed` / `failed` berisi job lengkap.
+- Atau polling `GET /jobs/:id` tiap 5–10 detik.
+- `progress` (0–100) adalah **perkiraan waktu**, bukan progres asli; tertahan di ≤ 95 sampai selesai.
+- Riwayat: `GET /jobs?kind=video&limit=20`.
 
-Suggested UI: a job card in the gallery with a progress bar, a notification on `completed`, and jobs remain viewable
-after the app is closed (refetch from `/jobs`).
-
----
-
-## 6. Files & media URLs
-
-- Every image/video/file `url` is a **signed URL** (`/media/file_…?exp=…&sig=…`): it can be used directly in `<img>`, `<video>`, or a download link **without** an Authorization header.
-- URLs expire (default 7 days) → refetch from `GET …/messages` or `GET /jobs/:id` when needed. Do not store URLs permanently.
-- HTTP Range is supported, so `<video>` can seek (important for Safari/iOS).
-- Append `&download=1` to make the browser download instead of display.
+UI yang disarankan: kartu job di galeri (gambar tile dari `outputs[].thumbnail_url`, lihat §6.1) dengan progress bar, notifikasi saat `completed`, dan job tetap bisa dilihat
+setelah aplikasi ditutup (ambil ulang dari `/jobs`).
 
 ---
 
-## 7. Errors
+## 6. File & URL media
 
-Format: `{"error": {"code": "...", "message": "..."}}`. Codes the UI needs to handle:
+- Semua `url` gambar/video/file adalah **URL bertanda tangan** (`/media/file_…?exp=…&sig=…`): bisa langsung dipakai di `<img>`, `<video>`, atau link unduh **tanpa** header Authorization.
+- URL kedaluwarsa (minimal 7 hari) → ambil ulang dari `GET …/messages` atau `GET /jobs/:id` bila perlu. Jangan simpan URL permanen.
+- URL file yang sama **tidak berubah selama sehari**, dan server mengirim `Cache-Control: immutable` + `ETag`, jadi cache browser bekerja. Jangan tambahkan `?t=Date.now()` atau cache-buster lain.
+- Mendukung HTTP Range, jadi `<video>` bisa di-seek (penting untuk Safari/iOS).
+- Tambahkan `&download=1` agar browser mengunduh, bukan menampilkan.
 
-| HTTP | code | UI action |
+### 6.1 Thumbnail & preview (wajib dipakai di galeri)
+
+Setiap objek yang punya `url` media (output job, artifact, lampiran, `POST /files`) juga punya:
+
+| Field | Isi | Pakai untuk |
 |---|---|---|
-| 401 | `unauthorized` | refresh the token once, then go to login |
-| 403 | `account_disabled`, `forbidden` | show the message, log out |
-| 409 | `conversation_busy` | "Still answering…", do not resend |
-| 413 | `file_too_large`, `attachment_too_large` | show the size limit |
-| 429 | `credit_limit_exceeded` | "This month's quota is used up" |
-| 400 | `validation_error` | show `message` next to the relevant field |
-| 502/503 | `upstream_*` | "The AI service is having problems, please try again" + retry button |
+| `thumbnail_url` | WebP maks 400×400 px (± 20–60 KB) | tile grid galeri, gambar di bubble chat |
+| `preview_url` | WebP maks 1280×1280 px | lightbox / halaman detail |
+| `url` | file asli (PNG beberapa MB / MP4 utuh) | tombol unduh, putar video, zoom penuh |
 
-Errors mid-stream arrive as an `error` event (still followed by `turn.completed` with `stop_reason: "error"`).
+- Untuk **video**, `thumbnail_url` dan `preview_url` adalah **gambar diam (poster)**, bukan video.
+- Bisa `null` (dokumen, audio, SVG). Fallback: `thumbnail_url ?? url`.
+- Kalau thumbnail video gagal dimuat (`404`), tampilkan ikon/placeholder video lewat `onError`.
+
+Contoh tile galeri:
+```html
+<!-- gambar -->
+<img src="{thumbnail_url ?? url}" loading="lazy" decoding="async" width="400" height="400" style="object-fit:cover">
+
+<!-- video: jangan render <video> di grid -->
+<img src="{thumbnail_url}" loading="lazy" decoding="async"> <span class="badge">▶</span>
+
+<!-- saat dibuka (lightbox) -->
+<img src="{preview_url ?? url}">                                   <!-- gambar -->
+<video src="{url}" poster="{preview_url}" preload="none" controls>  <!-- video -->
+```
 
 ---
 
-## 8. PWA notes
+## 7. Error
 
-- **Service worker:** do not cache API responses, especially SSE (`/messages`, `/stream`, `/jobs/*/events`) and signed `/media/*`. Only cache the app's static assets.
-- **Proxies & timeouts:** long answers can take > 1 minute; the server sends a `: ping` heartbeat every 15 seconds — ignore it.
-- **iOS Safari:** use `fetch` streaming (supported since iOS 15). Use `<video playsinline controls>` for video results.
-- **Video-finished notifications:** if the tab was closed, still show them from `/jobs` when the app is reopened.
-- **CORS:** the server already allows the app's origin (ask for it to be added to `CORS_ORIGINS` if the domain changes).
+Format: `{"error": {"code": "...", "message": "..."}}`. Kode yang perlu ditangani UI:
 
-## 9. Flutter notes (later)
+| HTTP | code | Tindakan UI |
+|---|---|---|
+| 401 | `unauthorized` | refresh token sekali, lalu ke login |
+| 403 | `account_disabled`, `forbidden` | tampilkan pesan, logout |
+| 409 | `conversation_busy` | "Masih menjawab…", jangan kirim ulang |
+| 413 | `file_too_large`, `attachment_too_large` | tampilkan batas ukuran |
+| 429 | `credit_limit_exceeded` | "Kuota bulan ini habis" |
+| 400 | `validation_error` | tampilkan `message` dekat field terkait |
+| 502/503 | `upstream_*` | "Layanan AI sedang bermasalah, coba lagi" + tombol ulangi |
 
-- Tokens: `flutter_secure_storage`. HTTP: `dio` or `http`.
-- SSE: send the request with `Accept: text/event-stream`, read `response.stream` through `utf8.decoder` + `LineSplitter`,
-  split frames on blank lines; the `id:`, `event:`, `data:` fields are exactly the same as on the web.
-- Video: `video_player` supports signed URLs + Range.
+Error di tengah streaming datang sebagai event `error` (lalu tetap `turn.completed` dengan `stop_reason: "error"`).
 
-## 10. Contacts & environments
+---
 
-- Test accounts: ask an admin (created via `/admin/users`). Do not use an admin account for UI testing.
-- API keys (`sg_…`) are for servers/n8n only — **do not** embed them in the frontend app.
-- Full specification of every endpoint: Part B (API reference) in this document.
+## 8. Catatan PWA
+
+- **Service worker:** jangan cache respons API, terutama SSE (`/messages`, `/stream`, `/jobs/*/events`) dan `/media/*` yang bertanda tangan. Cukup cache aset statis aplikasi.
+- **Proxy & timeout:** jawaban panjang bisa > 1 menit; server mengirim heartbeat `: ping` tiap 15 detik — abaikan.
+- **iOS Safari:** gunakan `fetch` streaming (didukung sejak iOS 15). `<video playsinline controls>` untuk hasil video.
+- **Notifikasi selesai video:** saat tab tertutup, tetap tampilkan dari `/jobs` ketika aplikasi dibuka lagi.
+- **CORS:** server sudah mengizinkan origin aplikasi (minta ditambah ke `CORS_ORIGINS` bila domain berubah).
+
+## 9. Catatan Flutter (nanti)
+
+- Token: `flutter_secure_storage`. HTTP: `dio` atau `http`.
+- SSE: kirim request dengan `Accept: text/event-stream`, baca `response.stream` lewat `utf8.decoder` + `LineSplitter`,
+  pisahkan frame di baris kosong; field `id:`, `event:`, `data:` sama persis seperti di web.
+- Video: `video_player` mendukung URL bertanda tangan + Range.
+
+## 10. Kontak & lingkungan
+
+- Akun uji: minta ke admin (dibuat via `/admin/users`). Jangan memakai akun admin untuk pengujian UI.
+- API key (`qr_…`) hanya untuk server/n8n — **jangan** ditanam di aplikasi frontend.
+- Spesifikasi lengkap setiap endpoint: Bagian B (API reference) di dokumen ini.

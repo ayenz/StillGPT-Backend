@@ -2,11 +2,11 @@ import { type Context, Hono } from 'hono';
 import type { ImageProvider } from '../../config.js';
 import type { AppContext } from '../../context.js';
 import { IMAGE_SIZES, type ImageSize, type MediaJobView, VIDEO_RATIOS, type VideoRatio, type VideoRequest, type VideoResolution } from '../../core/media.js';
-import type { StoredFile } from '../../core/storage.js';
 import { FOLAX_IMAGE_MODEL, IMAGE_MODEL, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, badRequest, notFound } from '../../errors.js';
 import { type Env, jsonBody, requireUser } from '../../http.js';
 import { assertUploadSize, formFiles, saveUpload } from '../native/util.js';
+import { serveFile } from '../serveFile.js';
 
 const MAX_N = 4;
 const MAX_EDIT_IMAGES = 3;
@@ -71,7 +71,7 @@ export function openaiMediaRoutes(ctx: AppContext) {
     if (variant !== 'video') throw notFound(`Variant '${variant}'`);
     const job = await videoJob(ctx, c);
     const file = await ctx.media.outputFile(job.id, c.get('user').id);
-    return sendFile(c, file, await ctx.store.read(file));
+    return serveFile(c, await ctx.store.original(file), { cacheControl: 'private, no-cache' });
   });
 
   app.delete('/videos/:id', async (c) => {
@@ -224,22 +224,3 @@ async function multipart(c: Context<Env>): Promise<Record<string, unknown>> {
     throw badRequest('Expected multipart/form-data', 'invalid_multipart');
   })) as Record<string, unknown>;
 }
-
-/** Bytes with HTTP Range support (video players seek with Range requests). */
-function sendFile(c: Context, file: StoredFile, bytes: Buffer) {
-  const headers: Record<string, string> = {
-    'Content-Type': file.mimeType,
-    'Accept-Ranges': 'bytes',
-    'Content-Disposition': `inline; filename="${encodeURIComponent(file.filename)}"`,
-  };
-  const range = c.req.header('range')?.match(/^bytes=(\d*)-(\d*)$/);
-  if (range && (range[1] || range[2])) {
-    const size = bytes.length;
-    const start = Math.max(0, range[1] ? Number(range[1]) : size - Number(range[2]));
-    const end = Math.min(range[1] && range[2] ? Number(range[2]) : size - 1, size - 1);
-    if (start > end) return c.body(null, 416, { 'Content-Range': `bytes */${size}` });
-    return c.body(new Uint8Array(bytes.subarray(start, end + 1)), 206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1) });
-  }
-  return c.body(new Uint8Array(bytes), 200, { ...headers, 'Content-Length': String(bytes.length) });
-}
-

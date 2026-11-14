@@ -1,6 +1,6 @@
-# StillGPT — Architecture
+# QodeRouter — Architecture
 
-StillGPT is a backend that turns **Qoder Cloud Agents** (stateful, agentic, async) into:
+QodeRouter is a backend that turns **Qoder Cloud Agents** (stateful, agentic, async) into:
 
 1. a **native API** for our own "personal LLM" apps (PWA first, Flutter later), and
 2. **OpenAI-compatible** and **Anthropic-compatible** endpoints (stateless) so existing tools — n8n, SDKs, 9router, LangChain — work unchanged.
@@ -37,7 +37,7 @@ See `docs/QODER_API_NOTES.md` for payload shapes. Key facts that drive the desig
 
 ## 2. Concepts
 
-| StillGPT | Qoder |
+| QodeRouter | Qoder |
 |---|---|
 | **User** (our account, JWT or API key) | — (all traffic uses one Qoder identity: PAT or Service Account) |
 | **Profile** (tool set) | one Qoder **Agent** per profile |
@@ -83,7 +83,8 @@ src/
     turns.ts               TurnRunner: run one turn on a conversation, emit TurnEvents, persist
     conversations.ts       create/get/list conversations; stateless-thread matching for compat APIs
     attachments.ts         turn input blocks (images/docs) into Qoder content/resources
-    storage.ts             local media store + HMAC signed URLs
+    storage.ts             local media store + HMAC signed URLs (expiry rounded to a day → stable, cacheable URLs)
+    variants.ts            gallery renditions: WebP thumb (400) / preview (1280) via sharp, video stills via ffmpeg
     media.ts               image + video jobs (background worker, resumable; Qoder or Folax for images)
     enhancer.ts            prompt enhancer (idea → detailed prompt + aspect ratio)
     webhooks.ts            outgoing webhooks (HMAC-signed), per-request callback_url
@@ -96,7 +97,8 @@ src/
     native/                /api/v1/*  (PWA, Flutter, n8n)
     openai/                /v1/chat/completions, /v1/models, /v1/images/*, /v1/videos*
     anthropic/             /v1/messages, /v1/messages/count_tokens
-    media.ts               GET /media/:id (signed URL)
+    media.ts               GET /media/:id (signed URL, streamed, Range/ETag, ?variant=thumb|preview)
+    serveFile.ts           streaming file responses (Range, If-None-Match → 304)
 test/
   mock-qoder/              fake Qoder Cloud Agents server (deterministic, scripted)
   e2e/                     end-to-end tests against the mock (official openai + anthropic SDKs as clients)
@@ -145,10 +147,10 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   - miss → new conversation; if `M` has earlier turns, send them as one transcript preamble plus the final message.
 - After the turn, store `threadKey(M + assistantReply)` → conversation, so the client's next call hits.
 - `system`/developer messages → session `agent.system` patch.
-- Explicit control for n8n etc.: header `X-StillGPT-Conversation: <conv_id>` (or `metadata.conversation_id`) forces a conversation;
-  header `X-StillGPT-Profile: chat|assistant` selects profile.
-- Response headers: `X-StillGPT-Conversation`, `X-StillGPT-Model` (resolved), `X-StillGPT-Credits`.
-- Token counts are not exposed by Qoder: `usage` tokens are estimates (chars/4) and we add `stillgpt.credits`.
+- Explicit control for n8n etc.: header `X-QodeRouter-Conversation: <conv_id>` (or `metadata.conversation_id`) forces a conversation;
+  header `X-QodeRouter-Profile: chat|assistant` selects profile.
+- Response headers: `X-QodeRouter-Conversation`, `X-QodeRouter-Model` (resolved), `X-QodeRouter-Credits`.
+- Token counts are not exposed by Qoder: `usage` tokens are estimates (chars/4) and we add `qoderouter.credits`.
 - Tool/function calling (`tools`): phase 2 — map to Qoder custom tools (`agent.custom_tool_use` ⇄ `user.custom_tool_result`). MVP returns 400 `tools_not_supported`.
 
 ## 6. Models (core/models.ts)
@@ -178,19 +180,20 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 - Videos are **jobs**: table `media_jobs` (status `queued|in_progress|completed|failed`, qoder session id, last event id, progress, result artifact, error, `callback_url`).
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).
+- Gallery renditions (`&variant=thumb|preview`, WebP) are rendered in the background on save and cached next to the original as `<file>.<variant>.v1.webp`; files saved before this existed are rendered on first request. Video stills need ffmpeg (`FFMPEG_PATH`, shipped in the Docker image); without it videos have `thumbnail_url: null`.
 
 ## 8. Webhooks / n8n (core/webhooks.ts)
 
 - Per-request `callback_url` on video/image jobs (works with n8n *Wait → On webhook call* using `$execution.resumeUrl`).
 - Per-user webhook endpoints (`/api/v1/webhooks`) for `video.completed`, `video.failed`, `image.completed`, `image.failed`; admins also get `model.*` and `provider.degraded`.
-- Delivery: POST JSON `{id, type, created_at, data}`, header `X-StillGPT-Signature: sha256=<hex HMAC(secret, raw body)>`, retries 1m/5m/30m.
+- Delivery: POST JSON `{id, type, created_at, data}`, header `X-QodeRouter-Signature: sha256=<hex HMAC(secret, raw body)>`, retries 1m/5m/30m.
 - n8n can also simply use the OpenAI credential type pointing at `https://<host>/v1` (Chat Model / OpenAI nodes).
 
 ## 9. Auth & users
 
 - Users: `email`, scrypt `password_hash`, `role admin|user`, `monthly_credit_limit` (null = unlimited). First admin from `ADMIN_EMAIL`/`ADMIN_PASSWORD`.
 - PWA: `POST /api/v1/auth/login` → `{access_token (JWT, 15 min), refresh_token (opaque, 30 d, stored hashed)}`; `/auth/refresh`, `/auth/logout`.
-- API keys `sg_<random>` (legacy `qr_` keys stay valid) (sha256 stored, shown once) for n8n/SDKs. Accepted as `Authorization: Bearer` or `x-api-key`.
+- API keys `qr_<random>` (sha256 stored, shown once) for n8n/SDKs. Accepted as `Authorization: Bearer` or `x-api-key`.
 - Every route resolves `c.get('user')`; admin routes require `role=admin`.
 
 ## 10. Errors
@@ -204,7 +207,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 ## 11. Config (env)
 
 `PORT`, `PUBLIC_BASE_URL`, `DATABASE_URL` (postgres://… or `pglite://<dir>` or `pglite://memory`), `QODER_BASE_URL`,
-`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
+`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `qoderouter`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),

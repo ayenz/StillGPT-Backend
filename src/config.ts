@@ -34,6 +34,8 @@ const schema = z
     MEDIA_DIR: z.string().default('./data/media'),
     MEDIA_SIGNING_SECRET: z.string().min(16).optional(),
     MEDIA_URL_TTL_SEC: z.coerce.number().int().default(7 * 24 * 3600),
+    /** ffmpeg binary for video thumbnails/posters. Set to an empty string to disable them. */
+    FFMPEG_PATH: z.string().default('ffmpeg'),
     ADMIN_EMAIL: z.string().email().optional(),
     ADMIN_PASSWORD: z.string().min(8).optional(),
     DEFAULT_PROFILE_NATIVE: profileName.default('assistant'),

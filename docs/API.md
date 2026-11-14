@@ -1,7 +1,7 @@
-# StillGPT API reference
+# QodeRouter API reference
 
 This is the reference for the **native API**: the API our own apps use (the PWA now, Flutter later) and that n8n can call.
-StillGPT also serves OpenAI- and Anthropic-compatible endpoints for existing tools; they are listed briefly in
+QodeRouter also serves OpenAI- and Anthropic-compatible endpoints for existing tools; they are listed briefly in
 [§13](#13-openai--and-anthropic-compatible-endpoints).
 
 - [1. Basics](#1-basics)
@@ -29,7 +29,7 @@ StillGPT also serves OpenAI- and Anthropic-compatible endpoints for existing too
 | Format | JSON in and out, **snake_case** field names, timestamps are ISO-8601 UTC strings |
 | Auth | `Authorization: Bearer <access_token or API key>` (the `x-api-key: <API key>` header also works) |
 | Errors | `{"error": {"code": "…", "message": "…"}}`, see [§11](#11-errors) |
-| CORS | Allowed origins are set by `CORS_ORIGINS` on the server. `Last-Event-ID` is an allowed request header. These response headers are exposed: `X-Request-Id`, `X-StillGPT-Conversation`, `X-StillGPT-Model`, `X-StillGPT-Credits` |
+| CORS | Allowed origins are set by `CORS_ORIGINS` on the server. `Last-Event-ID` is an allowed request header. These response headers are exposed: `X-Request-Id`, `X-QodeRouter-Conversation`, `X-QodeRouter-Model`, `X-QodeRouter-Credits` |
 | Request id | Every response has an `X-Request-Id` header. Include it in bug reports |
 
 IDs have a type prefix: `usr_…`, `conv_…`, `msg_…`, `file_…`, `img_…` / `vid_…` (jobs), `wh_…`, `key_…`.
@@ -46,7 +46,7 @@ There are two kinds of credentials:
 | Credential | Use it for | Lifetime |
 |---|---|---|
 | **Access token** (JWT) from `/auth/login` | Apps where a person signs in (PWA, Flutter) | 15 min (`expires_in` seconds), renewed with the refresh token |
-| **API key** `sg_…` from `/api-keys` | Server-to-server calls: n8n, scripts, SDKs | Valid until revoked |
+| **API key** `qr_…` from `/api-keys` | Server-to-server calls: n8n, scripts, SDKs | Valid until revoked |
 
 ### POST /auth/login
 ```json
@@ -85,7 +85,7 @@ and the response contains a new one, so always store the new one. If you reuse a
   Run only one refresh at a time: refresh tokens rotate, so two parallel refreshes would invalidate each other.
 - **Flutter:** keep the refresh token in `flutter_secure_storage` (Keychain or Keystore). Otherwise follow the same flow.
   `package:http` and `dio` both work. For SSE, read the streamed response body line by line (see §6).
-- **n8n / servers:** create an API key once with `POST /api-keys` and send it as `Authorization: Bearer sg_…`.
+- **n8n / servers:** create an API key once with `POST /api-keys` and send it as `Authorization: Bearer qr_…`.
   API keys skip the refresh flow.
 
 ---
@@ -219,7 +219,7 @@ Query: `?limit=100` (max 500) `&before=<message id>` for older pages. Messages c
 ```
 - While a turn is running, `running_turn` is `{message_id, user_message_id, events}`. To show the live reply, attach
   to `GET /conversations/:id/stream` (§6). The running turn's assistant message is stored only once the turn completes.
-- Each response comes with freshly signed `url`s (see §7), so re-fetch the list instead of caching URLs for weeks.
+- Each response comes with signed `url`s (plus `thumbnail_url` / `preview_url`, see §7), so re-fetch the list instead of caching URLs for weeks.
 - `stop_reason` is one of `end_turn`, `interrupted`, `budget_exceeded`, `requires_action` or `error`.
   When it is `error`, the `error` field is `{code, message}`.
 
@@ -254,7 +254,7 @@ There are two response modes.
                "model": "auto", "credits": 0.01, "stop_reason": "end_turn", "error": null, "created_at": "…" },
   "conversation": { "...": "conversation object" } }
 ```
-The response headers include `X-StillGPT-Conversation`, `X-StillGPT-Model` and `X-StillGPT-Credits`.
+The response headers include `X-QodeRouter-Conversation`, `X-QodeRouter-Model` and `X-QodeRouter-Credits`.
 A turn that fails upstream still returns `200`: the message has `stop_reason: "error"` and `error: {code, message}`.
 
 **B. Server-Sent Events.** Send `Accept: text/event-stream`, or add `?stream=true`. Each frame looks like this:
@@ -281,7 +281,7 @@ data: {"type":"text.delta","text":"Hel"}
 | `text.completed` | `{text}` | one finished text block. A reply can contain several, joined with a blank line |
 | `tool.started` | `{id, name, input}` | e.g. `WebSearch`, `Bash`, `ImageGen`, `VideoGen`, `DeliverArtifacts` |
 | `tool.completed` | `{id, is_error, output}` | `id` matches `tool.started`. `output` is truncated to 4000 characters |
-| `artifact` | `{artifact: {id, name, mime_type, size, kind, url}}` | a file produced by the agent. `kind` is `image`, `video`, `audio` or `file` |
+| `artifact` | `{artifact: {id, name, mime_type, size, kind, url, thumbnail_url, preview_url}}` | a file produced by the agent. `kind` is `image`, `video`, `audio` or `file` |
 | `usage` | `{credits: {model, sandbox, total}}` | credits used by this turn |
 | `error` | `{code, message, retryable}` | a turn-level error. `turn.completed` still follows |
 | `conversation.title` | `{conversation_id, title}` | only on the first turn of an untitled conversation: the auto-generated title (update the sidebar) |
@@ -303,7 +303,7 @@ data: {"type":"text.delta","text":"Halo"}
 
 id: 4
 event: text.completed
-data: {"type":"text.completed","text":"Hi! How can I help you?"}
+data: {"type":"text.completed","text":"Halo! Ada yang bisa saya bantu?"}
 
 id: 5
 event: usage
@@ -311,7 +311,7 @@ data: {"type":"usage","credits":{"model":0.01,"sandbox":0,"total":0.01}}
 
 id: 6
 event: turn.completed
-data: {"type":"turn.completed","message_id":"msg_…","stop_reason":"end_turn","text":"Hi! How can I help you?","artifacts":[],"credits":{"model":0.01,"sandbox":0,"total":0.01}}
+data: {"type":"turn.completed","message_id":"msg_…","stop_reason":"end_turn","text":"Halo! Ada yang bisa saya bantu?","artifacts":[],"credits":{"model":0.01,"sandbox":0,"total":0.01}}
 ```
 
 **Consuming the stream.** Browser `EventSource` cannot send POST requests or an `Authorization` header. Use `fetch` and
@@ -352,12 +352,14 @@ curl -H "Authorization: Bearer $TOKEN" -F file=@report.pdf https://<host>/api/v1
 → `201`
 ```json
 { "id": "file_…", "filename": "report.pdf", "mime_type": "application/pdf", "size": 182044,
-  "kind": "upload", "url": "https://<host>/media/file_…?exp=…&sig=…", "created_at": "…" }
+  "kind": "upload", "url": "https://<host>/media/file_…?exp=…&sig=…",
+  "thumbnail_url": null, "preview_url": null, "created_at": "…" }
 ```
+For images and videos `thumbnail_url` and `preview_url` are set (see "Thumbnails and previews" below).
 If the client sends `application/octet-stream`, the server works out the type from the file extension.
 
 ### GET /files/:id
-Returns the same object with a fresh `url`. You can only see your own files.
+Returns the same object with a signed `url`. You can only see your own files.
 
 ### Attachment limits (enforced when the message is sent)
 - **Images** (vision input): up to 7 MB each. PNG, JPEG, WebP and GIF are shown to the model directly.
@@ -370,10 +372,31 @@ Returns the same object with a fresh `url`. You can only see your own files.
 Every `url` (uploads, artifacts, job outputs) looks like `/media/<file_id>?exp=<unix>&sig=<hmac>`.
 - It needs **no auth header**, so it works directly in `<img src>`, `<video src>`, `<a download>` and Flutter
   `Image.network` / `video_player`.
-- It is valid for 7 days by default (`MEDIA_URL_TTL_SEC`). Re-fetch the owning object to get a fresh URL.
-- It supports HTTP `Range` (`206 Partial Content`), which video seeking on iOS and Safari needs.
+- It is valid for at least 7 days (`MEDIA_URL_TTL_SEC`). The expiry is rounded up to a day boundary, so the same file
+  gets the **same URL for a whole day**: the browser cache hits on every reload. Re-fetch the owning object to get a
+  fresh URL.
+- Responses carry `Cache-Control: private, max-age=<seconds until exp>, immutable` and an `ETag`
+  (`If-None-Match` → `304`). Stored files never change.
+- Files are streamed from disk, with HTTP `Range` support (`206 Partial Content`), which video seeking on iOS and Safari needs.
 - Add `&download=1` to make browsers download the file instead of showing it.
 - An expired or tampered URL returns `403 invalid_signature`.
+
+### Thumbnails and previews
+Every object with a media `url` (files, message image/file blocks, artifacts, job `outputs`) also has:
+
+| Field | What | Use for |
+|---|---|---|
+| `thumbnail_url` | WebP that fits 400×400 px | gallery grid tiles, chat bubbles |
+| `preview_url` | WebP that fits 1280×1280 px | lightbox / detail view |
+
+- They are the signed `url` plus `&variant=thumb` or `&variant=preview`. Small images are never upscaled.
+- For **videos** both are a **still frame** (a poster image), not a video. Use `preview_url` as `<video poster>`.
+- `null` for files without renditions: documents, audio, SVG, and videos when the server has no ffmpeg.
+- Renditions are made in the background on upload/generation and cached on disk, so usually the first request is
+  already fast. Older files are rendered on their first request.
+- If an image can't be decoded, the variant URL returns the original image. A video whose frame can't be extracted
+  returns `404 variant_unavailable`, so handle `onError` on the tile.
+- Unknown `variant` → `400 validation_error`.
 
 ---
 
@@ -387,7 +410,9 @@ Images and videos are **jobs**. Every endpoint returns the same job object:
                "ratio": "16:9", "audio": true, "first_frame_file_id": null, "last_frame_file_id": null,
                "reference_file_ids": [] },
   "outputs": [{ "id": "file_…", "name": "waves.mp4", "mime_type": "video/mp4", "size": 10069783, "kind": "video",
-                "url": "https://<host>/media/file_…?exp=…&sig=…" }],
+                "url": "https://<host>/media/file_…?exp=…&sig=…",
+                "thumbnail_url": "https://<host>/media/file_…?exp=…&sig=…&variant=thumb",
+                "preview_url": "https://<host>/media/file_…?exp=…&sig=…&variant=preview" }],
   "error": null, "credits": 0.21, "created_at": "…", "completed_at": "…"
 }
 ```
@@ -538,9 +563,9 @@ These events can be subscribed to:
 ```
 POST <your url>
 Content-Type: application/json
-X-StillGPT-Event: video.completed
-X-StillGPT-Delivery: whd_…
-X-StillGPT-Signature: sha256=<hex HMAC-SHA256(secret, raw body)>
+X-QodeRouter-Event: video.completed
+X-QodeRouter-Delivery: whd_…
+X-QodeRouter-Signature: sha256=<hex HMAC-SHA256(secret, raw body)>
 
 {"id":"evt_…","type":"video.completed","created_at":"2026-11-14T10:00:00.000Z","data":{"job":{ …job object… }}}
 ```
@@ -550,16 +575,16 @@ X-StillGPT-Signature: sha256=<hex HMAC-SHA256(secret, raw body)>
   through the Qoder fallback meanwhile.
 - Reply with any `2xx` within **10 s**.
 - Failed deliveries are retried after 1 min, 5 min and 30 min, then marked failed.
-- Deliveries can arrive more than once, so de-duplicate on `X-StillGPT-Delivery`.
+- Deliveries can arrive more than once, so de-duplicate on `X-QodeRouter-Delivery`.
 - Verify the signature over the **raw** body, before you parse the JSON:
   ```js
   const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-  const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers['x-stillgpt-signature']));
+  const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers['x-qoderouter-signature']));
   ```
 
 ### Per-request `callback_url`
 `POST /images` and `POST /videos` (and `/v1/videos`) accept `callback_url`. When the job finishes, the server POSTs the
-same payload there, using the same headers and retries, but **without** `X-StillGPT-Signature`. This is meant for
+same payload there, using the same headers and retries, but **without** `X-QodeRouter-Signature`. This is meant for
 one-off resume URLs such as the n8n Wait node.
 
 ---
@@ -640,8 +665,8 @@ Latencies observed (model `efficient`):
 
 ## 13. OpenAI- and Anthropic-compatible endpoints
 
-These endpoints are for existing tools and SDKs. Point a client's base URL at `https://<host>/v1` and use a StillGPT
-API key. They are stateless: the client sends the whole history each time, and StillGPT maps it onto a server-side
+These endpoints are for existing tools and SDKs. Point a client's base URL at `https://<host>/v1` and use a QodeRouter
+API key. They are stateless: the client sends the whole history each time, and QodeRouter maps it onto a server-side
 conversation. Errors use each provider's own envelope.
 
 | Endpoint | Notes |
@@ -650,37 +675,37 @@ conversation. Errors use each provider's own envelope.
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
-| `POST /v1/images/generations` | `{prompt, model?, n? (1–4), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). One Folax call yields 2 images; StillGPT calls again when `n` needs more and returns exactly `n` |
+| `POST /v1/images/generations` | `{prompt, model?, n? (1–4), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). One Folax call yields 2 images; QodeRouter calls again when `n` needs more and returns exactly `n` |
 | `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Always Qoder (`folax-image` → `400`) |
-| `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url` |
+| `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). QodeRouter extras: `resolution`, `ratio`, `audio`, `callback_url` |
 | `GET /v1/videos`, `GET /v1/videos/:id` | video object `{id, object: "video", model, status, progress, created_at, completed_at, seconds, size, error}` (unix seconds) |
 | `GET /v1/videos/:id/content` | the MP4 bytes, with `Range` support. Returns `409 job_not_completed` until the video is ready |
 | `DELETE /v1/videos/:id` | `501 not_supported` |
 
 The video ids from `/v1/videos` are the same job ids used by `/api/v1/jobs/:id`.
 
-Response headers on compat calls: `X-StillGPT-Conversation`, `X-StillGPT-Model` and `X-StillGPT-Credits`.
-To pin a stateless client to one conversation, send `X-StillGPT-Conversation: conv_…`. To choose the tool set, send
-`X-StillGPT-Profile: chat|assistant`. The OpenAI/Anthropic documentation covers the full details.
+Response headers on compat calls: `X-QodeRouter-Conversation`, `X-QodeRouter-Model` and `X-QodeRouter-Credits`.
+To pin a stateless client to one conversation, send `X-QodeRouter-Conversation: conv_…`. To choose the tool set, send
+`X-QodeRouter-Profile: chat|assistant`. The OpenAI/Anthropic documentation covers the full details.
 
 ---
 
 ## 14. n8n recipes
 
 ### Chat, using the built-in OpenAI nodes
-1. Create a StillGPT API key: `POST /api/v1/api-keys {"name":"n8n"}`.
-2. In n8n, add an **OpenAI** credential. Set API Key to `sg_…` and Base URL to `https://<host>/v1`.
+1. Create a QodeRouter API key: `POST /api/v1/api-keys {"name":"n8n"}`.
+2. In n8n, add an **OpenAI** credential. Set API Key to `qr_…` and Base URL to `https://<host>/v1`.
 3. Use the *OpenAI Chat Model* node (AI Agent / LLM chains) or the *OpenAI → Message a model* node. For the model, pick
    `smart`, `fast`, `cheap`, `default` or any `qoder/<id>`.
 4. Images: *OpenAI → Generate an image*, with the model set to `qoder-image`.
 
 ### Video, using HTTP Request and the Wait node (no polling)
-1. **HTTP Request** node: `POST https://<host>/api/v1/videos`. Header: `Authorization: Bearer sg_…`. JSON body:
+1. **HTTP Request** node: `POST https://<host>/api/v1/videos`. Header: `Authorization: Bearer qr_…`. JSON body:
    ```json
    { "prompt": "{{ $json.prompt }}", "seconds": 5, "ratio": "9:16", "callback_url": "{{ $execution.resumeUrl }}" }
    ```
 2. **Wait** node, set to *Resume: On Webhook Call*, with HTTP method `POST`. Give it a timeout of 40 min or more.
-3. When the video is done, StillGPT POSTs `{type: "video.completed", data: {job}}` to the resume URL. The next node
+3. When the video is done, QodeRouter POSTs `{type: "video.completed", data: {job}}` to the resume URL. The next node
    reads `{{ $json.body.data.job.outputs[0].url }}`. That signed URL needs no auth, so an *HTTP Request* node set to
    *Response Format: File* can download it.
 4. Check `{{ $json.body.type }}`: it is `video.failed` when generation failed (see `data.job.error`).
@@ -689,5 +714,5 @@ Polling also works: loop over `GET /api/v1/jobs/{{id}}` with a Wait of 15 s unti
 
 ### Long-lived events
 For events that are not tied to a single workflow run (all `video.completed` events, or the `model.*` changes for
-admins), register a *Webhook* trigger URL with `POST /api/v1/webhooks`. Verify `X-StillGPT-Signature` in a Code node
+admins), register a *Webhook* trigger URL with `POST /api/v1/webhooks`. Verify `X-QodeRouter-Signature` in a Code node
 if the URL is public.

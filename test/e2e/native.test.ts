@@ -227,7 +227,14 @@ describe('files and attachments', () => {
     const msgs = await json(await h.api(`/api/v1/conversations/${conv.id}/messages`));
     expect(msgs.body.data[0].content).toEqual([
       { type: 'text', text: 'apa ini?' },
-      { type: 'image', file_id: png.id, mime_type: 'image/png', url: expect.stringContaining(`/media/${png.id}?`) },
+      {
+        type: 'image',
+        file_id: png.id,
+        mime_type: 'image/png',
+        url: expect.stringContaining(`/media/${png.id}?`),
+        thumbnail_url: expect.stringContaining('&variant=thumb'),
+        preview_url: expect.stringContaining('&variant=preview'),
+      },
     ]);
 
     const missing = await json(await h.api(`/api/v1/conversations/${conv.id}/messages`, { method: 'POST', json: { text: 'x', attachments: ['file_nope'] } }));

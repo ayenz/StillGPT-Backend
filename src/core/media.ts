@@ -80,7 +80,17 @@ export const jobTopic = (id: string) => `job:${id}`;
 
 /** Wire JSON of a job (native API, SSE, webhooks): like MediaJobView with snake_case output fields. */
 export function mediaJobJson(v: MediaJobView) {
-  return { ...v, outputs: v.outputs.map((a) => ({ id: a.id, name: a.name, mime_type: a.mimeType, size: a.size, kind: a.kind, url: a.url })) };
+  return { ...v, outputs: v.outputs.map((a) => ({
+      id: a.id,
+      name: a.name,
+      mime_type: a.mimeType,
+      size: a.size,
+      kind: a.kind,
+      url: a.url,
+      thumbnail_url: a.thumbnailUrl ?? null,
+      preview_url: a.previewUrl ?? null,
+    })),
+  };
 }
 export type MediaJobJson = ReturnType<typeof mediaJobJson>;
 export const isTerminal = (status: MediaJob['status']) => status === 'completed' || status === 'failed';
