@@ -242,6 +242,22 @@ describe('files and attachments', () => {
     expect(missing.body.error.code).toBe('file_not_found');
   });
 
+  it('mounts chat images into the sandbox for tool profiles so tools can use them as files', async () => {
+    const png = await upload('wajah.png', makePng(), 'image/png');
+    const mounted = () => [...h.qoder.state.sessions.values()].flatMap((s) => s.resources.map((r) => r.mount_path));
+
+    const before = mounted().length;
+    const chat = await newConversation();
+    expect((await h.api(`/api/v1/conversations/${chat.id}/messages`, { method: 'POST', json: { text: 'lihat', attachments: [png.id] } })).status).toBe(200);
+    expect(mounted().length).toBe(before);
+
+    const conv = await newConversation({ profile: 'assistant' });
+    const r = await json(await h.api(`/api/v1/conversations/${conv.id}/messages`, { method: 'POST', json: { text: 'tambahin orang ini', attachments: [png.id] } }));
+    expect(r.status).toBe(200);
+    expect(r.body.message.content[0].text).toContain('(saw 1 image(s))');
+    expect(mounted()).toContain('/data/attachments/wajah.png');
+  });
+
   it('rejects uploads over 20 MB and requests without a file', async () => {
     const big = new FormData();
     big.append('file', new Blob([new Uint8Array(21 * 1024 * 1024)]), 'big.bin');

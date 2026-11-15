@@ -24,11 +24,18 @@ export interface PreparedInput {
  * Images go inline (base64) or via Qoder file id when large; documents are uploaded and mounted
  * under /data/attachments/ with a text note telling the agent where they are.
  */
-export async function prepareInput(blocks: ContentBlock[], store: MediaStore, qoder: QoderClient, userId: string): Promise<PreparedInput> {
+export async function prepareInput(
+  blocks: ContentBlock[],
+  store: MediaStore,
+  qoder: QoderClient,
+  userId: string,
+  opts: { mountImages?: boolean } = {},
+): Promise<PreparedInput> {
   const content: QoderContentBlock[] = [];
   const mounts: PreparedInput['mounts'] = [];
   const notes: string[] = [];
   const usedPaths = new Set<string>();
+  let hasDocuments = false;
 
   for (const block of blocks) {
     if (block.type === 'text') {
@@ -43,9 +50,16 @@ export async function prepareInput(blocks: ContentBlock[], store: MediaStore, qo
       } else {
         content.push({ type: 'image', source: { type: 'file', file_id: await ensureUploaded(file, store, qoder) } });
       }
+      // Vision input only lets the model *see* the image; tools (ImageGen edits, Read, Bash) need a real file.
+      if (opts.mountImages && file.size <= UPLOAD_MAX) {
+        const mountPath = uniquePath(`${ATTACHMENT_DIR}/${file.filename}`, usedPaths);
+        mounts.push({ qoderFileId: await ensureUploaded(file, store, qoder), mountPath });
+        notes.push(`- ${mountPath} (${file.mimeType}, ${file.size} bytes; the image shown above)`);
+      }
       continue;
     }
     // documents (and images in formats the vision input does not accept) → sandbox files
+    hasDocuments = true;
     const mountPath = uniquePath(`${ATTACHMENT_DIR}/${file.filename}`, usedPaths);
     mounts.push({ qoderFileId: await ensureUploaded(file, store, qoder), mountPath });
     notes.push(`- ${mountPath} (${file.mimeType}, ${file.size} bytes)`);
@@ -55,7 +69,7 @@ export async function prepareInput(blocks: ContentBlock[], store: MediaStore, qo
     content.unshift({ type: 'text', text: `[Attached files available in your sandbox]\n${notes.join('\n')}` });
   }
   if (!content.some((b) => b.type === 'text' || b.type === 'image')) throw new AppError(400, 'empty_message', 'Message has no content');
-  return { content, mounts, hasDocuments: mounts.length > 0 };
+  return { content, mounts, hasDocuments };
 }
 
 async function ensureUploaded(file: StoredFile, store: MediaStore, qoder: QoderClient): Promise<string> {

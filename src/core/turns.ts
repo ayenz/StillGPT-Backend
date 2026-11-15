@@ -213,7 +213,8 @@ export class TurnRunner {
     const timer = setTimeout(() => timeout.abort(), TURN_TIMEOUT_MS);
 
     try {
-      const input = await prepareInput(req.content, this.d.store, this.d.qoder, req.userId);
+      const profileTools = (PROFILES[conv.profile as ProfileName] ?? PROFILES.chat).tools;
+      const input = await prepareInput(req.content, this.d.store, this.d.qoder, req.userId, { mountImages: profileTools.length > 0 });
       let preamble = req.preamble;
 
       for (let attempt = 0; ; attempt++) {
