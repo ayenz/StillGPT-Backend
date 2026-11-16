@@ -33,7 +33,7 @@ describe('PromptEnhancer', () => {
     expect(r.prompt).toMatch(/plus-size/);
     expect(r.aspect_ratio).toBe('3:4');
     expect(r.size).toBe('768x1024');
-    expect(r.model).toBe('kmodel_latest'); // `enhancer` alias: kmodel is not in the mock catalogue → next in chain
+    expect(r.model).toBe('kmodel_latest'); // `enhancer` alias: qmodel_latest/gmodel/dmodel are not in the mock catalogue → next in chain
     // the instructions carry the commercial/body-type guidance and the idea verbatim
     expect(seen).toMatch(/plus-size model with a curvy, full-figured silhouette/);
     expect(seen).toContain('Diskon 50%');

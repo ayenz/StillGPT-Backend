@@ -6,8 +6,8 @@ const DEFAULT_ALIASES: Record<string, string[]> = {
   fast: ['fast', 'qfmodel', 'efficient'],
   cheap: ['efficient', 'qfmodel', 'dfmodel'],
   vision: ['auto', 'efficient'],
-  // prompt enhancer: Kimi-K3.1-Pro first (quality > latency here), Qwen4-Max-Preview as fast fallback — same as the n8n bot
-  enhancer: ['kmodel_latest', 'qmodel_latest', 'kmodel', 'auto', 'efficient'],
+  // prompt enhancer: Qwen4-Max-Preview (~8 s, prompts as rich as Kimi-K3.1-Pro, which took ~27 s), then GLM-5.3 / DeepSeek-V4-Pro (~5 s)
+  enhancer: ['qmodel_latest', 'gmodel', 'dmodel', 'kmodel_latest', 'auto', 'efficient'],
   // auto chat titles: fastest models first (DeepSeek-V4 Flash ~2 s, Qwen fast)
   titler: ['dfmodel', 'qfmodel', 'fast', 'efficient'],
 };

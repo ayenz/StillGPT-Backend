@@ -434,12 +434,12 @@ suggests a shape for it. Takes 2–10 s and a few credits (one chat turn on the 
 | `model` | string | `enhancer` | model alias or id for the rewrite; omit to use our default |
 
 **Model picker (optional UI):** fill a dropdown from `GET /api/v1/models` (`aliases` + `models`) and send the chosen id as
-`model`. Leave it unset by default — the `enhancer` alias is chosen server-side (currently Kimi-K3.1-Pro, falling back to
-Qwen4-Max-Preview) and can change without a frontend release. The response's `model` field tells which model actually ran.
+`model`. Leave it unset by default — the `enhancer` alias is chosen server-side (currently Qwen4-Max-Preview, ~8 s, falling back to
+GLM-5.3 / DeepSeek-V4-Pro) and can change without a frontend release. The response's `model` field tells which model actually ran.
 
 ```json
 { "prompt": "A vertical phone wallpaper of a neon Jakarta skyline at night, …", "original": "wallpaper hp jakarta malam",
-  "kind": "image", "aspect_ratio": "9:16", "size": "1024x1792", "enhanced": true, "model": "kmodel_latest", "credits": 0.01 }
+  "kind": "image", "aspect_ratio": "9:16", "size": "1024x1792", "enhanced": true, "model": "qmodel_latest", "credits": 0.01 }
 ```
 - Images get `size` (an allowed `POST /images` size); videos get `ratio` and `seconds` instead.
 - If the model's reply cannot be used, the response is still `200` with `enhanced: false` and the **original** prompt,
