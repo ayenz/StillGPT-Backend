@@ -171,7 +171,7 @@ Perilaku UI yang diminta:
 
 Prompt boleh bahasa Indonesia; hasil enhance selalu bahasa Inggris. Untuk konten promosi (mis. baju ukuran besar),
 isi `purpose` (`"poster"`, `"fashion catalog"`) — enhancer akan memakai istilah industri fashion sehingga generator
-gambar lebih jarang menolak. Field `model` opsional: biarkan kosong untuk default server (saat ini Kimi-K3.1-Pro).
+gambar lebih jarang menolak. Field `model` opsional: biarkan kosong untuk default server (saat ini Qwen4-Max-Preview, ~5–8 detik).
 
 ### 5.2 Generate gambar
 ```
