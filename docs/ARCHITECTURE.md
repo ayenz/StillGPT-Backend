@@ -192,8 +192,12 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 ### Qoder housekeeping (core/housekeeping.ts)
 
 - Qoder keeps every upload and agent-produced file (ImageGen intermediates included) until deleted, but we already hold local
-  copies of everything we use. Once at boot (+60 s) and then every `QODER_HOUSEKEEPING_INTERVAL_HOURS` (default 24):
-  1. archive our sessions (agent name `qr-*`) idle longer than `QODER_RETENTION_HOURS` (default 24) and not busy locally; their
+  copies of everything we use. Settings `{enabled, retentionHours, intervalHours}` live in `kv` (`housekeeping.settings`), edited via
+  `GET|PATCH /admin/housekeeping`; until an admin saves, the env defaults apply (`QODER_RETENTION_HOURS`, default 24;
+  `QODER_HOUSEKEEPING_INTERVAL_HOURS`, default 24, `0` = disabled). The scheduler ticks 60 s after boot and then every 10 min, and runs
+  a pass when enabled and `intervalHours` have passed since `kv.housekeeping.last_run` (so restarts don't reset the clock).
+  `POST /admin/housekeeping/run` runs one now (`dry_run` = report only). A pass:
+  1. archive our sessions (agent name `qr-*`) idle longer than the retention and not busy locally; their
      conversations drop `qoder_session_id`, so the next message opens a new session with the history preamble;
   2. `DELETE /files/{id}` for our files older than the window: session-scoped files of our sessions, plus unscoped uploads we know
      (`files.qoder_file_id`). Qoder answers **409** while a live session mounts a file, so in-use files are skipped. Deleted ids are
@@ -222,7 +226,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `PORT`, `PUBLIC_BASE_URL`, `DATABASE_URL` (postgres://… or `pglite://<dir>` or `pglite://memory`), `QODER_BASE_URL`,
 `QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `qoderouter`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
-`MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping, default 24 / 24), `CORS_ORIGINS`,
+`MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),
 `AUTO_TITLE=true` + `AUTO_TITLE_WAIT_MS=5000` (ChatGPT-style chat titles, `core/titler.ts`, model alias `titler`;

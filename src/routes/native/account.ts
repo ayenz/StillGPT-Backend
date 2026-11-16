@@ -2,9 +2,10 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { verifyPassword } from '../../auth/auth.js';
 import type { AppContext } from '../../context.js';
+import { type HousekeepingReport, type HousekeepingStatus, INTERVAL_HOURS_MAX, RETENTION_HOURS_MAX } from '../../core/housekeeping.js';
 import { badRequest, unauthorized } from '../../errors.js';
 import type { Env } from '../../http.js';
-import { body, userView } from './util.js';
+import { body, parse, userView } from './util.js';
 
 const PASSWORD = z.string().min(8, 'password must be at least 8 characters').max(200);
 
@@ -140,5 +141,65 @@ export function adminRoutes(ctx: AppContext) {
     });
   });
 
+  app.get('/admin/housekeeping', async (c) => c.json(housekeepingView(await ctx.housekeeper.status())));
+
+  app.patch('/admin/housekeeping', async (c) => {
+    const b = await body(
+      c,
+      z
+        .object({
+          enabled: z.boolean().optional(),
+          retention_hours: z.number().int().min(1).max(RETENTION_HOURS_MAX).optional(),
+          interval_hours: z.number().int().min(1).max(INTERVAL_HOURS_MAX).optional(),
+        })
+        .strict(),
+    );
+    const status = await ctx.housekeeper.updateSettings({ enabled: b.enabled, retentionHours: b.retention_hours, intervalHours: b.interval_hours });
+    return c.json(housekeepingView(status));
+  });
+
+  /** Run a pass now. `dry_run: true` only reports what it would do; `retention_hours` previews another window. */
+  app.post('/admin/housekeeping/run', async (c) => {
+    const raw = (await c.req.text()).trim();
+    let input: unknown = {};
+    try {
+      if (raw) input = JSON.parse(raw);
+    } catch {
+      throw badRequest('Request body must be valid JSON', 'invalid_json');
+    }
+    const b = parse(z.object({ dry_run: z.boolean().default(false), retention_hours: z.number().int().min(1).max(RETENTION_HOURS_MAX).optional() }).strict(), input);
+    const report = await ctx.housekeeper.run({ dryRun: b.dry_run, retentionHours: b.retention_hours, trigger: 'manual' });
+    return c.json({ report: reportView(report), ...housekeepingView(await ctx.housekeeper.status()) });
+  });
+
   return app;
+}
+
+function reportView(r: HousekeepingReport) {
+  return {
+    dry_run: r.dryRun,
+    sessions_archived: r.sessionsArchived,
+    files_deleted: r.filesDeleted,
+    files_in_use: r.filesInUse,
+    bytes_freed: r.bytesFreed,
+    errors: r.errors,
+  };
+}
+
+function housekeepingView(s: HousekeepingStatus) {
+  return {
+    settings: { enabled: s.settings.enabled, retention_hours: s.settings.retentionHours, interval_hours: s.settings.intervalHours },
+    source: s.source,
+    running: s.running,
+    next_run_at: s.nextRunAt,
+    last_run: s.lastRun
+      ? {
+          at: s.lastRun.at,
+          trigger: s.lastRun.trigger,
+          retention_hours: s.lastRun.retentionHours,
+          report: s.lastRun.report ? reportView(s.lastRun.report) : null,
+          error: s.lastRun.error ?? null,
+        }
+      : null,
+  };
 }

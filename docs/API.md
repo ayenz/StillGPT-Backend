@@ -603,6 +603,26 @@ These endpoints need `role: "admin"`. Other users get `403 forbidden`.
 An admin cannot demote or disable their own account (`400 cannot_modify_self`).
 A disabled user cannot log in, and their tokens and keys return `403 account_disabled`.
 
+### Qoder housekeeping
+
+Every upload and generated file is kept on our server, so the copies on Qoder can be cleaned up. A housekeeping pass archives
+Qoder sessions that have been idle longer than `retention_hours` and deletes our Qoder files older than that. Files that a live
+session still uses are skipped. A conversation whose session was archived keeps working: the next message opens a new session
+with the chat history, but images from earlier turns have to be attached again before the agent can edit them.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/admin/housekeeping` | – | `{settings, source, running, next_run_at, last_run}` |
+| PATCH | `/admin/housekeeping` | any of `{enabled, retention_hours, interval_hours}` | same as GET |
+| POST | `/admin/housekeeping/run` | optional `{dry_run = false, retention_hours?}` | `{report}` + same as GET |
+
+- `settings`: `{enabled: boolean, retention_hours: 1–8760, interval_hours: 1–720}`. Examples: 168 = one week, 720 = 30 days.
+- `source`: `"env"` until an admin saves settings (defaults from `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS`), then `"admin"`.
+- `next_run_at`: when the next automatic pass is due (`null` when disabled). The scheduler checks every 10 minutes.
+- `last_run`: `null` or `{at, trigger: "schedule"|"manual", retention_hours, report, error}`. Dry runs are not recorded.
+- `report`: `{dry_run, sessions_archived, files_deleted, files_in_use, bytes_freed, errors}`.
+- `dry_run: true` changes nothing and returns what a pass would do. Add `retention_hours` to preview another window before saving it.
+
 ---
 
 ## 11. Errors

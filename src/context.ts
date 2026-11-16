@@ -76,8 +76,12 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     db,
     qoder,
     log: log.child({ mod: 'housekeeping' }),
-    retentionHours: config.QODER_RETENTION_HOURS,
-    intervalHours: config.QODER_HOUSEKEEPING_INTERVAL_HOURS,
+    // Env values are defaults until an admin saves settings (PATCH /admin/housekeeping).
+    defaults: {
+      enabled: config.QODER_HOUSEKEEPING_INTERVAL_HOURS > 0,
+      retentionHours: config.QODER_RETENTION_HOURS,
+      intervalHours: config.QODER_HOUSEKEEPING_INTERVAL_HOURS > 0 ? config.QODER_HOUSEKEEPING_INTERVAL_HOURS : 24,
+    },
   });
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }) });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
