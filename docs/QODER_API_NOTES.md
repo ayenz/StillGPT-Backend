@@ -98,6 +98,10 @@ Other: `session.error {"error":{"type","message"}}`, `session.status_terminated`
 `{"id":"file_…","type":"file","filename":"a.pdf","size_bytes":925,"mime_type":"application/pdf","downloadable":false,"scope":null,"created_at":…}`
 `GET /files/{id}` → same object (+`metadata`, `scope` for artifacts: `{"id":"sess_…","type":"session"}`, `downloadable:true`).
 `GET /files/{id}/content` → `{"url":"https://…presigned…","expires_at":"…"}` (403 if not downloadable).
+`GET /files?limit=&after_id=` → list (uploads have `scope:null`; agent files have `metadata.source` `DeliverArtifacts` or `imagegen`).
+`DELETE /files/{id}` → `{"id":"file_…","type":"file_deleted"}`; **409** `invalid_request_error` "File is referenced by an active session
+and cannot be deleted." (+`referenced_session_ids`) while a non-archived session mounts it. Archiving the session releases it.
+`POST /sessions/{id}/archive` → session with `status:"terminated"`, `archived_at` set.
 `POST /sessions/{id}/resources {"type":"file","file_id":"file_…","mount_path":"/data/x.pdf"}` → `{"id":"sesr_…",…}`.
 
 ## ImageGen / VideoGen tool inputs (as the agent calls them)

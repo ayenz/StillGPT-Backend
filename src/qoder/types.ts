@@ -52,6 +52,11 @@ export interface QoderSession {
   };
   environment_id: string;
   stats?: { active_seconds?: number; duration_seconds?: number };
+  title?: string | null;
+  metadata?: Record<string, string>;
+  archived_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface QoderFile {
@@ -60,6 +65,9 @@ export interface QoderFile {
   size_bytes: number;
   mime_type: string;
   downloadable: boolean;
+  created_at?: string;
+  /** Agent-produced files are scoped to the session that made them; our uploads have no scope. */
+  scope?: { id: string; type: string } | null;
 }
 
 export type QoderImageSource =

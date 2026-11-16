@@ -75,7 +75,7 @@ export class ConversationTitler {
         title: 'conversation titler',
         metadata: { hidden: true, purpose: 'conversation_titler', for: conversationId },
       });
-      const handle = await this.d.turns.start({ conversationId: conv.id, userId, content: [{ type: 'text', text: instructions(source) }] });
+      const handle = await this.d.turns.start({ conversationId: conv.id, userId, content: [{ type: 'text', text: instructions(source) }], oneShot: true });
       const result = await handle.done;
       const title = result.stopReason === 'error' ? null : cleanTitle(result.text);
       if (!title) {

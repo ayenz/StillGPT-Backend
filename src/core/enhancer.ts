@@ -128,6 +128,7 @@ export class PromptEnhancer {
     const handle = await this.d.turns.start({
       conversationId: conv.id,
       userId: req.userId,
+      oneShot: true,
       content: [{ type: 'text', text: `${instructions(kind, req.purpose, req.style)}\n\n<idea>\n${original}\n</idea>` }],
     });
     const result = await handle.done;

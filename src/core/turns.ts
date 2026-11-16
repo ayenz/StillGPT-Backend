@@ -32,6 +32,11 @@ export interface StartTurn {
   kind?: 'chat' | 'image' | 'video';
   jobId?: string;
   /**
+   * The conversation is used for this single turn only (titler, enhancer, media jobs): its Qoder session is archived
+   * as soon as the turn ends instead of lingering until housekeeping.
+   */
+  oneShot?: boolean;
+  /**
    * Awaited after the result is persisted and before `turn.completed` is emitted (e.g. compat thread bookkeeping).
    * Events it returns are emitted right before `turn.completed` (e.g. `conversation.title`).
    */
@@ -276,6 +281,28 @@ export class TurnRunner {
     for (const e of extra) emit(e);
     emit({ type: 'turn.completed', messageId: handle.messageId, stopReason, text, artifacts: st.artifacts, credits });
     handle.finish(result);
+    if (req.oneShot) void this.releaseSession(conv.id);
+  }
+
+  /**
+   * Detach and archive the conversation's Qoder session (one-shot turns, deleted conversations). Archiving also stops
+   * a session that is still running, so nothing keeps working (or billing) for a result nobody will read. Never throws.
+   */
+  async releaseSession(conversationId: string): Promise<void> {
+    try {
+      const [row] = await this.d.db
+        .select({ sid: conversations.qoderSessionId })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId));
+      const sid = row?.sid;
+      if (!sid) return;
+      await this.d.db.update(conversations).set({ qoderSessionId: null, lastEventId: null }).where(eq(conversations.id, conversationId));
+      await this.d.qoder.archiveSession(sid);
+      this.d.log.debug('turn.session_released', { conversationId, sessionId: sid });
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'upstream_not_found') return;
+      this.d.log.warn('turn.session_release_failed', { conversationId, err });
+    }
   }
 
   /**
@@ -293,7 +320,9 @@ export class TurnRunner {
     let applied: AppliedConfig = metaApplied ?? { model: conv.resolvedModel ?? AGENT_BASE_MODEL, system: profile.system, tools: profile.tools };
     if (sessionId) {
       try {
-        await this.d.qoder.getSession(sessionId);
+        const s = await this.d.qoder.getSession(sessionId);
+        // archived (e.g. by housekeeping) → terminated; it cannot take new messages
+        if (s.archived_at || s.status === 'terminated') throw new AppError(404, 'upstream_not_found', 'Session archived');
       } catch (err) {
         if (!(err instanceof AppError && err.code === 'upstream_not_found')) throw err;
         this.d.log.warn('turn.session_lost', { conversationId: conv.id, sessionId });

@@ -98,6 +98,7 @@ export class QoderClient {
   }) => this.json<QoderSession>('POST', '/sessions', body);
   getSession = (id: string) => this.json<QoderSession>('GET', `/sessions/${id}`);
   archiveSession = (id: string) => this.json<unknown>('POST', `/sessions/${id}/archive`);
+  listSessions = (opts: { limit?: number; afterId?: string } = {}) => this.json<QoderList<QoderSession>>('GET', `/sessions?${pageQuery(opts)}`);
 
   /** Change model / system prompt / tools of a live session (context is preserved). */
   updateSession = (id: string, patch: { agent?: { model?: AgentModelRef; system?: string; tools?: ToolsetConfig[] }; title?: string }) =>
@@ -152,6 +153,9 @@ export class QoderClient {
     return (await res.json()) as QoderFile;
   }
   getFile = (id: string) => this.json<QoderFile & { metadata?: Record<string, unknown> }>('GET', `/files/${id}`);
+  listFiles = (opts: { limit?: number; afterId?: string } = {}) => this.json<QoderList<QoderFile>>('GET', `/files?${pageQuery(opts)}`);
+  /** 409 `upstream_conflict` while a non-archived session still mounts the file. */
+  deleteFile = (id: string) => this.json<unknown>('DELETE', `/files/${id}`, undefined, undefined, { retry: false });
   getFileContentUrl = (id: string) => this.json<{ url: string; expires_at: string }>('GET', `/files/${id}/content`);
 
   async downloadFile(id: string): Promise<Buffer> {
@@ -217,4 +221,10 @@ async function toQoderError(res: Response): Promise<QoderApiError> {
   } catch {
     return new QoderApiError(res.status, 'unknown', text.slice(0, 300) || res.statusText);
   }
+}
+
+function pageQuery(opts: { limit?: number; afterId?: string }) {
+  const q = new URLSearchParams({ limit: String(opts.limit ?? 100) });
+  if (opts.afterId) q.set('after_id', opts.afterId);
+  return q.toString();
 }

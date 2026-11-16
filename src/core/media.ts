@@ -401,7 +401,7 @@ export class MediaService {
       { type: 'text', text: job.kind === 'image' ? imageInstruction(job.request, inputs) : videoInstruction(job.request, inputs) },
       ...inputs.map((i): ContentBlock => ({ type: 'document', fileId: i.file.id, filename: i.file.filename, mimeType: i.file.mimeType })),
     ];
-    const handle = await this.d.turns.start({ conversationId: conv.id, userId: job.userId, content, kind: job.kind, jobId: job.id });
+    const handle = await this.d.turns.start({ conversationId: conv.id, userId: job.userId, content, kind: job.kind, jobId: job.id, oneShot: true });
     void this.recordSession(job.id, conv.id, handle.iterate());
     const result = await handle.done;
     return outcomeOf(result, generatorErrors(handle.events));
@@ -585,6 +585,7 @@ export class MediaService {
       if (this.stopped) return null;
       if (state.credits) await this.d.usage.record({ userId: job.userId, kind: job.kind, conversationId: conv?.id, jobId: job.id, credits: state.credits });
       await this.finish(job.id, { fileIds: state.fileIds, credits: state.credits?.total ?? null, error: state.error });
+      await this.releaseSession(sessionId, conv?.id ?? null);
       return null;
     } finally {
       stopProgress();
@@ -659,6 +660,16 @@ export class MediaService {
   private async existingOutputs(jobId: string): Promise<string[]> {
     const rows = await this.d.db.select({ id: files.id }).from(files).where(and(eq(files.jobId, jobId), eq(files.kind, 'artifact')));
     return rows.map((r) => r.id);
+  }
+
+  /** The recovered job is done: its one-shot session is no longer needed upstream. */
+  private async releaseSession(sessionId: string, conversationId: string | null) {
+    try {
+      if (conversationId) await this.d.db.update(conversations).set({ qoderSessionId: null, lastEventId: null }).where(eq(conversations.id, conversationId));
+      await this.d.qoder.archiveSession(sessionId);
+    } catch (err) {
+      this.d.log.warn('media.session_release_failed', { sessionId, err });
+    }
   }
 
   private async sessionIdle(sessionId: string) {

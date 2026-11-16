@@ -98,6 +98,8 @@ export function conversationRoutes(ctx: AppContext) {
   app.delete('/conversations/:id', async (c) => {
     const conv = await ownConversation(ctx, c);
     await ctx.conversations.archive(conv.id, conv.userId);
+    // the chat is gone for the user → free its Qoder session now instead of waiting for housekeeping
+    void ctx.turns.releaseSession(conv.id);
     return c.body(null, 204);
   });
 

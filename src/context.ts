@@ -4,6 +4,7 @@ import { AgentPool } from './core/agentPool.js';
 import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
+import { QoderHousekeeper } from './core/housekeeping.js';
 import { ConversationTitler } from './core/titler.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
@@ -39,6 +40,7 @@ export interface AppContext {
   /** null when FOLAX_URL/FOLAX_API_KEY are unset. */
   folax: FolaxClient | null;
   webhooks: WebhookService;
+  housekeeper: QoderHousekeeper;
   /** Start background work (model sync, media worker, webhook retries). */
   start(): Promise<void>;
   close(): Promise<void>;
@@ -70,6 +72,13 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const auth = new AuthService(db, config.JWT_SECRET);
   const webhooks = new WebhookService(db, log.child({ mod: 'webhooks' }), o.fetchImpl, { pollIntervalMs: config.WEBHOOK_POLL_INTERVAL_MS });
   const turns = new TurnRunner({ db, qoder, agents, models, store, usage, conversations, bus, log: log.child({ mod: 'turns' }), sessionBudgetCredits: config.SESSION_BUDGET_CREDITS });
+  const housekeeper = new QoderHousekeeper({
+    db,
+    qoder,
+    log: log.child({ mod: 'housekeeping' }),
+    retentionHours: config.QODER_RETENTION_HOURS,
+    intervalHours: config.QODER_HOUSEKEEPING_INTERVAL_HOURS,
+  });
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }) });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
   const folax =
@@ -117,6 +126,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     titler,
     folax,
     webhooks,
+    housekeeper,
     async start() {
       await auth.ensureAdmin(config.ADMIN_EMAIL, config.ADMIN_PASSWORD);
       await models.load();
@@ -128,9 +138,11 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
       }
       webhooks.start();
       media.start();
+      housekeeper.start();
     },
     async close() {
       if (timer) clearInterval(timer);
+      housekeeper.stop();
       await media.stop();
       await webhooks.stop();
       await database.close();

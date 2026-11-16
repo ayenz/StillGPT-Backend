@@ -64,6 +64,10 @@ const schema = z
       .default('30000,60000,120000,180000,300000')
       .transform((v) => v.split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n >= 0)),
     SESSION_BUDGET_CREDITS: z.coerce.number().positive().optional(),
+    /** Qoder sessions idle longer than this are archived and their Qoder files deleted (local copies stay). */
+    QODER_RETENTION_HOURS: z.coerce.number().positive().default(24),
+    /** How often the Qoder housekeeping pass runs; 0 disables it. */
+    QODER_HOUSEKEEPING_INTERVAL_HOURS: z.coerce.number().min(0).default(24),
     /** folax-adapter sidecar (fast external image generator); the provider is disabled when unset. */
     FOLAX_URL: optionalString(z.string().url()),
     FOLAX_API_KEY: optionalString(z.string().min(1)),

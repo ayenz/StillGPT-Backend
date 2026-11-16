@@ -351,6 +351,8 @@ export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQ
   route('POST', `${BASE}/sessions/:id/archive`, (c) => {
     const s = core.getSession(c.params.id!);
     s.archived_at ??= nowIso();
+    s.turn?.controller.abort();
+    s.status = 'terminated';
     s.updated_at = nowIso();
     return ok(publicSession(s));
   });
@@ -504,6 +506,16 @@ export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQ
   });
   route('GET', `${BASE}/files`, (c) => ok(paginate([...state.files.values()].map(publicFile), c.url.searchParams)));
   route('GET', `${BASE}/files/:id`, (c) => ok(publicFile(core.getFile(c.params.id!))));
+  // Like Qoder: a file mounted in (or produced by) a non-archived session cannot be deleted.
+  route('DELETE', `${BASE}/files/:id`, (c) => {
+    const f = core.getFile(c.params.id!);
+    const refs = [...state.sessions.values()]
+      .filter((s) => !s.archived_at && (s.resources.some((r) => r.file_id === f.id) || f.scope?.id === s.id))
+      .map((s) => s.id);
+    if (refs.length) throw new ApiError(409, 'invalid_request_error', 'File is referenced by an active session and cannot be deleted.');
+    state.files.delete(f.id);
+    return ok({ id: f.id, type: 'file_deleted' });
+  });
   route('GET', `${BASE}/files/:id/content`, (c) => {
     const f = core.getFile(c.params.id!);
     if (!f.downloadable) throw new ApiError(403, 'permission_error', `File ${f.id} is not downloadable.`);

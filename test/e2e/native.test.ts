@@ -242,6 +242,15 @@ describe('files and attachments', () => {
     expect(missing.body.error.code).toBe('file_not_found');
   });
 
+  it('archives the Qoder session when a conversation is deleted', async () => {
+    const conv = await newConversation();
+    expect((await h.api(`/api/v1/conversations/${conv.id}/messages`, { method: 'POST', json: { text: 'halo' } })).status).toBe(200);
+    const sid = (await h.ctx.conversations.get(conv.id)).qoderSessionId!;
+    expect(h.qoder.state.sessions.get(sid)!.archived_at).toBeNull();
+    expect((await h.api(`/api/v1/conversations/${conv.id}`, { method: 'DELETE' })).status).toBe(204);
+    await expect.poll(() => h.qoder.state.sessions.get(sid)!.archived_at).toBeTruthy();
+  });
+
   it('mounts chat images into the sandbox for tool profiles so tools can use them as files', async () => {
     const png = await upload('wajah.png', makePng(), 'image/png');
     const mounted = () => [...h.qoder.state.sessions.values()].flatMap((s) => s.resources.map((r) => r.mount_path));

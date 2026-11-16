@@ -59,6 +59,15 @@ describe('PromptEnhancer', () => {
     expect(data.some((c) => c.metadata?.purpose === 'prompt_enhancer')).toBe(false);
   });
 
+  it('archives its one-shot Qoder session right after the turn', async () => {
+    h.qoder.setReply(() => '{"prompt":"x","aspect_ratio":"1:1"}');
+    const before = new Set(h.qoder.state.sessions.keys());
+    await enhancer.enhance({ userId: h.userId, prompt: 'sekali pakai' });
+    const created = [...h.qoder.state.sessions.values()].filter((s) => !before.has(s.id));
+    expect(created).toHaveLength(1);
+    await expect.poll(() => created[0]!.archived_at).toBeTruthy();
+  });
+
   it('validates input', async () => {
     await expect(enhancer.enhance({ userId: h.userId, prompt: '  ' })).rejects.toMatchObject({ code: 'validation_error' });
   });
