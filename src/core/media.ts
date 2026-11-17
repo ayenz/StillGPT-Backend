@@ -23,6 +23,8 @@ export type MediaJob = typeof mediaJobs.$inferSelect;
 
 export const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536', '768x1024', '1024x768', '1024x1280', '1280x1024', '1024x1792', '1792x1024', '2560x1080'] as const;
 export type ImageSize = (typeof IMAGE_SIZES)[number];
+/** Most images one `POST /images` may ask for (`n`); each is its own Qoder job, run in parallel. */
+export const MAX_IMAGE_BATCH = 6;
 export const VIDEO_RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
 export type VideoRatio = (typeof VIDEO_RATIOS)[number];
 export const VIDEO_RESOLUTIONS = ['480P', '720P', '1080P'] as const;
@@ -67,8 +69,54 @@ export interface MediaJobView {
   outputs: Artifact[];
   error: { code: string; message: string } | null;
   credits: number | null;
+  /** Set when the job was created as part of an image batch (`n`). */
+  batch_id: string | null;
   created_at: string;
   completed_at: string | null;
+}
+
+/** Aggregate of the jobs of one image batch. `partial` = finished with some (not all) jobs failed. */
+export interface ImageBatchView {
+  id: string;
+  status: 'queued' | 'in_progress' | 'completed' | 'partial' | 'failed';
+  /** 0–100, average over the jobs (finished jobs count as 100). */
+  progress: number;
+  n: number;
+  completed: number;
+  failed: number;
+  credits: number | null;
+  jobs: MediaJobView[];
+  created_at: string;
+  completed_at: string | null;
+}
+
+export function batchViewOf(id: string, jobs: MediaJobView[]): ImageBatchView {
+  const completed = jobs.filter((j) => j.status === 'completed').length;
+  const failed = jobs.filter((j) => j.status === 'failed').length;
+  const done = completed + failed === jobs.length;
+  const status: ImageBatchView['status'] = !done
+    ? jobs.some((j) => j.status !== 'queued')
+      ? 'in_progress'
+      : 'queued'
+    : failed === 0
+      ? 'completed'
+      : completed === 0
+        ? 'failed'
+        : 'partial';
+  const credited = jobs.filter((j) => j.credits !== null);
+  const ends = jobs.map((j) => j.completed_at).filter((x): x is string => !!x);
+  return {
+    id,
+    status,
+    progress: Math.round(jobs.reduce((sum, j) => sum + (isTerminal(j.status) ? 100 : j.progress), 0) / Math.max(jobs.length, 1)),
+    n: jobs.length,
+    completed,
+    failed,
+    credits: credited.length ? Math.round(credited.reduce((sum, j) => sum + j.credits!, 0) * 10000) / 10000 : null,
+    jobs,
+    created_at: jobs.map((j) => j.created_at).sort()[0] ?? new Date().toISOString(),
+    completed_at: done ? (ends.sort().at(-1) ?? null) : null,
+  };
 }
 
 /** Published on the bus topic `job:<id>`. */
@@ -93,6 +141,7 @@ export function mediaJobJson(v: MediaJobView) {
   };
 }
 export type MediaJobJson = ReturnType<typeof mediaJobJson>;
+export const imageBatchJson = (b: ImageBatchView) => ({ ...b, jobs: b.jobs.map(mediaJobJson) });
 export const isTerminal = (status: MediaJob['status']) => status === 'completed' || status === 'failed';
 
 export interface MediaServiceDeps {
@@ -220,6 +269,35 @@ export class MediaService {
     return this.view(job);
   }
 
+  /**
+   * `n` images of one prompt as `n` parallel jobs sharing a batch id. The prompt is enhanced once for all of them.
+   * n > 1 always runs on Qoder (one image per job); n = 1 follows the normal provider routing.
+   * `wait` resolves once every job finished (synchronous APIs); otherwise right after the jobs started.
+   */
+  async createImageBatch(req: ImageRequest, n: number, opts: { wait?: boolean } = {}): Promise<ImageBatchView> {
+    if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGE_BATCH) throw badRequest(`n must be an integer between 1 and ${MAX_IMAGE_BATCH}`, 'validation_error', { param: 'n' });
+    if (n > 1 && req.provider === 'folax') throw badRequest('n > 1 is only supported by the qoder provider', 'validation_error', { param: 'provider' });
+    const { v, request } = await this.prepareImage(n > 1 ? { ...req, provider: 'qoder' } : req);
+    const batchId = newId('batch');
+    const rows = await this.d.db
+      .insert(mediaJobs)
+      .values(Array.from({ length: n }, (_, i) => ({ id: newId('img'), userId: v.userId, kind: 'image' as const, request: { ...request, n, batch_index: i }, callbackUrl: v.callbackUrl ?? null, batchId })))
+      .returning();
+    const runs = rows.map((job) => this.run(job));
+    if (opts.wait) await Promise.all(runs);
+    return this.getBatch(batchId, v.userId);
+  }
+
+  async getBatch(id: string, userId: string): Promise<ImageBatchView> {
+    const rows = await this.d.db
+      .select()
+      .from(mediaJobs)
+      .where(and(eq(mediaJobs.batchId, id), eq(mediaJobs.userId, userId)));
+    if (!rows.length) throw notFound('Batch');
+    rows.sort((a, b) => Number(a.request.batch_index ?? 0) - Number(b.request.batch_index ?? 0));
+    return batchViewOf(id, await Promise.all(rows.map((r) => this.view(r))));
+  }
+
   async createVideoJob(req: VideoRequest): Promise<MediaJobView> {
     const v = validate(videoSchema, req);
     await this.d.usage.assertWithinLimit(v.userId);
@@ -250,9 +328,10 @@ export class MediaService {
     return this.view(await this.getRow(id, userId));
   }
 
-  async listJobs(userId: string, opts: { kind?: 'image' | 'video'; limit?: number } = {}): Promise<MediaJobView[]> {
+  async listJobs(userId: string, opts: { kind?: 'image' | 'video'; batchId?: string; limit?: number } = {}): Promise<MediaJobView[]> {
     const conds = [eq(mediaJobs.userId, userId)];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
+    if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     const rows = await this.d.db
       .select()
       .from(mediaJobs)
@@ -286,6 +365,12 @@ export class MediaService {
   // ── creation ────────────────────────────────────────────────────────────
 
   private async createImage(req: ImageRequest): Promise<MediaJob> {
+    const { v, request } = await this.prepareImage(req);
+    return this.insertJob(v.userId, 'image', request, v.callbackUrl);
+  }
+
+  /** Validate, check limits and inputs, pick the provider and run the enhancer: the stored `request` of an image job. */
+  private async prepareImage(req: ImageRequest): Promise<{ v: ValidImage; request: Record<string, unknown> }> {
     const v: ValidImage = validate(imageSchema, req);
     await this.d.usage.assertWithinLimit(v.userId);
     await this.loadInputs(v.userId, v.inputFileIds);
@@ -301,7 +386,7 @@ export class MediaService {
       provider,
       provider_used: providerUsed,
     };
-    return this.insertJob(v.userId, 'image', request, v.callbackUrl);
+    return { v, request };
   }
 
   /** Folax only does text-to-image and only when configured; edits always go to Qoder ImageGen. */
@@ -724,6 +809,7 @@ export class MediaService {
       outputs: job.resultFileIds.flatMap((id) => (byId.has(id) ? [this.d.store.toArtifact(byId.get(id)!)] : [])),
       error: job.error ?? null,
       credits: job.credits,
+      batch_id: job.batchId ?? null,
       created_at: job.createdAt.toISOString(),
       completed_at: job.completedAt?.toISOString() ?? null,
     };

@@ -142,8 +142,8 @@ Returns the same usage object as `/me` (this calendar month, UTC).
   ],
   "default_model": "default",
   "image_providers": [
-    { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "sizes": ["1024x1024", "…"] },
-    { "id": "folax", "available": true, "edits": false, "images_per_call": 2,
+    { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "max_n": 6, "sizes": ["1024x1024", "…"] },
+    { "id": "folax", "available": true, "edits": false, "images_per_call": 2, "max_n": 1,
       "ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"], "prompt_max": 1500 }
   ],
   "default_image_provider": "auto"
@@ -413,7 +413,7 @@ Images and videos are **jobs**. Every endpoint returns the same job object:
                 "url": "https://<host>/media/file_…?exp=…&sig=…",
                 "thumbnail_url": "https://<host>/media/file_…?exp=…&sig=…&variant=thumb",
                 "preview_url": "https://<host>/media/file_…?exp=…&sig=…&variant=preview" }],
-  "error": null, "credits": 0.21, "created_at": "…", "completed_at": "…"
+  "error": null, "credits": 0.21, "batch_id": null, "created_at": "…", "completed_at": "…"
 }
 ```
 - `status` moves from `queued` to `in_progress`, then to `completed` or `failed`. A failed job has
@@ -468,7 +468,8 @@ Alternatively send `enhance: true` on `POST /images` or `POST /videos` to do bot
 | `enhance` | bool | `false` | run the prompt enhancer first (as `POST /prompts/enhance`). Its prompt is used, and its size too when `size` was not given |
 | `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine (always Qoder) |
 | `provider` | `auto` \| `qoder` \| `folax` | server default (`IMAGE_PROVIDER_DEFAULT`, `auto`) | image generator, see below |
-| `async` | bool | `false` | `true` returns `202` straight away with a queued job |
+| `n` | int 1–6 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
+| `async` | bool | `false` | `true` returns `202` straight away with a queued job (or batch) |
 | `callback_url` | URL | – | POSTed when the job finishes (§9) |
 
 - **Synchronous (default):** the request waits for the image (about 30 s on Qoder, about 10 s on Folax) and returns `200`
@@ -477,6 +478,29 @@ Alternatively send `enhance: true` on `POST /images` or `POST /videos` to do bot
 - Qoder images come out at about 1 megapixel. For example, a `1792x1024` request gives an image of about 1376×768.
 - With `enhance: true` the job's `request` holds `prompt` (the enhanced one) and `original_prompt` (what was sent).
   The enhancer runs before the response, so even `async` requests take a few seconds longer.
+
+#### Several images at once (`n`)
+`n` creates `n` jobs that run **in parallel** and share a `batch_id`. A batch of 4 takes about as long as one image
+(~30–40 s). Rules:
+- `n` > 1 always runs on **Qoder** (one image per job), whatever `provider` says. `provider: "folax"` with `n` > 1 is
+  `400 validation_error`. `n: 1` follows the normal provider routing.
+- The prompt enhancer (`enhance: true`) runs **once**; every job gets the same enhanced prompt.
+- Each job is an ordinary job (`GET /jobs/:id`, `/jobs/:id/events`, webhooks and `callback_url` fire per job). Its
+  `request` additionally has `n` and `batch_index` (0-based position in the batch).
+- Jobs fail independently: one refused image does not stop the others.
+- Credits are charged per job (~0.06–0.16 per Qoder image).
+
+Response (`200` when synchronous, `202` with `async: true`):
+```json
+{
+  "id": "batch_…", "status": "in_progress", "progress": 33, "n": 4, "completed": 1, "failed": 0,
+  "credits": 0.16, "created_at": "…", "completed_at": null,
+  "jobs": [ { "id": "img_…", "status": "completed", "batch_id": "batch_…", "outputs": [ … ], "request": { "batch_index": 0, … } }, … ]
+}
+```
+- `status`: `queued` → `in_progress` → `completed` (all jobs succeeded), `partial` (some failed) or `failed` (all failed).
+- `progress`: average of the jobs' progress (finished jobs count as 100). `credits`: sum over the jobs.
+- `jobs` is ordered by `batch_index`.
 
 #### Image providers
 | provider | speed | outputs per job | sizes | edits | credits |
@@ -515,7 +539,7 @@ If the server restarts during a job, it picks the job up again and finishes it.
 ### Following a job
 | Method | Path | Response |
 |---|---|---|
-| GET | `/jobs?kind=image\|video&limit=20` | `{data: [job]}`, newest first |
+| GET | `/jobs?kind=image\|video&batch_id=…&limit=20` | `{data: [job]}`, newest first |
 | GET | `/jobs/:id` | job. Polling every 5–10 s is fine |
 | GET | `/jobs/:id/events` | SSE (see below) |
 
@@ -538,6 +562,21 @@ event: completed
 data: {"id":"vid_…","status":"completed","progress":100,"outputs":[{…,"url":"…"}],…}
 ```
 If this stream drops, call `GET /jobs/:id` once, then reconnect to `/events` if the job is still running.
+
+### Following a batch
+| Method | Path | Response |
+|---|---|---|
+| GET | `/images/batches/:id` | batch (same shape as the `POST /images` response) |
+| GET | `/images/batches/:id/events` | SSE for the whole batch |
+
+`GET /images/batches/:id/events` sends:
+- `batch`: the full batch, sent first as a snapshot.
+- `progress`: `{id, status, progress, batch_progress}` for one job (`id` is the job id).
+- `job.completed` or `job.failed`: the full job object, once per image as it finishes.
+- `batch.done`: the final batch (`status` `completed`, `partial` or `failed`). The stream closes after it. If the batch
+  had already finished when you connected, you get only `batch` and `batch.done`.
+
+If this stream drops, call `GET /images/batches/:id` and reconnect if `status` is still `queued` or `in_progress`.
 
 ---
 
@@ -698,7 +737,8 @@ Treat any `429` or `5xx` as retryable.
 | Image attachment (vision) | 7 MB. PNG, JPEG, WebP or GIF are sent inline |
 | Document attachment (sandbox) | 5 MB (Qoder limit) |
 | Content blocks per message | 50 |
-| Image prompt | 4000 characters (Folax: first 1500). 1 image per job on Qoder, 2 on Folax (use OpenAI `n` for up to 4) |
+| Image prompt | 4000 characters (Folax: first 1500). 1 image per job on Qoder, 2 on Folax |
+| Images per request (`n`) | 1–6 (Qoder, in parallel) |
 | Image inputs (edit) | 3 |
 | Video `seconds` | 2–30 or -1. Resolution `480P`, `720P` or `1080P`. 7 ratios (§8) |
 | Video references | 1–10, or first frame (+ last frame) |
@@ -713,6 +753,7 @@ Latencies observed (model `efficient`):
 | chat reply | 2–4 s |
 | reply about attached documents | 8–20 s |
 | image (Qoder) | about 30 s |
+| image batch, `n` up to 6 (Qoder) | about 30–40 s (parallel) |
 | image (Folax) | about 10 s, plus waiting time when several requests queue |
 | prompt enhancer | 2–10 s |
 | video | 3–4 min (up to 30) |
@@ -731,7 +772,7 @@ conversation. Errors use each provider's own envelope.
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
-| `POST /v1/images/generations` | `{prompt, model?, n? (1–4), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). One Folax call yields 2 images; StillGPT calls again when `n` needs more and returns exactly `n` |
+| `POST /v1/images/generations` | `{prompt, model?, n? (1–6), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images; StillGPT calls again when `n` needs more. If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |
 | `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Always Qoder (`folax-image` → `400`) |
 | `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url` |
 | `GET /v1/videos`, `GET /v1/videos/:id` | video object `{id, object: "video", model, status, progress, created_at, completed_at, seconds, size, error}` (unix seconds) |

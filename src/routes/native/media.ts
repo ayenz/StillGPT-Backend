@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppContext } from '../../context.js';
-import { IMAGE_SIZES, type ImageRequest, isTerminal, jobTopic, type MediaJobEvent, mediaJobJson, type VideoRequest } from '../../core/media.js';
+import { batchViewOf, IMAGE_SIZES, type ImageBatchView, type ImageRequest, imageBatchJson, isTerminal, jobTopic, MAX_IMAGE_BATCH, type MediaJobEvent, type MediaJobView, mediaJobJson, type VideoRequest } from '../../core/media.js';
 import { WEBHOOK_EVENTS } from '../../core/webhooks.js';
 import { badRequest } from '../../errors.js';
 import type { Env } from '../../http.js';
@@ -15,6 +15,8 @@ const imageBody = z.object({
   enhance: z.unknown().optional(),
   input_file_ids: z.unknown().optional(),
   provider: z.unknown().optional(),
+  /** 1–6 images in parallel; when present the response is a batch instead of a single job. */
+  n: z.unknown().optional(),
   async: z.boolean().optional(),
   callback_url: z.unknown().optional(),
 });
@@ -75,6 +77,10 @@ export function mediaJobRoutes(ctx: AppContext) {
       provider: b.provider,
       callbackUrl: b.callback_url,
     } as ImageRequest;
+    if (b.n !== undefined) {
+      const batch = await ctx.media.createImageBatch(req, typeof b.n === 'number' ? b.n : Number.NaN, { wait: !b.async });
+      return c.json(imageBatchJson(batch), b.async ? 202 : 200);
+    }
     if (b.async) return c.json(mediaJobJson(await ctx.media.createImageJob(req)), 202);
     return c.json(mediaJobJson(await ctx.media.generateImage(req)));
   });
@@ -100,7 +106,7 @@ export function mediaJobRoutes(ctx: AppContext) {
   app.get('/jobs', async (c) => {
     const kind = c.req.query('kind') || undefined;
     if (kind !== undefined && kind !== 'image' && kind !== 'video') throw badRequest('kind must be image or video', 'validation_error');
-    const data = await ctx.media.listJobs(c.get('user').id, { kind, limit: limitParam(c.req.query('limit'), 20, 100) });
+    const data = await ctx.media.listJobs(c.get('user').id, { kind, batchId: c.req.query('batch_id') || undefined, limit: limitParam(c.req.query('limit'), 20, 100) });
     return c.json({ data: data.map(mediaJobJson) });
   });
 
@@ -113,7 +119,60 @@ export function mediaJobRoutes(ctx: AppContext) {
     return sse(c, (signal) => jobEvents(ctx, id, userId, signal));
   });
 
+  app.get('/images/batches/:id', async (c) => c.json(imageBatchJson(await ctx.media.getBatch(c.req.param('id'), c.get('user').id))));
+
+  app.get('/images/batches/:id/events', async (c) => {
+    const batch = await ctx.media.getBatch(c.req.param('id'), c.get('user').id); // 404 before switching to SSE
+    return sse(c, (signal) => batchEvents(ctx, batch, c.get('user').id, signal));
+  });
+
   return app;
+}
+
+/**
+ * SSE of a whole batch: `batch` snapshot, then `progress` (per job, with the batch's progress), `job.completed` /
+ * `job.failed` as each image finishes, and a final `batch.done` with the aggregate (status completed|partial|failed).
+ */
+async function* batchEvents(ctx: AppContext, initial: ImageBatchView, userId: string, signal: AbortSignal): AsyncGenerator<SseEvent> {
+  const queue: MediaJobEvent[] = [];
+  let wake: (() => void) | undefined;
+  const unsubscribes = initial.jobs.map((j) =>
+    ctx.bus.subscribe<MediaJobEvent>(jobTopic(j.id), (e) => {
+      queue.push(e);
+      wake?.();
+    }),
+  );
+  const onAbort = () => wake?.();
+  signal.addEventListener('abort', onAbort, { once: true });
+  let seq = 0;
+  try {
+    // re-read after subscribing so nothing that finished in between is missed
+    const batch = await ctx.media.getBatch(initial.id, userId);
+    const jobs = new Map<string, MediaJobView>(batch.jobs.map((j) => [j.id, j]));
+    const current = () => batchViewOf(batch.id, [...jobs.values()]);
+    yield { event: 'batch', data: imageBatchJson(batch), id: ++seq };
+    while (!signal.aborted && !batch.jobs.every((j) => isTerminal(jobs.get(j.id)!.status))) {
+      if (!queue.length) await new Promise<void>((r) => (wake = r));
+      wake = undefined;
+      while (queue.length) {
+        const e = queue.shift()!;
+        if (e.type === 'progress') {
+          const j = jobs.get(e.id);
+          if (!j || isTerminal(j.status)) continue;
+          jobs.set(e.id, { ...j, status: e.status, progress: e.progress });
+          yield { event: 'progress', data: { id: e.id, status: e.status, progress: e.progress, batch_progress: current().progress }, id: ++seq };
+          continue;
+        }
+        if (isTerminal(jobs.get(e.job.id)?.status ?? 'queued')) continue;
+        jobs.set(e.job.id, e.job);
+        yield { event: `job.${e.type}`, data: mediaJobJson(e.job), id: ++seq };
+      }
+    }
+    if (!signal.aborted) yield { event: 'batch.done', data: imageBatchJson(current()), id: ++seq };
+  } finally {
+    for (const u of unsubscribes) u();
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /** Snapshot first, then bus events until the job is terminal. Subscribes before the snapshot so nothing slips through. */
@@ -154,8 +213,8 @@ async function* jobEvents(ctx: AppContext, id: string, userId: string, signal: A
 export function imageProviders(ctx: AppContext) {
   return {
     image_providers: [
-      { id: 'qoder', available: true, edits: true, images_per_call: 1, sizes: IMAGE_SIZES },
-      { id: 'folax', available: !!ctx.folax, edits: false, images_per_call: 2, ratios: FOLAX_RATIOS, prompt_max: FOLAX_PROMPT_MAX },
+      { id: 'qoder', available: true, edits: true, images_per_call: 1, max_n: MAX_IMAGE_BATCH, sizes: IMAGE_SIZES },
+      { id: 'folax', available: !!ctx.folax, edits: false, images_per_call: 2, max_n: 1, ratios: FOLAX_RATIOS, prompt_max: FOLAX_PROMPT_MAX },
     ],
     default_image_provider: ctx.config.IMAGE_PROVIDER_DEFAULT,
   };

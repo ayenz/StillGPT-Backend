@@ -184,6 +184,7 @@ POST /images {prompt, size?: "1024x1024", provider?: "auto" | "qoder" | "folax",
 - Ukuran Qoder: `1024x1024, 1536x1024, 1024x1536, 768x1024, 1024x768, 1024x1280, 1280x1024, 1024x1792, 1792x1024, 2560x1080`.
   Folax hanya 1:1, 4:3, 3:4, 16:9, 9:16 (ukuran lain dibulatkan ke rasio terdekat).
 - Status `failed` tetap HTTP 200 — selalu cek `status` dan `error.message`.
+- **Beberapa gambar sekaligus:** kirim `n` (1–6), lihat 5.5.
 
 ### 5.3 Generate video
 ```
@@ -204,6 +205,25 @@ POST /videos {prompt, seconds?: 5, resolution?: "1080P", ratio?: "16:9", audio?:
 
 UI yang disarankan: kartu job di galeri (gambar tile dari `outputs[].thumbnail_url`, lihat §6.1) dengan progress bar, notifikasi saat `completed`, dan job tetap bisa dilihat
 setelah aplikasi ditutup (ambil ulang dari `/jobs`).
+
+### 5.5 Generate beberapa gambar sekaligus (`n`)
+```
+POST /images {prompt, n: 1..6, size?, enhance?, input_file_ids?, async: true}
+→ 202 batch {id: "batch_…", status, progress, n, completed, failed, credits, jobs: [job, …]}
+```
+- Kalau `n` dikirim, respons berupa **batch** (bukan job). Tanpa `n`, respons tetap satu job seperti 5.2.
+- Semua gambar jalan **paralel** di Qoder: 4–6 gambar selesai sekitar 30–40 detik, sama seperti satu gambar.
+- `n` > 1 selalu memakai Qoder (berbayar credit per gambar). `provider: "folax"` + `n` > 1 → `400`.
+- Enhance hanya sekali untuk seluruh batch; semua gambar memakai prompt yang sama.
+- Tiap gambar adalah job biasa (`jobs[i]`), urut sesuai `request.batch_index`. Satu gambar gagal tidak menggagalkan yang lain.
+- `status` batch: `queued` → `in_progress` → `completed` (semua sukses) / `partial` (sebagian gagal) / `failed` (semua gagal).
+
+Mengikuti batch:
+- `GET /images/batches/:id/events` (SSE): `batch` (snapshot) → `progress {id, status, progress, batch_progress}` →
+  `job.completed` / `job.failed` per gambar → `batch.done` (batch final), lalu stream ditutup.
+- Atau polling `GET /images/batches/:id` tiap 5 detik. Daftar job satu batch: `GET /jobs?batch_id=…`.
+- Jika SSE putus: `GET /images/batches/:id`, lalu sambung ulang bila masih `queued`/`in_progress`.
+- Jumlah maksimum dibaca dari `GET /models` → `image_providers[id=qoder].max_n` (jangan hardcode 6).
 
 ---
 

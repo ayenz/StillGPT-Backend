@@ -1,19 +1,18 @@
 import { type Context, Hono } from 'hono';
 import type { ImageProvider } from '../../config.js';
 import type { AppContext } from '../../context.js';
-import { IMAGE_SIZES, type ImageSize, type MediaJobView, VIDEO_RATIOS, type VideoRatio, type VideoRequest, type VideoResolution } from '../../core/media.js';
+import { IMAGE_SIZES, type ImageSize, MAX_IMAGE_BATCH, type MediaJobView, VIDEO_RATIOS, type VideoRatio, type VideoRequest, type VideoResolution } from '../../core/media.js';
 import { FOLAX_IMAGE_MODEL, IMAGE_MODEL, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, badRequest, notFound } from '../../errors.js';
 import { type Env, jsonBody, requireUser } from '../../http.js';
 import { assertUploadSize, formFiles, saveUpload } from '../native/util.js';
 import { serveFile } from '../serveFile.js';
 
-const MAX_N = 4;
 const MAX_EDIT_IMAGES = 3;
 
 /**
  * OpenAI-style media endpoints, mounted at /v1 by the OpenAI router:
- *   POST /images/generations, POST /images/edits      (synchronous, ~30 s per Qoder image, ~10 s per Folax call)
+ *   POST /images/generations, POST /images/edits      (synchronous; Qoder runs the n images in parallel, ~30 s total; Folax ~10 s per call)
  *   POST /videos, GET /videos, GET /videos/:id, GET /videos/:id/content, DELETE /videos/:id
  */
 export function openaiMediaRoutes(ctx: AppContext) {
@@ -104,27 +103,42 @@ function imageProviderOf(model: unknown): ImageProvider | undefined {
   throw badRequest(`Unknown image model '${String(model)}'; use '${IMAGE_MODEL}' or '${FOLAX_IMAGE_MODEL}'`, 'model_not_found', { param: 'model' });
 }
 
-/** Sequential jobs until n images are collected (Qoder yields 1 per job, Folax 2). */
+/** Qoder: n parallel jobs (one image each). Folax: sequential calls until n images are collected (2 per call). */
 async function generateImages(ctx: AppContext, c: Context<Env>, call: ImageCall) {
   const provider = imageProviderOf(call.model);
   const n = call.n === undefined || call.n === null ? 1 : Number(call.n);
-  if (!Number.isInteger(n) || n < 1 || n > MAX_N) throw badRequest(`n must be an integer between 1 and ${MAX_N}`, 'invalid_n', { param: 'n' });
+  if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGE_BATCH) throw badRequest(`n must be an integer between 1 and ${MAX_IMAGE_BATCH}`, 'invalid_n', { param: 'n' });
   const format = call.responseFormat ?? 'url';
   if (format !== 'url' && format !== 'b64_json') throw badRequest("response_format must be 'url' or 'b64_json'", 'invalid_response_format', { param: 'response_format' });
   const size = nearestImageSize(call.size);
   const userId = c.get('user').id;
+  const req = { userId, prompt: call.prompt as string, size, inputFileIds: call.inputFileIds, provider };
 
-  const data: ({ url: string } | { b64_json: string })[] = [];
-  let credits = 0;
-  while (data.length < n) {
-    const job = await ctx.media.generateImage({ userId, prompt: call.prompt as string, size, inputFileIds: call.inputFileIds, provider });
-    if (job.status !== 'completed' || !job.outputs.length) throw new AppError(502, job.error?.code ?? 'generation_failed', job.error?.message ?? 'Image generation failed');
-    credits += job.credits ?? 0;
-    for (const out of job.outputs.slice(0, n - data.length)) {
-      if (format === 'url') data.push({ url: out.url });
-      else data.push({ b64_json: (await ctx.store.read(await ctx.store.get(out.id, userId))).toString('base64') });
+  let jobs: MediaJobView[];
+  // edits always run on Qoder; otherwise Qoder when asked for or when the default provider cannot be Folax
+  const onQoder = provider === 'qoder' || call.inputFileIds.length > 0 || (provider === undefined && (ctx.config.IMAGE_PROVIDER_DEFAULT === 'qoder' || !ctx.folax));
+  if (n > 1 && onQoder) {
+    jobs = (await ctx.media.createImageBatch({ ...req, provider: 'qoder' }, n, { wait: true })).jobs;
+  } else {
+    jobs = [];
+    for (let got = 0; got < n; ) {
+      const job = await ctx.media.generateImage(req);
+      jobs.push(job);
+      if (job.status !== 'completed' || !job.outputs.length) break;
+      got += job.outputs.length;
     }
   }
+
+  const outputs = jobs.flatMap((j) => (j.status === 'completed' ? j.outputs : [])).slice(0, n);
+  const failed = jobs.find((j) => j.status !== 'completed' || !j.outputs.length);
+  // partial results are still useful (OpenAI clients just get fewer items); only fail when nothing was made
+  if (!outputs.length) throw new AppError(502, failed?.error?.code ?? 'generation_failed', failed?.error?.message ?? 'Image generation failed');
+  const data: ({ url: string } | { b64_json: string })[] = [];
+  for (const out of outputs) {
+    if (format === 'url') data.push({ url: out.url });
+    else data.push({ b64_json: (await ctx.store.read(await ctx.store.get(out.id, userId))).toString('base64') });
+  }
+  const credits = jobs.reduce((sum, j) => sum + (j.credits ?? 0), 0);
   c.header('X-StillGPT-Credits', String(Math.round(credits * 10000) / 10000));
   return { created: Math.floor(Date.now() / 1000), data };
 }

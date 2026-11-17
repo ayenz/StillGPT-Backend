@@ -174,12 +174,14 @@ export const mediaJobs = pgTable(
     resultFileIds: jsonb('result_file_ids').$type<string[]>().notNull().default([]),
     error: jsonb('error').$type<{ code: string; message: string } | null>(),
     callbackUrl: text('callback_url'),
+    /** Jobs created together by one `POST /images` with `n` share a batch id (null for single jobs). */
+    batchId: text('batch_id'),
     credits: doublePrecision('credits'),
     createdAt: createdAt(),
     startedAt: ts('started_at'),
     completedAt: ts('completed_at'),
   },
-  (t) => [index('media_jobs_status_idx').on(t.status, t.createdAt)],
+  (t) => [index('media_jobs_status_idx').on(t.status, t.createdAt), index('media_jobs_batch_idx').on(t.batchId)],
 );
 
 // ── webhooks & usage ────────────────────────────────────────────────────────
