@@ -19,7 +19,7 @@ List envelope: `{"data":[…], "first_id":…, "last_id":…, "has_more":false, 
 Ids seen: auto, ultimate, fast, efficient, smodel, cmodel, qmodel_latest, qmodel_38max, qfmodel, kmodel_latest, kmodel, gmodel, gfmodel, dmodel, dfmodel, mmodel.
 
 ## Environments
-`GET /environments`, `POST /environments {"name":"qoderouter"}` → `{"id":"env_…","type":"environment","name":…,"config":{"type":"cloud",…}}`
+`GET /environments`, `POST /environments {"name":"stillgpt"}` → `{"id":"env_…","type":"environment","name":…,"config":{"type":"cloud",…}}`
 
 ## Agents
 `POST /agents`

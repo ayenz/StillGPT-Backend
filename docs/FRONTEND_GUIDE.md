@@ -1,4 +1,4 @@
-# Panduan Integrasi Frontend — QodeRouter
+# Panduan Integrasi Frontend — StillGPT
 
 Untuk: tim frontend (PWA sekarang, Flutter nanti).
 Versi backend: 0.1 · November 2026 · Referensi API lengkap ada di lampiran (Bagian B).
@@ -7,7 +7,7 @@ Versi backend: 0.1 · November 2026 · Referensi API lengkap ada di lampiran (Ba
 
 ## 1. Gambaran singkat
 
-QodeRouter adalah backend "personal LLM" kita. Aplikasi frontend cukup bicara dengan **satu** server:
+StillGPT adalah backend "personal LLM" kita. Aplikasi frontend cukup bicara dengan **satu** server:
 
 | Fitur di aplikasi | Endpoint utama |
 |---|---|

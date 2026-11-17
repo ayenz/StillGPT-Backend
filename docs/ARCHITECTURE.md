@@ -1,6 +1,6 @@
-# QodeRouter — Architecture
+# StillGPT — Architecture
 
-QodeRouter is a backend that turns **Qoder Cloud Agents** (stateful, agentic, async) into:
+StillGPT is a backend that turns **Qoder Cloud Agents** (stateful, agentic, async) into:
 
 1. a **native API** for our own "personal LLM" apps (PWA first, Flutter later), and
 2. **OpenAI-compatible** and **Anthropic-compatible** endpoints (stateless) so existing tools — n8n, SDKs, 9router, LangChain — work unchanged.
@@ -37,7 +37,7 @@ See `docs/QODER_API_NOTES.md` for payload shapes. Key facts that drive the desig
 
 ## 2. Concepts
 
-| QodeRouter | Qoder |
+| StillGPT | Qoder |
 |---|---|
 | **User** (our account, JWT or API key) | — (all traffic uses one Qoder identity: PAT or Service Account) |
 | **Profile** (tool set) | one Qoder **Agent** per profile |
@@ -147,10 +147,10 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   - miss → new conversation; if `M` has earlier turns, send them as one transcript preamble plus the final message.
 - After the turn, store `threadKey(M + assistantReply)` → conversation, so the client's next call hits.
 - `system`/developer messages → session `agent.system` patch.
-- Explicit control for n8n etc.: header `X-QodeRouter-Conversation: <conv_id>` (or `metadata.conversation_id`) forces a conversation;
-  header `X-QodeRouter-Profile: chat|assistant` selects profile.
-- Response headers: `X-QodeRouter-Conversation`, `X-QodeRouter-Model` (resolved), `X-QodeRouter-Credits`.
-- Token counts are not exposed by Qoder: `usage` tokens are estimates (chars/4) and we add `qoderouter.credits`.
+- Explicit control for n8n etc.: header `X-StillGPT-Conversation: <conv_id>` (or `metadata.conversation_id`) forces a conversation;
+  header `X-StillGPT-Profile: chat|assistant` selects profile.
+- Response headers: `X-StillGPT-Conversation`, `X-StillGPT-Model` (resolved), `X-StillGPT-Credits`.
+- Token counts are not exposed by Qoder: `usage` tokens are estimates (chars/4) and we add `stillgpt_credits`.
 - Tool/function calling (`tools`): phase 2 — map to Qoder custom tools (`agent.custom_tool_use` ⇄ `user.custom_tool_result`). MVP returns 400 `tools_not_supported`.
 
 ## 6. Models (core/models.ts)
@@ -186,7 +186,7 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 
 - Per-request `callback_url` on video/image jobs (works with n8n *Wait → On webhook call* using `$execution.resumeUrl`).
 - Per-user webhook endpoints (`/api/v1/webhooks`) for `video.completed`, `video.failed`, `image.completed`, `image.failed`; admins also get `model.*` and `provider.degraded`.
-- Delivery: POST JSON `{id, type, created_at, data}`, header `X-QodeRouter-Signature: sha256=<hex HMAC(secret, raw body)>`, retries 1m/5m/30m.
+- Delivery: POST JSON `{id, type, created_at, data}`, header `X-StillGPT-Signature: sha256=<hex HMAC(secret, raw body)>`, retries 1m/5m/30m.
 - n8n can also simply use the OpenAI credential type pointing at `https://<host>/v1` (Chat Model / OpenAI nodes).
 
 ### Qoder housekeeping (core/housekeeping.ts)
@@ -234,7 +234,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 ## 11. Config (env)
 
 `PORT`, `PUBLIC_BASE_URL`, `DATABASE_URL` (postgres://… or `pglite://<dir>` or `pglite://memory`), `QODER_BASE_URL`,
-`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `qoderouter`),
+`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),

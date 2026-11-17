@@ -1,6 +1,6 @@
-# Frontend agent brief — QodeRouter PWA
+# Frontend agent brief — StillGPT PWA
 
-You are building the **web app (PWA)** for QodeRouter, our "personal LLM" backend. The backend is finished and deployed;
+You are building the **web app (PWA)** for StillGPT, our "personal LLM" backend. The backend is finished and deployed;
 your job is the client only. Do not change the backend. If the API seems to be missing something, write it down in
 `BACKEND_REQUESTS.md` in the frontend repo and work around it.
 
