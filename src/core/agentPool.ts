@@ -6,6 +6,8 @@ import type { QoderClient } from '../qoder/client.js';
 import { PROFILES, type ProfileName } from './profiles.js';
 
 const ENV_KEY = 'qoder.environment_id';
+/** Hash of the Qoder credential + base URL the cached environment/agents were created with. */
+const ACCOUNT_KEY = 'qoder.account_fingerprint';
 const ENV_NAME = 'stillgpt';
 /** Model an agent is created with; sessions patch to the resolved model when it differs. */
 export const AGENT_BASE_MODEL = 'efficient';
@@ -40,6 +42,26 @@ export class AgentPool {
     });
   }
 
+  /**
+   * Drop cached environment/agent ids when the Qoder credential changed since they were created
+   * (a new PAT is usually a different account, where the old ids do not exist). Call once at startup.
+   */
+  async syncAccount(fingerprint: string): Promise<void> {
+    const [row] = await this.db.select().from(kv).where(eq(kv.key, ACCOUNT_KEY));
+    if (row && row.value !== fingerprint) {
+      const agents = await this.db.select().from(qoderAgents);
+      await this.db.delete(qoderAgents);
+      await this.db.delete(kv).where(eq(kv.key, ENV_KEY));
+      this.envId = undefined;
+      this.log.warn('qoder.account_changed', { droppedAgents: agents.length, effect: 'environment and agents are re-resolved on next use' });
+      // same account with a rotated token: the old agents are still there, so archive them (best effort)
+      for (const a of agents) this.qoder.archiveAgent(a.agentId).catch(() => {});
+    }
+    if (row?.value !== fingerprint) {
+      await this.db.insert(kv).values({ key: ACCOUNT_KEY, value: fingerprint }).onConflictDoUpdate({ target: kv.key, set: { value: fingerprint, updatedAt: new Date() } });
+    }
+  }
+
   async agentId(profile: ProfileName): Promise<string> {
     const def = PROFILES[profile];
     return this.once(`agent:${profile}`, async () => {
@@ -60,6 +82,15 @@ export class AgentPool {
       this.log.info('qoder.agent.created', { profile, agentId: agent.id });
       return agent.id;
     });
+  }
+
+  /** Forget the cached environment (it was deleted upstream). No-op when QODER_ENVIRONMENT_ID pins it. */
+  async invalidateEnvironment(): Promise<boolean> {
+    if (this.configuredEnvId) return false;
+    this.envId = undefined;
+    await this.db.delete(kv).where(eq(kv.key, ENV_KEY));
+    this.log.warn('qoder.environment.invalidated', {});
+    return true;
   }
 
   /** Forget cached ids (e.g. after an upstream 404 on the agent). */

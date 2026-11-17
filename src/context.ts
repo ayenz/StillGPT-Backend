@@ -15,6 +15,7 @@ import { TurnRunner } from './core/turns.js';
 import { UsageService } from './core/usage.js';
 import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
+import { sha256 } from './ids.js';
 import { createLogger, type Logger } from './log.js';
 import { FolaxClient } from './providers/folax.js';
 import { QoderClient } from './qoder/client.js';
@@ -65,6 +66,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const qoder = new QoderClient({ baseUrl: config.QODER_BASE_URL, tokens, log: log.child({ mod: 'qoder' }), fetchImpl: o.fetchImpl, retryBaseMs: o.qoderRetryBaseMs });
   const bus = new EventBus();
   const agents = new AgentPool(db, qoder, log, config.QODER_ENVIRONMENT_ID);
+  await agents.syncAccount(sha256(`${config.QODER_BASE_URL}\n${config.QODER_SA_KEY ?? config.QODER_PAT}`));
   const models = new ModelRegistry(db, qoder, config.MODEL_ALIASES, log.child({ mod: 'models' }));
   const ffmpeg = config.FFMPEG_PATH && (await probeFfmpeg(config.FFMPEG_PATH)) ? config.FFMPEG_PATH : null;
   if (!ffmpeg) log.warn('media.ffmpeg_unavailable', { path: config.FFMPEG_PATH, effect: 'videos get no thumbnail_url/preview_url' });

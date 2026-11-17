@@ -378,9 +378,11 @@ export class TurnRunner {
     try {
       return (await this.d.qoder.createSession(await body())).id;
     } catch (err) {
-      // the cached agent may have been archived/deleted upstream → recreate once
+      // the cached environment or agent may have been deleted upstream (or belong to another account) → re-resolve once
       if (!(err instanceof AppError && (err.code === 'upstream_not_found' || err.status === 400))) throw err;
-      await this.d.agents.invalidate(profile);
+      if (/environment/i.test(err.message)) {
+        if (!(await this.d.agents.invalidateEnvironment())) throw err;
+      } else await this.d.agents.invalidate(profile);
       return (await this.d.qoder.createSession(await body())).id;
     }
   }
