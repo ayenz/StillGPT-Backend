@@ -623,6 +623,42 @@ with the chat history, but images from earlier turns have to be attached again b
 - `report`: `{dry_run, sessions_archived, files_deleted, files_in_use, bytes_freed, errors}`.
 - `dry_run: true` changes nothing and returns what a pass would do. Add `retention_hours` to preview another window before saving it.
 
+### Qoder credits
+
+Remaining credits and per-request credit history of the Qoder account. Qoder exposes these only on its web dashboard API, which
+accepts the browser login cookie `qoder_session_cookie` and rejects PAT / service-account tokens. The cookie comes from
+`QODER_WEB_SESSION` or is pasted by an admin. When it expires, `status` turns `"session_expired"` and an admin pastes a new one.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/admin/qoder/credits` | `?refresh=true` skips the 5-minute cache | `{status, credits, stale, fetched_at, error, session}` |
+| GET | `/admin/qoder/credits/history` | `?page=1&page_size=50&start=&end=&order=desc` | `{status, error, items, page_summary, page}` |
+| PUT | `/admin/qoder/session` | `{cookie}` | same as GET credits (fetched right away) |
+| DELETE | `/admin/qoder/session` | – | same as GET credits (falls back to `QODER_WEB_SESSION`) |
+
+All of them return HTTP 200; branch on `status`:
+
+| `status` | meaning | admin page |
+|---|---|---|
+| `ok` | fresh data | show it |
+| `not_configured` | no cookie at all | ask an admin to paste one |
+| `session_expired` | Qoder rejected the cookie | ask for a new cookie; `credits` may still hold the last reading (`stale: true`) |
+| `error` | Qoder unreachable or answered unexpectedly; `error` says why | retry later; `credits` may be stale |
+
+- `credits`: `null` or `{used, limit, remaining, usage_percentage, unit, plan, resource_package, dedicated_resource_package, last_reset_at, next_reset_at}`.
+  The top-level numbers are the total over all sources. `plan` and both packages are `{used, limit, remaining, usage_percentage}`.
+- `fetched_at`: when `credits` was read from Qoder.
+- `session`: `{configured, source: "env"|"admin"|null, issued_at, updated_at}`. `issued_at` is when Qoder issued the cookie
+  (read from the cookie itself, `null` if unreadable). `updated_at` is when an admin last pasted it. The cookie value is never returned.
+- `cookie` (PUT): the `qoder_session_cookie` value from a logged-in qoder.com browser (DevTools → Application → Cookies).
+  `qoder_session_cookie=…` or a whole `Cookie:` header also works.
+- History query: `page` ≥ 1, `page_size` 1–100 (default 50), `start` / `end` as ISO 8601 or epoch milliseconds (both optional),
+  `order` = `desc` (newest first, default) or `asc`. Not cached.
+- History `items[]`: `{begin_at, finish_at, session_id, business_id, source, operation, kind, model, credits, original_credits,
+  cost, original_cost, discount_factor}`. `source` is where credits were spent (`"Cloud Agents"` = this backend, `"IDE"`, `"Qoder"`, …);
+  `operation` e.g. `"Agent"`, `"Video"`; `kind` = `"Charged"` / `"Not Charged"`; `cost` is in USD.
+- `page_summary`: totals of **this page only** (Qoder returns no totals for the whole range). `page`: `{current, page_size, last_page, total_items}`.
+
 ---
 
 ## 11. Errors

@@ -206,6 +206,16 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   (status `terminated`) the same delete → 200 `file_deleted`. `ensureSession` treats an archived/terminated session as lost.
 - Trade-off: after a session is archived, images from older turns are no longer in the sandbox; the user re-attaches one to edit it.
 
+### Qoder credits (core/qoderCredits.ts)
+
+- The account's remaining credits and per-request history are only on qoder.com's web dashboard API
+  (`GET /api/v2/me/usages/big_model_credits`, `GET /api/v1/me/usages/big_model_credits/histories`). Verified 2026-11-16: they reject
+  PAT (401), `api.qoder.com` / `openapi.qoder.sh` have no equivalent for PATs, and the browser cookie `qoder_session_cookie` alone
+  works from the server (no anti-bot cookies, CSRF header or browser User-Agent needed).
+- The cookie comes from `kv.qoder.web_session` (pasted by an admin via `PUT /admin/qoder/session`) or else `QODER_WEB_SESSION`.
+  Its first base64url segment is the issue time in Unix seconds; the expiry is unknown, so a 401 becomes `status: "session_expired"`.
+- `GET /admin/qoder/credits` caches for 5 min and keeps the last good reading (`stale: true`) when a fetch fails. History is not cached.
+
 ## 9. Auth & users
 
 - Users: `email`, scrypt `password_hash`, `role admin|user`, `monthly_credit_limit` (null = unlimited). First admin from `ADMIN_EMAIL`/`ADMIN_PASSWORD`.

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { verifyPassword } from '../../auth/auth.js';
 import type { AppContext } from '../../context.js';
 import { type HousekeepingReport, type HousekeepingStatus, INTERVAL_HOURS_MAX, RETENTION_HOURS_MAX } from '../../core/housekeeping.js';
+import { HISTORY_PAGE_SIZE_MAX, type QoderCreditHistory, type QoderCreditsStatus, type QuotaSummary } from '../../core/qoderCredits.js';
 import { badRequest, unauthorized } from '../../errors.js';
 import type { Env } from '../../http.js';
 import { body, parse, userView } from './util.js';
@@ -172,7 +173,93 @@ export function adminRoutes(ctx: AppContext) {
     return c.json({ report: reportView(report), ...housekeepingView(await ctx.housekeeper.status()) });
   });
 
+  /** Remaining Qoder credits (cached 5 min; `?refresh=true` fetches now). Always 200: branch on `status`. */
+  app.get('/admin/qoder/credits', async (c) => {
+    const refresh = ['1', 'true'].includes(c.req.query('refresh') ?? '');
+    return c.json(creditsView(await ctx.qoderCredits.status({ refresh })));
+  });
+
+  /** Qoder's per-request credit history, one page at a time. Always 200: branch on `status`. */
+  app.get('/admin/qoder/credits/history', async (c) => {
+    const msTime = z.string().regex(/^\d{10,13}$/).transform((v) => new Date(v.length === 10 ? Number(v) * 1000 : Number(v)));
+    const q = parse(
+      z
+        .object({
+          page: z.coerce.number().int().min(1).default(1),
+          page_size: z.coerce.number().int().min(1).max(HISTORY_PAGE_SIZE_MAX).default(50),
+          start: z.union([msTime, z.coerce.date()]).optional(),
+          end: z.union([msTime, z.coerce.date()]).optional(),
+          order: z.enum(['asc', 'desc']).default('desc'),
+        })
+        .strict()
+        .refine((v) => !v.start || !v.end || v.start <= v.end, { message: 'start must be before end', path: ['start'] }),
+      c.req.query(),
+    );
+    return c.json(historyView(await ctx.qoderCredits.history({ page: q.page, pageSize: q.page_size, start: q.start, end: q.end, order: q.order })));
+  });
+
+  /** Replace the qoder.com session cookie (bare value, `qoder_session_cookie=…` or a whole Cookie header). */
+  app.put('/admin/qoder/session', async (c) => {
+    const b = await body(c, z.object({ cookie: z.string().trim().min(20, 'cookie looks too short').max(8000) }).strict());
+    return c.json(creditsView(await ctx.qoderCredits.setSession(b.cookie)));
+  });
+
+  /** Forget the admin-set cookie; QODER_WEB_SESSION (if any) applies again. */
+  app.delete('/admin/qoder/session', async (c) => c.json(creditsView(await ctx.qoderCredits.setSession(null))));
+
   return app;
+}
+
+function historyView(h: QoderCreditHistory) {
+  return {
+    status: h.status,
+    error: h.error,
+    items: h.items.map((i) => ({
+      begin_at: i.beginAt,
+      finish_at: i.finishAt,
+      session_id: i.sessionId,
+      business_id: i.businessId,
+      source: i.source,
+      operation: i.operation,
+      kind: i.kind,
+      model: i.model,
+      credits: i.credits,
+      original_credits: i.originalCredits,
+      cost: i.cost,
+      original_cost: i.originalCost,
+      discount_factor: i.discountFactor,
+    })),
+    page_summary: h.pageSummary
+      ? { credits: h.pageSummary.credits, original_credits: h.pageSummary.originalCredits, cost: h.pageSummary.cost, original_cost: h.pageSummary.originalCost }
+      : null,
+    page: h.page ? { current: h.page.current, page_size: h.page.pageSize, last_page: h.page.lastPage, total_items: h.page.totalItems } : null,
+  };
+}
+
+function quotaView(q: QuotaSummary) {
+  return { used: q.used, limit: q.limit, remaining: q.remaining, usage_percentage: q.usagePercentage };
+}
+
+function creditsView(s: QoderCreditsStatus) {
+  const c = s.credits;
+  return {
+    status: s.status,
+    credits: c
+      ? {
+          ...quotaView(c),
+          unit: c.unit,
+          plan: quotaView(c.plan),
+          resource_package: quotaView(c.resourcePackage),
+          dedicated_resource_package: quotaView(c.dedicatedResourcePackage),
+          last_reset_at: c.lastResetAt,
+          next_reset_at: c.nextResetAt,
+        }
+      : null,
+    stale: s.stale,
+    fetched_at: s.fetchedAt,
+    error: s.error,
+    session: { configured: s.session.configured, source: s.session.source, issued_at: s.session.issuedAt, updated_at: s.session.updatedAt },
+  };
 }
 
 function reportView(r: HousekeepingReport) {

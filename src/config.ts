@@ -30,6 +30,10 @@ const schema = z
     QODER_PAT: z.string().optional(),
     QODER_SA_KEY: z.string().optional(),
     QODER_ENVIRONMENT_ID: z.string().optional(),
+    /** qoder.com web dashboard API, used only to read the account's remaining credits. */
+    QODER_WEB_BASE_URL: z.string().url().default('https://qoder.com'),
+    /** Browser login cookie `qoder_session_cookie` for that API (PATs are rejected there). Admins can override it. */
+    QODER_WEB_SESSION: optionalString(z.string().min(1)),
     JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 chars'),
     MEDIA_DIR: z.string().default('./data/media'),
     MEDIA_SIGNING_SECRET: z.string().min(16).optional(),

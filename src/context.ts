@@ -5,6 +5,7 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
+import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
@@ -41,6 +42,7 @@ export interface AppContext {
   folax: FolaxClient | null;
   webhooks: WebhookService;
   housekeeper: QoderHousekeeper;
+  qoderCredits: QoderCreditsService;
   /** Start background work (model sync, media worker, webhook retries). */
   start(): Promise<void>;
   close(): Promise<void>;
@@ -82,6 +84,13 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
       retentionHours: config.QODER_RETENTION_HOURS,
       intervalHours: config.QODER_HOUSEKEEPING_INTERVAL_HOURS > 0 ? config.QODER_HOUSEKEEPING_INTERVAL_HOURS : 24,
     },
+  });
+  const qoderCredits = new QoderCreditsService({
+    db,
+    log: log.child({ mod: 'qoder_credits' }),
+    baseUrl: config.QODER_WEB_BASE_URL,
+    envSession: config.QODER_WEB_SESSION,
+    fetchImpl: o.fetchImpl,
   });
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }) });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
@@ -131,6 +140,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     folax,
     webhooks,
     housekeeper,
+    qoderCredits,
     async start() {
       await auth.ensureAdmin(config.ADMIN_EMAIL, config.ADMIN_PASSWORD);
       await models.load();
