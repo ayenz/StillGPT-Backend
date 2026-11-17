@@ -662,6 +662,30 @@ with the chat history, but images from earlier turns have to be attached again b
 - `report`: `{dry_run, sessions_archived, files_deleted, files_in_use, bytes_freed, errors}`.
 - `dry_run: true` changes nothing and returns what a pass would do. Add `retention_hours` to preview another window before saving it.
 
+### Qoder credential (PAT)
+
+The PAT that authenticates every Qoder call. An admin-set PAT overrides `QODER_PAT` and takes effect on the next request (no restart).
+`QODER_SA_KEY`, when set, always wins and the PAT can't be changed here.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/admin/qoder/credential` | – | `{mode, source, last4, updated_at, environment_pinned, busy}` |
+| PUT | `/admin/qoder/credential` | `{pat, force?}` | same + `account_changed` |
+| DELETE | `/admin/qoder/credential` | `?force=true` | same + `account_changed` (falls back to `QODER_PAT`) |
+
+- `mode`: `"pat"`, `"service_account"` (QODER_SA_KEY; read-only here) or `"none"` (nothing configured: every chat/media call fails with
+  503 `qoder_not_configured` until an admin sets a PAT).
+- `source`: `"admin"` (set here), `"env"` (`QODER_PAT` / `QODER_SA_KEY`) or `null`. `last4`: last 4 characters; the PAT itself is never returned.
+- `environment_pinned`: `QODER_ENVIRONMENT_ID` is set. That id belongs to one account, so after switching to another account it must be changed too.
+- `busy`: `{conversations, media_jobs}` currently running on Qoder.
+- PUT checks the PAT against Qoder before saving. Errors: 400 `invalid_qoder_pat` (Qoder rejected it; nothing changed),
+  409 `qoder_busy` (work is running; `details: {busy_conversations, busy_media_jobs}`; retry later or send `force: true`, which may
+  break those turns/jobs), 409 `service_account_active`, 502 `upstream_unavailable` (couldn't verify).
+- DELETE checks `QODER_PAT` the same way. 409 `qoder_pat_required` when `QODER_PAT` is unset (it would leave Qoder unconfigured).
+- `account_changed: true`: the credential differs from before, so cached Qoder environment/agents were dropped (re-created on next use)
+  and models re-synced. Existing conversations continue in a new Qoder session; files uploaded to Qoder by older turns are not
+  carried over. If it is another Qoder account, also paste that account's session cookie (`PUT /admin/qoder/session`) so credits match.
+
 ### Qoder credits
 
 Remaining credits and per-request credit history of the Qoder account. Qoder exposes these only on its web dashboard API, which

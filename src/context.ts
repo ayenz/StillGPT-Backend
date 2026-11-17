@@ -5,6 +5,7 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
+import { QoderCredentialService } from './core/qoderCredential.js';
 import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
 import { MediaService } from './core/media.js';
@@ -15,7 +16,6 @@ import { TurnRunner } from './core/turns.js';
 import { UsageService } from './core/usage.js';
 import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
-import { sha256 } from './ids.js';
 import { createLogger, type Logger } from './log.js';
 import { FolaxClient } from './providers/folax.js';
 import { QoderClient } from './qoder/client.js';
@@ -44,6 +44,7 @@ export interface AppContext {
   webhooks: WebhookService;
   housekeeper: QoderHousekeeper;
   qoderCredits: QoderCreditsService;
+  qoderCredential: QoderCredentialService;
   /** Start background work (model sync, media worker, webhook retries). */
   start(): Promise<void>;
   close(): Promise<void>;
@@ -60,14 +61,33 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const log = o.log ?? createLogger(config.LOG_LEVEL);
   const database = await openDatabase(config.DATABASE_URL);
   const db = database.db;
-  const tokens = config.QODER_SA_KEY
-    ? serviceAccountTokenProvider(config.QODER_SA_KEY, config.QODER_OPENAPI_BASE_URL, o.fetchImpl)
-    : patTokenProvider(config.QODER_PAT!);
-  const qoder = new QoderClient({ baseUrl: config.QODER_BASE_URL, tokens, log: log.child({ mod: 'qoder' }), fetchImpl: o.fetchImpl, retryBaseMs: o.qoderRetryBaseMs });
+  const qoderLog = log.child({ mod: 'qoder' });
+  const qoderCredential = new QoderCredentialService({
+    db,
+    log: qoderLog,
+    baseUrl: config.QODER_BASE_URL,
+    envPat: config.QODER_PAT,
+    saKey: config.QODER_SA_KEY,
+    saProvider: config.QODER_SA_KEY ? serviceAccountTokenProvider(config.QODER_SA_KEY, config.QODER_OPENAPI_BASE_URL, o.fetchImpl) : undefined,
+    environmentPinned: !!config.QODER_ENVIRONMENT_ID,
+    // a throwaway client on the candidate PAT, no retries: fails fast on 401
+    probe: async (pat) => {
+      await new QoderClient({ baseUrl: config.QODER_BASE_URL, tokens: patTokenProvider(pat), log: qoderLog, fetchImpl: o.fetchImpl, maxRetries: 0 }).listEnvironments();
+    },
+  });
+  await qoderCredential.load();
+  const qoder = new QoderClient({ baseUrl: config.QODER_BASE_URL, tokens: qoderCredential, log: qoderLog, fetchImpl: o.fetchImpl, retryBaseMs: o.qoderRetryBaseMs });
   const bus = new EventBus();
   const agents = new AgentPool(db, qoder, log, config.QODER_ENVIRONMENT_ID);
-  await agents.syncAccount(sha256(`${config.QODER_BASE_URL}\n${config.QODER_SA_KEY ?? config.QODER_PAT}`));
+  const fingerprint = qoderCredential.fingerprint();
+  if (fingerprint) await agents.syncAccount(fingerprint);
+  else log.warn('qoder.not_configured', { effect: 'Qoder calls fail until an admin sets a PAT via PUT /admin/qoder/credential' });
   const models = new ModelRegistry(db, qoder, config.MODEL_ALIASES, log.child({ mod: 'models' }));
+  // A different account has its own environment, agents and possibly models.
+  qoderCredential.onChange = async (fp) => {
+    if (fp) await agents.syncAccount(fp);
+    await models.sync().catch((err) => log.warn('models.sync_failed', { err }));
+  };
   const ffmpeg = config.FFMPEG_PATH && (await probeFfmpeg(config.FFMPEG_PATH)) ? config.FFMPEG_PATH : null;
   if (!ffmpeg) log.warn('media.ffmpeg_unavailable', { path: config.FFMPEG_PATH, effect: 'videos get no thumbnail_url/preview_url' });
   const store = new MediaStore(db, config.MEDIA_DIR, config.PUBLIC_BASE_URL, config.MEDIA_SIGNING_SECRET!, config.MEDIA_URL_TTL_SEC, ffmpeg);
@@ -143,6 +163,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     webhooks,
     housekeeper,
     qoderCredits,
+    qoderCredential,
     async start() {
       await auth.ensureAdmin(config.ADMIN_EMAIL, config.ADMIN_PASSWORD);
       await models.load();

@@ -206,6 +206,14 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   (status `terminated`) the same delete → 200 `file_deleted`. `ensureSession` treats an archived/terminated session as lost.
 - Trade-off: after a session is archived, images from older turns are no longer in the sandbox; the user re-attaches one to edit it.
 
+### Qoder credential (core/qoderCredential.ts)
+
+- `QoderCredentialService` is the `QoderClient`'s `TokenProvider`: `QODER_SA_KEY` → admin PAT (`kv.qoder.pat`) → `QODER_PAT`.
+  Neither set is allowed at boot; Qoder calls then fail with 503 `qoder_not_configured` until an admin sets a PAT.
+- `PUT /admin/qoder/credential` probes the PAT (`GET /environments`, no retries) before saving, refuses while conversations are `busy` or
+  media jobs `in_progress` unless `force`, and on a fingerprint change runs `agents.syncAccount` (drop cached env/agents) + `models.sync`.
+- The PAT is stored in plaintext in `kv` (like the web session cookie) and never returned by the API.
+
 ### Qoder credits (core/qoderCredits.ts)
 
 - The account's remaining credits and per-request history are only on qoder.com's web dashboard API
@@ -234,7 +242,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 ## 11. Config (env)
 
 `PORT`, `PUBLIC_BASE_URL`, `DATABASE_URL` (postgres://… or `pglite://<dir>` or `pglite://memory`), `QODER_BASE_URL`,
-`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
+`QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`; the PAT may also be left empty and set by an admin via `/admin/qoder/credential`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),

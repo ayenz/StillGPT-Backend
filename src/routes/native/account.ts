@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { verifyPassword } from '../../auth/auth.js';
 import type { AppContext } from '../../context.js';
 import { type HousekeepingReport, type HousekeepingStatus, INTERVAL_HOURS_MAX, RETENTION_HOURS_MAX } from '../../core/housekeeping.js';
+import type { QoderCredentialStatus } from '../../core/qoderCredential.js';
 import { HISTORY_PAGE_SIZE_MAX, type QoderCreditHistory, type QoderCreditsStatus, type QuotaSummary } from '../../core/qoderCredits.js';
 import { badRequest, unauthorized } from '../../errors.js';
 import type { Env } from '../../http.js';
@@ -207,7 +208,35 @@ export function adminRoutes(ctx: AppContext) {
   /** Forget the admin-set cookie; QODER_WEB_SESSION (if any) applies again. */
   app.delete('/admin/qoder/session', async (c) => c.json(creditsView(await ctx.qoderCredits.setSession(null))));
 
+  /** Which Qoder credential is active (the token itself is never returned). */
+  app.get('/admin/qoder/credential', async (c) => c.json(credentialView(ctx.qoderCredential.status(), await ctx.qoderCredential.busy())));
+
+  /** Replace the Qoder PAT. Verified against Qoder before saving; 409 while work is running unless `force`. */
+  app.put('/admin/qoder/credential', async (c) => {
+    const b = await body(c, z.object({ pat: z.string().trim().min(4, 'PAT looks too short').max(4000), force: z.boolean().default(false) }).strict());
+    const r = await ctx.qoderCredential.setPat(b.pat, { force: b.force });
+    return c.json({ ...credentialView(r.status, await ctx.qoderCredential.busy()), account_changed: r.accountChanged });
+  });
+
+  /** Forget the admin-set PAT; QODER_PAT from the environment applies again. `?force=true` skips the busy check. */
+  app.delete('/admin/qoder/credential', async (c) => {
+    const force = ['1', 'true'].includes(c.req.query('force') ?? '');
+    const r = await ctx.qoderCredential.setPat(null, { force });
+    return c.json({ ...credentialView(r.status, await ctx.qoderCredential.busy()), account_changed: r.accountChanged });
+  });
+
   return app;
+}
+
+function credentialView(s: QoderCredentialStatus, busy: { conversations: number; mediaJobs: number }) {
+  return {
+    mode: s.mode,
+    source: s.source,
+    last4: s.last4,
+    updated_at: s.updatedAt,
+    environment_pinned: s.environmentPinned,
+    busy: { conversations: busy.conversations, media_jobs: busy.mediaJobs },
+  };
 }
 
 function historyView(h: QoderCreditHistory) {

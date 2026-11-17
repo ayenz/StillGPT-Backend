@@ -27,8 +27,9 @@ const schema = z
     DATABASE_URL: z.string().default('pglite://./data/pglite'),
     QODER_BASE_URL: z.string().url().default('https://api.qoder.com/api/v1/cloud'),
     QODER_OPENAPI_BASE_URL: z.string().url().default('https://openapi.qoder.sh'),
-    QODER_PAT: z.string().optional(),
-    QODER_SA_KEY: z.string().optional(),
+    /** Default PAT; an admin can override it (PUT /admin/qoder/credential). May be empty if an admin sets one. */
+    QODER_PAT: optionalString(z.string().min(1)),
+    QODER_SA_KEY: optionalString(z.string().min(1)),
     QODER_ENVIRONMENT_ID: z.string().optional(),
     /** qoder.com web dashboard API, used only to read the account's remaining credits. */
     QODER_WEB_BASE_URL: z.string().url().default('https://qoder.com'),
@@ -86,7 +87,6 @@ const schema = z
       .transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean)),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   })
-  .refine((c) => c.QODER_PAT || c.QODER_SA_KEY, { message: 'Set QODER_PAT or QODER_SA_KEY' })
   .refine((c) => !c.FOLAX_URL === !c.FOLAX_API_KEY, { message: 'Set both FOLAX_URL and FOLAX_API_KEY (or neither)' })
   .refine((c) => c.IMAGE_PROVIDER_DEFAULT !== 'folax' || c.FOLAX_URL, { message: 'IMAGE_PROVIDER_DEFAULT=folax needs FOLAX_URL and FOLAX_API_KEY' });
 

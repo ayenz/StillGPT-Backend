@@ -75,6 +75,8 @@ export interface MockQoder {
   setReply(fn: ((text: string, modelId: string) => string | undefined) | undefined): void;
   /** Make ImageGen/VideoGen calls fail with the returned text (undefined restores success). */
   setToolError(fn: ((tool: 'ImageGen' | 'VideoGen', text: string) => string | undefined) | undefined): void;
+  /** Change the accepted bearer token (simulates rotating the PAT upstream). */
+  setToken(t: string): void;
 }
 
 const BASE = '/api/v1/cloud';
@@ -154,7 +156,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQoder> {
-  const token = opts.token ?? 'pt-test';
+  let token = opts.token ?? 'pt-test';
   const heartbeatMs = opts.heartbeatMs ?? 15_000;
   const core = new MockCore(opts.models ?? DEFAULT_MODELS);
   const scriptOpts: ScriptOptions = {
@@ -642,6 +644,9 @@ export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQ
     },
     setToolError(fn) {
       scriptOpts.toolError = fn;
+    },
+    setToken(t) {
+      token = t;
     },
     retireModel(id) {
       const rec = state.models.get(id);
