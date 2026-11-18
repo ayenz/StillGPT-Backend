@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import type { AppContext } from './context.js';
 import { AppError, anthropicErrorBody, nativeErrorBody, openaiErrorBody, toAppError } from './errors.js';
 import type { Env } from './http.js';
+import { appleAppSiteAssociation, assetLinks } from './auth/passkeys.js';
 import { newId } from './ids.js';
 import { anthropicRoutes } from './routes/anthropic/index.js';
 import { mediaRoutes } from './routes/media.js';
@@ -42,6 +43,17 @@ export function createApp(ctx: AppContext) {
   app.get('/readyz', async (c) => {
     const models = ctx.models.listActive().length;
     return c.json({ ok: models > 0, models }, models > 0 ? 200 : 503);
+  });
+
+  // Passkey association files for native apps. They must be served from the RP domain (the frontend); these copies are the
+  // source to deploy there and to check against (see docs/handoff/flutter-passkeys.md).
+  app.get('/.well-known/assetlinks.json', (c) => {
+    const body = assetLinks(ctx.passkeys.config);
+    return body ? c.json(body) : c.json(nativeErrorBody(new AppError(404, 'not_configured', 'No Android app is configured')), 404);
+  });
+  app.get('/.well-known/apple-app-site-association', (c) => {
+    const body = appleAppSiteAssociation(ctx.passkeys.config);
+    return body ? c.json(body) : c.json(nativeErrorBody(new AppError(404, 'not_configured', 'No iOS app is configured')), 404);
   });
 
   app.route('/', mediaRoutes(ctx));

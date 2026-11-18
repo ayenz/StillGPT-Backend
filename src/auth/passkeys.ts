@@ -59,15 +59,50 @@ export interface PasskeyConfig {
   /** null = passkeys disabled (no https origin to derive it from). */
   rpId: string | null;
   rpName: string;
+  /** Web origins plus `android:apk-key-hash:…` origins of the Android app. */
   origins: string[];
+  android: { package: string; certSha256: string[] } | null;
+  iosAppIds: string[];
 }
 
-/** RP ID + allowed origins from config: PASSKEY_* or derived from CORS_ORIGINS. */
-export function passkeyConfig(c: { PASSKEY_RP_ID?: string; PASSKEY_RP_NAME: string; PASSKEY_ORIGINS?: string[]; CORS_ORIGINS: string[] }): PasskeyConfig {
-  const origins = (c.PASSKEY_ORIGINS ?? c.CORS_ORIGINS).filter((o) => o !== '*').map((o) => o.replace(/\/+$/, ''));
-  const firstHttps = origins.find((o) => o.startsWith('https://'));
+/** The origin Android's Credential Manager reports for an app signed with this certificate. */
+export const androidOrigin = (sha256Fingerprint: string) => `android:apk-key-hash:${Buffer.from(sha256Fingerprint.replace(/:/g, ''), 'hex').toString('base64url')}`;
+
+/** RP ID + allowed origins from config: PASSKEY_* or derived from CORS_ORIGINS; native app ids for the .well-known files. */
+export function passkeyConfig(c: {
+  PASSKEY_RP_ID?: string;
+  PASSKEY_RP_NAME: string;
+  PASSKEY_ORIGINS?: string[];
+  CORS_ORIGINS: string[];
+  PASSKEY_ANDROID_PACKAGE?: string;
+  PASSKEY_ANDROID_CERT_SHA256?: string[];
+  PASSKEY_IOS_APP_IDS?: string[];
+}): PasskeyConfig {
+  const web = (c.PASSKEY_ORIGINS ?? c.CORS_ORIGINS).filter((o) => o !== '*').map((o) => o.replace(/\/+$/, ''));
+  const firstHttps = web.find((o) => o.startsWith('https://'));
   const rpId = c.PASSKEY_RP_ID ?? (firstHttps ? new URL(firstHttps).hostname : null);
-  return { rpId, rpName: c.PASSKEY_RP_NAME, origins };
+  const certs = c.PASSKEY_ANDROID_CERT_SHA256 ?? [];
+  const android = c.PASSKEY_ANDROID_PACKAGE && certs.length ? { package: c.PASSKEY_ANDROID_PACKAGE, certSha256: certs } : null;
+  return { rpId, rpName: c.PASSKEY_RP_NAME, origins: [...web, ...(android ? certs.map(androidOrigin) : [])], android, iosAppIds: c.PASSKEY_IOS_APP_IDS ?? [] };
+}
+
+/**
+ * Digital Asset Links for the RP domain (`https://<rpId>/.well-known/assetlinks.json`): lets the Android app use the
+ * site's passkeys. null when no Android app is configured.
+ */
+export function assetLinks(cfg: PasskeyConfig) {
+  if (!cfg.android) return null;
+  return [
+    {
+      relation: ['delegate_permission/common.handle_all_urls', 'delegate_permission/common.get_login_creds'],
+      target: { namespace: 'android_app', package_name: cfg.android.package, sha256_cert_fingerprints: cfg.android.certSha256 },
+    },
+  ];
+}
+
+/** `https://<rpId>/.well-known/apple-app-site-association`: lets the iOS app use the site's passkeys. */
+export function appleAppSiteAssociation(cfg: PasskeyConfig) {
+  return cfg.iosAppIds.length ? { webcredentials: { apps: cfg.iosAppIds } } : null;
 }
 
 /**
@@ -87,6 +122,10 @@ export class PasskeyService {
 
   get enabled(): boolean {
     return !!this.d.config.rpId;
+  }
+
+  get config(): PasskeyConfig {
+    return this.d.config;
   }
 
   // ── registration (signed in) ────────────────────────────────────────────
@@ -231,11 +270,14 @@ export class PasskeyService {
 
   // ── internals ───────────────────────────────────────────────────────────
 
-  /** The RP ID for a request's Origin: `localhost` for local dev, otherwise the configured domain. */
+  /**
+   * The RP ID for a request's Origin: `localhost` for local dev, otherwise the configured domain. Native apps send no
+   * Origin header and get the configured domain (their real origin is checked in the signed response).
+   */
   private rpIdFor(origin: string | undefined): string {
     const rpId = this.d.config.rpId;
     if (!rpId) throw new AppError(503, 'passkeys_not_configured', 'Passkeys are not configured on this server');
-    if (!origin) return rpId;
+    if (!origin || origin === 'null') return rpId;
     const o = origin.replace(/\/+$/, '');
     if (!this.d.config.origins.includes(o)) throw new AppError(403, 'origin_not_allowed', `Passkeys are not enabled for ${o}`);
     const host = new URL(o).hostname;

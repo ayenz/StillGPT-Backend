@@ -51,6 +51,8 @@ describe('passkeyConfig', () => {
       rpId: 'stillgpt.ayenz.my.id',
       rpName: 'X',
       origins: ['http://localhost:5173', 'https://stillgpt.ayenz.my.id'],
+      android: null,
+      iosAppIds: [],
     });
     expect(passkeyConfig({ PASSKEY_RP_NAME: 'X', CORS_ORIGINS: ['*'] }).rpId).toBeNull();
     expect(passkeyConfig({ PASSKEY_RP_ID: 'ayenz.my.id', PASSKEY_RP_NAME: 'X', CORS_ORIGINS: ['https://a.ayenz.my.id'] }).rpId).toBe('ayenz.my.id');
@@ -120,6 +122,11 @@ describe('registering a passkey', () => {
 
     expect((await json(await u.call('/me/passkeys/options', { method: 'POST', origin: 'https://evil.example.net' }))).body.error.code).toBe('origin_not_allowed');
     expect((await u.call('/me/passkeys/options', { method: 'POST', auth: false })).status).toBe(401);
+  });
+
+  it('no native app configured: the .well-known files are 404', async () => {
+    expect((await fetch(`${h.url}/.well-known/assetlinks.json`)).status).toBe(404);
+    expect((await fetch(`${h.url}/.well-known/apple-app-site-association`)).status).toBe(404);
   });
 
   it('uses rpId localhost for the dev origin', async () => {

@@ -94,7 +94,29 @@ const schema = z
     PASSKEY_RP_NAME: z.string().min(1).default('StillGPT'),
     /** Web origins allowed to use passkeys (comma-separated). Default: CORS_ORIGINS without "*". */
     PASSKEY_ORIGINS: optionalString(z.string().transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean))),
+    /** Native app (Flutter) passkeys, Android: the app's package name, e.g. `id.ayenz.stillgpt`. */
+    PASSKEY_ANDROID_PACKAGE: optionalString(z.string().regex(/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/, 'PASSKEY_ANDROID_PACKAGE must look like com.example.app')),
+    /**
+     * SHA-256 fingerprints of the Android signing certificates (comma-separated, `AB:CD:…`): debug, upload/release and the
+     * Play App Signing key. Each becomes an allowed passkey origin (`android:apk-key-hash:…`) and goes into assetlinks.json.
+     */
+    PASSKEY_ANDROID_CERT_SHA256: optionalString(
+      z
+        .string()
+        .transform((v) => v.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))
+        .pipe(z.array(z.string().regex(/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/, 'each fingerprint must be 32 hex bytes separated by colons'))),
+    ),
+    /** iOS: `TEAMID.bundle.id` entries (comma-separated) for apple-app-site-association `webcredentials`. */
+    PASSKEY_IOS_APP_IDS: optionalString(
+      z
+        .string()
+        .transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean))
+        .pipe(z.array(z.string().regex(/^[A-Z0-9]{10}\.[\w.-]+$/, 'each iOS app id must be TEAMID.bundle.id'))),
+    ),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  })
+  .refine((c) => !c.PASSKEY_ANDROID_PACKAGE === !c.PASSKEY_ANDROID_CERT_SHA256?.length, {
+    message: 'Set both PASSKEY_ANDROID_PACKAGE and PASSKEY_ANDROID_CERT_SHA256 (or neither)',
   })
   .refine((c) => !c.FOLAX_URL === !c.FOLAX_API_KEY, { message: 'Set both FOLAX_URL and FOLAX_API_KEY (or neither)' })
   .refine((c) => c.IMAGE_PROVIDER_DEFAULT !== 'folax' || c.FOLAX_URL, { message: 'IMAGE_PROVIDER_DEFAULT=folax needs FOLAX_URL and FOLAX_API_KEY' });

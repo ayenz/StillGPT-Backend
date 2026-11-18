@@ -119,8 +119,11 @@ Errors:
 - Challenges are single-use and expire after 5 minutes. User verification (biometric/PIN) is always required.
 - Config: `PASSKEY_RP_ID` (default: host of the first https `CORS_ORIGINS` entry; **changing it orphans existing passkeys**),
   `PASSKEY_RP_NAME` (default `StillGPT`), `PASSKEY_ORIGINS` (default: `CORS_ORIGINS` minus `*`).
-- Native apps (Flutter) need the RP domain to serve `/.well-known/assetlinks.json` (Android) and
-  `apple-app-site-association` (iOS) before they can use these passkeys. Not set up yet.
+- Native apps (Flutter) use the same endpoints without an `Origin` header (RP ID = the configured domain). Configure
+  `PASSKEY_ANDROID_PACKAGE` + `PASSKEY_ANDROID_CERT_SHA256` (each certificate becomes an allowed `android:apk-key-hash:…`
+  origin) and `PASSKEY_IOS_APP_IDS` (`TEAMID.bundle.id`). The backend renders the matching association files at
+  `GET /.well-known/assetlinks.json` and `GET /.well-known/apple-app-site-association` (404 until configured). They must be
+  published unchanged on the RP domain (the web app). See `docs/handoff/flutter-passkeys.md`.
 - Admin (lost device): `GET /admin/users/:id/passkeys`, `DELETE /admin/users/:id/passkeys/:passkeyId` (no last-method guard;
   set a password for the user with `PATCH /admin/users/:id` if needed).
 
