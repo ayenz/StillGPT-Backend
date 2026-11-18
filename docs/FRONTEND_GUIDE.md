@@ -184,7 +184,7 @@ POST /images {prompt, size?: "1024x1024", provider?: "auto" | "qoder" | "folax",
 - Ukuran Qoder: `1024x1024, 1536x1024, 1024x1536, 768x1024, 1024x768, 1024x1280, 1280x1024, 1024x1792, 1792x1024, 2560x1080`.
   Folax hanya 1:1, 4:3, 3:4, 16:9, 9:16 (ukuran lain dibulatkan ke rasio terdekat).
 - Status `failed` tetap HTTP 200 — selalu cek `status` dan `error.message`.
-- **Beberapa gambar sekaligus:** kirim `n` (1–6), lihat 5.5.
+- **Beberapa gambar sekaligus:** kirim `n` (1–10), lihat 5.5.
 
 ### 5.3 Generate video
 ```
@@ -208,7 +208,7 @@ setelah aplikasi ditutup (ambil ulang dari `/jobs`).
 
 ### 5.5 Generate beberapa gambar sekaligus (`n`)
 ```
-POST /images {prompt, n: 1..6, size?, enhance?, input_file_ids?, async: true}
+POST /images {prompt, n: 1..10, size?, enhance?, input_file_ids?, async: true}
 → 202 batch {id: "batch_…", status, progress, n, completed, failed, credits, jobs: [job, …]}
 ```
 - Kalau `n` dikirim, respons berupa **batch** (bukan job). Tanpa `n`, respons tetap satu job seperti 5.2.
@@ -223,7 +223,7 @@ Mengikuti batch:
   `job.completed` / `job.failed` per gambar → `batch.done` (batch final), lalu stream ditutup.
 - Atau polling `GET /images/batches/:id` tiap 5 detik. Daftar job satu batch: `GET /jobs?batch_id=…`.
 - Jika SSE putus: `GET /images/batches/:id`, lalu sambung ulang bila masih `queued`/`in_progress`.
-- Jumlah maksimum dibaca dari `GET /models` → `image_providers[id=qoder].max_n` (jangan hardcode 6).
+- Jumlah maksimum dibaca dari `GET /models` → `image_providers[id=qoder].max_n` (jangan hardcode 10).
 
 ### 5.6 Hapus dari galeri + Urungkan
 ```

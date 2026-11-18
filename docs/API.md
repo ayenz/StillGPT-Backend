@@ -193,7 +193,7 @@ Returns the same usage object as `/me` (this calendar month, UTC).
   ],
   "default_model": "default",
   "image_providers": [
-    { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "max_n": 6, "sizes": ["1024x1024", "…"] },
+    { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "max_n": 10, "sizes": ["1024x1024", "…"] },
     { "id": "folax", "available": true, "edits": false, "images_per_call": 2, "max_n": 1,
       "ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"], "prompt_max": 1500 }
   ],
@@ -584,7 +584,7 @@ For several different images at once, send `variations` on `POST /images` instea
 | `enhance` | bool | `false` | run the prompt enhancer first (as `POST /prompts/enhance`). Its prompt is used, and its size too when `size` was not given |
 | `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine (always Qoder) |
 | `provider` | `auto` \| `qoder` \| `folax` | server default (`IMAGE_PROVIDER_DEFAULT`, `auto`) | image generator, see below |
-| `n` | int 1–6 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
+| `n` | int 1–10 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
 | `variations` | `true` \| `{vary?, keep?}` | – | give each image its own variation of the prompt (as `POST /prompts/variations`; `input_file_ids` act as references) |
 | `async` | bool | `false` | `true` returns `202` straight away with a queued job (or batch) |
 | `callback_url` | URL | – | POSTed when the job finishes (§9) |

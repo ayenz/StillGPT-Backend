@@ -97,8 +97,8 @@ describe('image batches (native)', () => {
       expect(r.status, JSON.stringify(payload)).toBe(400);
       return r.body.error;
     };
-    expect((await bad({ prompt: 'x', n: 0 })).message).toContain('between 1 and 6');
-    expect((await bad({ prompt: 'x', n: 7 })).message).toContain('between 1 and 6');
+    expect((await bad({ prompt: 'x', n: 0 })).message).toContain('between 1 and 10');
+    expect((await bad({ prompt: 'x', n: 11 })).message).toContain('between 1 and 10');
     expect((await bad({ prompt: 'x', n: 2.5 })).code).toBe('validation_error');
     expect((await bad({ prompt: 'x', n: '3' })).code).toBe('validation_error');
     expect((await bad({ prompt: 'x', n: 2, provider: 'folax' })).message).toContain('qoder');

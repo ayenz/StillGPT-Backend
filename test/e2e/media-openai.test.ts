@@ -52,7 +52,7 @@ describe('/v1/images (openai SDK)', () => {
   });
 
   it('uses the OpenAI error envelope', async () => {
-    await expect(client.images.generate({ model: 'qoder-image', prompt: 'x', n: 9 })).rejects.toMatchObject({ status: 400, code: 'invalid_n' });
+    await expect(client.images.generate({ model: 'qoder-image', prompt: 'x', n: 11 })).rejects.toMatchObject({ status: 400, code: 'invalid_n' });
     await expect(client.images.generate({ model: 'gpt-4o', prompt: 'x' })).rejects.toMatchObject({ status: 400, code: 'model_not_found' });
     const res = await json(await h.api('/v1/images/generations', { method: 'POST', json: { prompt: 'x [[error]]' } }));
     expect(res.status).toBe(502);

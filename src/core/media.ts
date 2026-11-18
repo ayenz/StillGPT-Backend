@@ -13,7 +13,7 @@ import { ATTACHMENT_DIR } from './attachments.js';
 import type { EventBus } from './bus.js';
 import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
-import { type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
+import { MAX_VARIATIONS, type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
 import type { Artifact, Credits, TurnEvent } from './events.js';
 import type { MediaStore, StoredFile, UrlScope } from './storage.js';
 import type { TurnResult, TurnRunner } from './turns.js';
@@ -25,7 +25,7 @@ export type MediaJob = typeof mediaJobs.$inferSelect;
 export const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536', '768x1024', '1024x768', '1024x1280', '1280x1024', '1024x1792', '1792x1024', '2560x1080'] as const;
 export type ImageSize = (typeof IMAGE_SIZES)[number];
 /** Most images one `POST /images` may ask for (`n`); each is its own Qoder job, run in parallel. */
-export const MAX_IMAGE_BATCH = 6;
+export const MAX_IMAGE_BATCH = 10;
 export const VIDEO_RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
 export type VideoRatio = (typeof VIDEO_RATIOS)[number];
 export const VIDEO_RESOLUTIONS = ['480P', '720P', '1080P'] as const;
@@ -413,8 +413,9 @@ export class MediaService {
     const axes = typeof v.variations === 'object' ? v.variations : {};
     const base = String(request.prompt);
     try {
-      // input images are what is being edited: variations stay edits of them instead of moving away from them
-      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, editFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n });
+      // input images are what is being edited: variations stay edits of them instead of moving away from them.
+      // The variator writes at most MAX_VARIATIONS; larger batches reuse them round-robin below.
+      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, editFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n: Math.min(n, MAX_VARIATIONS) });
       // fewer usable variations than images: the remaining images reuse them round-robin
       return none.map((_, i) => {
         const x = r.variations[i % r.variations.length]!;
