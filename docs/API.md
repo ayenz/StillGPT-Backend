@@ -674,9 +674,19 @@ If the server restarts during a job, it picks the job up again and finishes it.
 ### Following a job
 | Method | Path | Response |
 |---|---|---|
-| GET | `/jobs?kind=image\|video&batch_id=…&limit=20` | `{data: [job]}`, newest first |
+| GET | `/jobs?kind=image\|video&status=…&batch_id=…&limit=20&cursor=…` | `{data: [job], next_cursor, has_more}`, newest first (the gallery) |
 | GET | `/jobs/:id` | job. Polling every 5–10 s is fine |
 | GET | `/jobs/:id/events` | SSE (see below) |
+
+**Gallery paging (`GET /jobs`).** Infinite scroll through the whole gallery:
+- `limit` 1–100 (default 20). `kind` = `image` or `video`. `status` = one or more of `queued,in_progress,completed,failed`
+  (comma-separated; e.g. `status=completed` hides failed and running jobs). `batch_id` = only that batch.
+- First request without `cursor`. While `has_more` is `true`, request again with `cursor=<next_cursor>` and the **same
+  filters**. The last page has `has_more: false`, `next_cursor: null` (no extra empty page).
+- The cursor is opaque. It points after the last item you got, so new jobs created while the user scrolls never shift,
+  repeat or skip items in later pages; they appear when you reload from the top (or prepend them from SSE/webhooks).
+  Batch jobs share a creation time; paging handles that.
+- Trashed jobs are not listed. `400 invalid_cursor` for a malformed cursor → reload from the top.
 
 `GET /jobs/:id/events` sends these events:
 - `job`: the full job object, sent first as a snapshot.

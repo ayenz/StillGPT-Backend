@@ -195,6 +195,18 @@ const MAX_RECOVERY_MS = 45 * 60_000;
 const DEGRADED_THROTTLE_MS = 3600_000;
 const PROMPT_MAX = 4000;
 
+// ── gallery cursor ──────────────────────────────────────────────────────────
+
+/** Opaque to clients: base64url of "<created_at in µs since epoch>.<job id>". */
+export const encodeJobCursor = (us: string, id: string) => Buffer.from(`${us}.${id}`).toString('base64url');
+
+export function decodeJobCursor(cursor: string): { us: string; id: string } {
+  const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+  const m = /^(\d{1,19})\.([A-Za-z0-9_-]{1,64})$/.exec(raw);
+  if (!m) throw badRequest('cursor is invalid; start again without it', 'invalid_cursor', { param: 'cursor' });
+  return { us: m[1]!, id: m[2]! };
+}
+
 // ── validation ─────────────────────────────────────────────────────────────
 
 const fileIds = (max: number, what: string) => z.array(z.string().min(1)).max(max, `at most ${max} ${what}`);
@@ -382,6 +394,38 @@ export class MediaService {
       .orderBy(desc(mediaJobs.createdAt))
       .limit(Math.min(Math.max(opts.limit ?? 20, 1), 100));
     return Promise.all(rows.map((r) => this.view(r)));
+  }
+
+  /**
+   * One page of the gallery, newest first, for infinite scroll. Keyset-paged on (created_at, id): jobs of a batch share
+   * created_at, and new jobs arriving while the user scrolls never shift or repeat items. The cursor carries created_at in
+   * microseconds (Postgres precision; a JS Date would round it to milliseconds and skip or repeat rows).
+   */
+  async listJobsPage(
+    userId: string,
+    opts: { kind?: 'image' | 'video'; batchId?: string; statuses?: MediaJob['status'][]; limit?: number; cursor?: string } = {},
+  ): Promise<{ items: MediaJobView[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)];
+    if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
+    if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
+    if (opts.statuses?.length) conds.push(inArray(mediaJobs.status, opts.statuses));
+    if (opts.cursor) {
+      const c = decodeJobCursor(opts.cursor);
+      conds.push(sql`(${mediaJobs.createdAt}, ${mediaJobs.id}) < (to_timestamp(0) + ${c.us}::bigint * interval '1 microsecond', ${c.id})`);
+    }
+    const rows = await this.d.db
+      .select({ job: mediaJobs, us: sql<string>`(extract(epoch from ${mediaJobs.createdAt}) * 1000000)::bigint::text` })
+      .from(mediaJobs)
+      .where(and(...conds))
+      .orderBy(desc(mediaJobs.createdAt), desc(mediaJobs.id))
+      .limit(limit + 1);
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: await Promise.all(page.map((r) => this.view(r.job))),
+      nextCursor: rows.length > limit && last ? encodeJobCursor(last.us, last.job.id) : null,
+    };
   }
 
   /** The stored file of a job's first output (used to stream video content). */

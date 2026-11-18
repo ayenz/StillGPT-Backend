@@ -10,6 +10,8 @@ import { FOLAX_PROMPT_MAX, FOLAX_RATIOS } from '../../providers/folax.js';
 import { assertUploadSize, body, fileView, formFiles, limitParam, type SseEvent, saveUpload, sse } from './util.js';
 
 /** Media bodies are validated by MediaService; here we only map snake_case → the service request. */
+const JOB_STATUSES = ['queued', 'in_progress', 'completed', 'failed'] as const;
+
 const imageBody = z.object({
   prompt: z.unknown(),
   size: z.unknown().optional(),
@@ -130,11 +132,22 @@ export function mediaJobRoutes(ctx: AppContext) {
     return c.json(mediaJobJson(await ctx.media.createVideoJob(req)), 202);
   });
 
+  /** The gallery: newest first, `?cursor=<next_cursor>` for the next page until `has_more` is false. */
   app.get('/jobs', async (c) => {
     const kind = c.req.query('kind') || undefined;
     if (kind !== undefined && kind !== 'image' && kind !== 'video') throw badRequest('kind must be image or video', 'validation_error');
-    const data = await ctx.media.listJobs(c.get('user').id, { kind, batchId: c.req.query('batch_id') || undefined, limit: limitParam(c.req.query('limit'), 20, 100) });
-    return c.json({ data: data.map(mediaJobJson) });
+    const statusParam = c.req.query('status');
+    const statuses = statusParam ? statusParam.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    const bad = statuses?.filter((s) => !(JOB_STATUSES as readonly string[]).includes(s));
+    if (bad?.length) throw badRequest(`status must be one or more of ${JOB_STATUSES.join(', ')}`, 'validation_error', { param: 'status' });
+    const page = await ctx.media.listJobsPage(c.get('user').id, {
+      kind,
+      batchId: c.req.query('batch_id') || undefined,
+      statuses: statuses as MediaJobView['status'][] | undefined,
+      limit: limitParam(c.req.query('limit'), 20, 100),
+      cursor: c.req.query('cursor') || undefined,
+    });
+    return c.json({ data: page.items.map(mediaJobJson), next_cursor: page.nextCursor, has_more: page.nextCursor !== null });
   });
 
   app.get('/jobs/:id', async (c) => c.json(mediaJobJson(await ctx.media.getJob(c.req.param('id'), c.get('user').id))));

@@ -227,7 +227,13 @@ export const mediaJobs = pgTable(
     startedAt: ts('started_at'),
     completedAt: ts('completed_at'),
   },
-  (t) => [index('media_jobs_status_idx').on(t.status, t.createdAt), index('media_jobs_batch_idx').on(t.batchId), index('media_jobs_deleted_idx').on(t.deletedAt)],
+  (t) => [
+    index('media_jobs_status_idx').on(t.status, t.createdAt),
+    index('media_jobs_batch_idx').on(t.batchId),
+    index('media_jobs_deleted_idx').on(t.deletedAt),
+    // the gallery: a user's jobs newest first, paged by (created_at, id)
+    index('media_jobs_user_idx').on(t.userId, t.createdAt, t.id),
+  ],
 );
 
 // ── webhooks & usage ────────────────────────────────────────────────────────

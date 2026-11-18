@@ -1,0 +1,1 @@
+CREATE INDEX "media_jobs_user_idx" ON "media_jobs" USING btree ("user_id","created_at","id");
