@@ -1,5 +1,9 @@
 # Flutter handoff: passkey sign-in in the native app
 
+> **Scope: Android only for now.** There is no Apple Developer account, so iOS passkeys (Associated Domains, AASA) are
+> deferred. The iOS sections below are kept for later. Until then, the iOS build shows email/password only: hide the
+> passkey button when `Platform.isIOS`.
+
 The backend already supports passkeys for the web app (`docs/handoff/frontend-passkeys.md`). The Flutter app uses the
 **same endpoints and the same passkeys**: a passkey saved on the website through iCloud Keychain or Google Password
 Manager also works in the app, and the other way round. This document covers what is native-specific.
@@ -24,8 +28,8 @@ API reference: `docs/API.md` §2 "Passkeys". All paths are under `/api/v1` on `h
 |---|---|---|
 | 1 | owner | Pick the app id. Proposal: Android package **and** iOS bundle id `id.ayenz.stillgpt`. Changing it later means new association files. |
 | 2 | Flutter | Android signing: get SHA-256 of the **debug** keystore and the **upload/release** keystore (`cd android && ./gradlew signingReport`). If the app is on Google Play with Play App Signing, also the **app signing key** SHA-256 (Play Console → Test and release → App integrity). |
-| 3 | owner | Apple Developer **Team ID** (developer.apple.com → Membership). Needs a paid Apple Developer account. |
-| 4 | backend | Set on the server (`.env`), restart: `PASSKEY_ANDROID_PACKAGE=id.ayenz.stillgpt`, `PASSKEY_ANDROID_CERT_SHA256=<debug>,<release>,<play>` (colon hex, comma-separated), `PASSKEY_IOS_APP_IDS=<TEAMID>.id.ayenz.stillgpt` |
+| 3 | owner | *(iOS, deferred)* Apple Developer **Team ID**. Needs a paid Apple Developer account. |
+| 4 | backend | Set on the server (`.env`), restart: `PASSKEY_ANDROID_PACKAGE=id.ayenz.stillgpt`, `PASSKEY_ANDROID_CERT_SHA256=<debug>,<release>,<play>` (colon hex, comma-separated). *(iOS later: `PASSKEY_IOS_APP_IDS=<TEAMID>.id.ayenz.stillgpt`)* |
 | 5 | backend | Check the generated files: `curl https://qrouter.ayenz.my.id/.well-known/assetlinks.json` and `…/apple-app-site-association` |
 | 6 | web frontend | Publish those two files **byte-for-byte** on the web domain (see "Web frontend part" below) |
 | 7 | anyone | Verify: Google `https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://stillgpt.ayenz.my.id&relation=delegate_permission/common.get_login_creds` lists the app; Apple `https://app-site-association.cdn-apple.com/a/v1/stillgpt.ayenz.my.id` returns the JSON (Apple's CDN can lag up to a day) |
@@ -52,11 +56,14 @@ API reference: `docs/API.md` §2 "Passkeys". All paths are under `/api/v1` on `h
 ## App configuration
 
 **Android**
+- Debug keystore of the owner's Mac (`~/.android/debug.keystore`) has SHA-256
+  `82:13:6B:B6:DB:4A:0D:A9:35:A8:5D:E9:59:05:80:DE:BB:B8:F7:76:1A:3E:FF:CC:F3:07:BE:DF:00:40:0F:F3`. Debug builds from
+  another machine use that machine's debug key and need their own fingerprint added in step 4.
 - `minSdkVersion` ≥ 28 (Credential Manager). Device needs Google Play services and a screen lock.
 - `applicationId` = the package from step 1.
 - The SHA-256 of whatever key signs the build you test must be in step 4, debug included.
 
-**iOS**
+**iOS** *(deferred: no Apple Developer account yet)*
 - iOS 16+.
 - Xcode → Runner → Signing & Capabilities → **Associated Domains** → `webcredentials:stillgpt.ayenz.my.id`
   (ends up in `Runner.entitlements`). During development you can use `webcredentials:stillgpt.ayenz.my.id?mode=developer`
