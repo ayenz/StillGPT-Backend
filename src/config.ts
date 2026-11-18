@@ -68,6 +68,11 @@ const schema = z
       .string()
       .default('30000,60000,120000,180000,300000')
       .transform((v) => v.split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n >= 0)),
+    /** Waits (ms, comma separated) before re-submitting a media job whose generator hit a draining Qoder instance (HTTP 423). */
+    MEDIA_DRAINING_RETRY_DELAYS_MS: z
+      .string()
+      .default('5000,15000,30000')
+      .transform((v) => v.split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n >= 0)),
     SESSION_BUDGET_CREDITS: z.coerce.number().positive().optional(),
     /** Default retention: Qoder sessions idle longer than this are archived and their Qoder files deleted (local copies stay). Admins can override it. */
     QODER_RETENTION_HOURS: z.coerce.number().positive().default(24),

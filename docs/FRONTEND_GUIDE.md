@@ -185,6 +185,8 @@ POST /images {prompt, size?: "1024x1024", provider?: "auto" | "qoder" | "folax",
   Folax hanya 1:1, 4:3, 3:4, 16:9, 9:16 (ukuran lain dibulatkan ke rasio terdekat).
 - Status `failed` tetap HTTP 200 — selalu cek `status` dan `error.message`.
 - **Beberapa gambar sekaligus:** kirim `n` (1–10), lihat 5.5.
+- Gangguan sementara di Qoder (antrean penuh, atau instance generator sedang restart / HTTP 423 *draining*) dicoba ulang otomatis oleh server;
+  job tetap `in_progress` selama itu. Kalau tetap gagal, `error.code` = `upstream_queue_full` atau `upstream_draining`.
 
 ### 5.3 Generate video
 ```

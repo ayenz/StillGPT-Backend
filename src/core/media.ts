@@ -171,11 +171,16 @@ export interface MediaServiceDeps {
   pollIntervalMs?: number;
   /** Waits before re-submitting a job that Qoder rejected with a full generation queue. Default 30 s, 1, 2, 3, 5 min. */
   queueRetryDelaysMs?: number[];
+  /** Waits before re-submitting a job whose generator hit a draining upstream instance (HTTP 423). Default 5, 15, 30 s. */
+  drainingRetryDelaysMs?: number[];
 }
 
 const DEFAULT_QUEUE_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 180_000, 300_000];
+const DEFAULT_DRAINING_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 /** Upstream generator throttling, e.g. `Throttling.QueueQuota … Task queue limit exceeded` (HTTP 429). */
 const QUEUE_FULL = /QueueQuota|queue limit|Throttling|status=429|HTTP 429/i;
+/** Generator backend rotating out, e.g. `image gen HTTP 423: … "message":"instance is draining","type":"draining"`. Transient (seconds). */
+const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
@@ -557,15 +562,25 @@ export class MediaService {
   }
 
   /**
-   * Qoder turn with automatic re-submission while the upstream generation queue is full
-   * (the account only gets a few concurrent generations; a long-running job elsewhere blocks new ones).
+   * Qoder turn with automatic re-submission on transient generator errors:
+   * - the upstream generation queue is full (the account only gets a few concurrent generations; a long-running job elsewhere blocks new ones);
+   * - the generator instance is draining (HTTP 423 while Qoder rotates instances; clears within seconds).
+   * Each kind has its own retry schedule.
    */
   private async runQoderWithRetry(job: MediaJob): Promise<Outcome> {
-    const delays = this.d.queueRetryDelaysMs ?? DEFAULT_QUEUE_RETRY_DELAYS_MS;
-    for (let attempt = 0; ; attempt++) {
+    const schedules: Record<string, number[]> = {
+      upstream_queue_full: this.d.queueRetryDelaysMs ?? DEFAULT_QUEUE_RETRY_DELAYS_MS,
+      upstream_draining: this.d.drainingRetryDelaysMs ?? DEFAULT_DRAINING_RETRY_DELAYS_MS,
+    };
+    const attempts: Record<string, number> = {};
+    for (;;) {
       const outcome = await this.runQoder(job);
-      if (outcome.error?.code !== 'upstream_queue_full' || attempt >= delays.length || this.stopped) return outcome;
-      this.d.log.warn('media.queue_full_retry', { jobId: job.id, attempt: attempt + 1, waitMs: delays[attempt] });
+      const code = outcome.error?.code;
+      const delays = code ? schedules[code] : undefined;
+      const attempt = code ? (attempts[code] ?? 0) : 0;
+      if (!code || !delays || attempt >= delays.length || this.stopped) return outcome;
+      attempts[code] = attempt + 1;
+      this.d.log.warn(code === 'upstream_draining' ? 'media.draining_retry' : 'media.queue_full_retry', { jobId: job.id, attempt: attempt + 1, waitMs: delays[attempt] });
       await new Promise((r) => setTimeout(r, delays[attempt]));
     }
   }
@@ -920,6 +935,7 @@ function generatorErrors(events: readonly TurnEvent[]): string[] {
 
 function classifyToolError(output: string): { code: string; message: string } {
   if (QUEUE_FULL.test(output)) return { code: 'upstream_queue_full', message: 'Qoder generation queue is full (another generation is still running); try again later' };
+  if (DRAINING.test(output)) return { code: 'upstream_draining', message: 'Qoder generator instance was restarting (HTTP 423 draining); try again' };
   const detail = output.replace(/^\w+_gen error:\s*/i, '').replace(/request_id[:=]\S+/gi, '').slice(0, 300);
   return { code: 'generation_failed', message: `Generator error: ${detail}` };
 }

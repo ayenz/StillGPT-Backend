@@ -155,6 +155,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
     queueRetryDelaysMs: config.MEDIA_QUEUE_RETRY_DELAYS_MS,
+    drainingRetryDelaysMs: config.MEDIA_DRAINING_RETRY_DELAYS_MS,
   });
   const trash = new MediaTrash({ db, store, media, log: log.child({ mod: 'trash' }) });
   const mediaHousekeeper = new MediaHousekeeper({ db, trash, log: log.child({ mod: 'media_housekeeping' }) });

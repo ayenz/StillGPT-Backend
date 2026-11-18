@@ -4,9 +4,11 @@ import { type Harness, startHarness } from './harness.js';
 const QUEUE_FULL =
   'video_gen error: submit failed: video create HTTP 502: CreateVideo: {"code":"invalid_request_error","message":"bailian happyhorse status=429 body=map[code:Throttling.QueueQuota message:Task queue limit exceeded, please try again later. request_id:85ea]"}';
 
+const DRAINING = 'image_gen error: image gen HTTP 423: GenerateImage: {"error":{"code":423,"message":"instance is draining","type":"draining"}}';
+
 let h: Harness;
 beforeAll(async () => {
-  h = await startHarness({ env: { MEDIA_POLL_INTERVAL_MS: '20', MEDIA_QUEUE_RETRY_DELAYS_MS: '50,50' } });
+  h = await startHarness({ env: { MEDIA_POLL_INTERVAL_MS: '20', MEDIA_QUEUE_RETRY_DELAYS_MS: '50,50', MEDIA_DRAINING_RETRY_DELAYS_MS: '20,20,20' } });
 });
 afterEach(() => h.qoder.setToolError(undefined));
 afterAll(() => h?.close());
@@ -39,6 +41,24 @@ describe('generator failures reported by Qoder tools', () => {
     expect(job.status).toBe('failed');
     expect(job.error.code).toBe('upstream_queue_full');
     expect(job.error.message).toMatch(/queue is full/);
+  });
+
+  it('retries an image whose generator instance was draining (HTTP 423), then succeeds', async () => {
+    let calls = 0;
+    h.qoder.setToolError((tool) => (tool === 'ImageGen' && ++calls <= 2 ? DRAINING : undefined));
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'a lighthouse', provider: 'qoder' } }));
+    expect(r.body.status).toBe('completed');
+    expect(r.body.outputs).toHaveLength(1);
+    expect(calls).toBe(3);
+  });
+
+  it('gives up with upstream_draining after the configured retries', async () => {
+    let calls = 0;
+    h.qoder.setToolError((tool) => (tool === 'ImageGen' && ++calls ? DRAINING : undefined));
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'a lighthouse', provider: 'qoder' } }));
+    expect(r.body.status).toBe('failed');
+    expect(r.body.error.code).toBe('upstream_draining');
+    expect(calls).toBe(4);
   });
 
   it('surfaces other generator errors instead of a generic no_output', async () => {
