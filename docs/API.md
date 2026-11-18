@@ -345,7 +345,8 @@ A conversation runs one turn at a time. A second `POST …/messages` sent while 
 ## 7. Files and attachments
 
 ### POST /files
-`multipart/form-data` with a field named `file`. Files can be up to **20 MB**.
+`multipart/form-data` with a field named `file`. Files can be up to **50 MB**. The stored file is kept at full size;
+images bigger than Qoder accepts (~5 MB) are sent upstream as a scaled-down copy in the same format (see limits below).
 ```bash
 curl -H "Authorization: Bearer $TOKEN" -F file=@report.pdf https://<host>/api/v1/files
 ```
@@ -362,8 +363,9 @@ If the client sends `application/octet-stream`, the server works out the type fr
 Returns the same object with a signed `url`. You can only see your own files.
 
 ### Attachment limits (enforced when the message is sent)
-- **Images** (vision input): up to 7 MB each. PNG, JPEG, WebP and GIF are shown to the model directly.
-  Other image formats are mounted as files.
+- **Images** (vision input, image edits, video frames/references): PNG, JPEG and WebP up to the 50 MB upload limit.
+  Above ~4.5 MB the copy sent to Qoder is scaled down (same format, max 4096 px, usually 1–3 s once per file; later uses
+  reuse it). GIFs (may be animated) are not resized: up to 7 MB. Other image formats are mounted as files.
 - **Documents** (mounted in the sandbox): up to **5 MB** each, which is the upstream limit. Larger ones get
   `413 attachment_too_large`.
 - To attach a file, upload it first, then reference its `file_id` in a message, an image edit, or a video frame.
@@ -432,6 +434,22 @@ suggests a shape for it. Takes 2–10 s and a few credits (one chat turn on the 
 | `purpose` | string | – | optional hint, e.g. `"poster"`, `"instagram post"` |
 | `style` | string | – | optional hint, e.g. `"flat illustration"` |
 | `model` | string | `enhancer` | model alias or id for the rewrite; omit to use our default |
+| `input_file_ids` | string[] | – | image: the images being edited (≤ 3). Switches to `mode: "edit"` |
+| `first_frame_file_id` | string | – | video: the frame it starts from. Switches to `mode: "first_frame"` |
+| `last_frame_file_id` | string | – | video: the frame it ends on (needs a first frame) |
+| `reference_file_ids` | string[] | – | video: images of the subject/product to keep (≤ 10). Switches to `mode: "reference"` |
+
+**Send the images the prompt goes with.** The enhancer cannot see images otherwise: "make this image moving" without
+`first_frame_file_id` gets a made-up scene that fights the frame. With images, each one is read once by a vision model (cached on
+the file, see `references` in the response) and the rewrite follows the mode:
+- `edit`: a precise edit instruction ("change X, keep the same person, pose, background…"). `aspect_ratio`/`size` match the input
+  image unless the user typed a ratio.
+- `first_frame`: describes only motion (action, hair/fabric/particles, camera move, pacing) and keeps everything in the frame.
+  With a last frame, a transition to it. `ratio` is `"adaptive"` (the frame decides).
+- `reference`: keeps the referenced subject/product exactly; the scene follows the idea. `ratio` is `"adaptive"`.
+- Text meant to appear in the image (headlines, prices) is kept verbatim in its original language.
+
+`enhance: true` on `POST /images` / `POST /videos` passes the job's images (and a video's `seconds` / `audio: false`) automatically.
 
 **Model picker (optional UI):** fill a dropdown from `GET /api/v1/models` (`aliases` + `models`) and send the chosen id as
 `model`. Leave it unset by default — the `enhancer` alias is chosen server-side (currently Qwen4-Max-Preview, ~8 s, falling back to
@@ -439,11 +457,12 @@ GLM-5.3 / DeepSeek-V4-Pro) and can change without a frontend release. The respon
 
 ```json
 { "prompt": "A vertical phone wallpaper of a neon Jakarta skyline at night, …", "original": "wallpaper hp jakarta malam",
-  "kind": "image", "aspect_ratio": "9:16", "size": "1024x1792", "enhanced": true, "model": "qmodel_latest", "credits": 0.01 }
+  "kind": "image", "aspect_ratio": "9:16", "size": "1024x1792", "enhanced": true, "mode": "text", "references": [],
+  "model": "qmodel_latest", "credits": 0.01 }
 ```
 - Images get `size` (an allowed `POST /images` size); videos get `ratio` and `seconds` instead.
-- If the model's reply cannot be used, the response is still `200` with `enhanced: false` and the **original** prompt,
-  so the UI never loses what the user typed.
+- If the model's reply cannot be used (or the model is unavailable), the response is still `200` with `enhanced: false` and the
+  **original** prompt, so the UI never loses what the user typed. Jobs created with `enhance: true` record it as `request.enhanced`.
 - `429 credit_limit_exceeded` when the monthly credit limit is used up.
 
 PWA usage: the button replaces the textarea and preselects the size.
@@ -470,13 +489,14 @@ from what the references show on the changed axes (and matched to them on the ke
 | `prompt` | string | required | the prompt to vary, up to 4000 characters |
 | `kind` | `image` \| `video` | `image` | |
 | `reference_file_ids` | string[] | `[]` | up to 3 uploaded images (e.g. the reference the user attached, or the image just generated) |
+| `first_frame_file_id` | string | – | video only: the fixed first frame. Variations match it; default `vary` becomes `["motion","camera","mood"]` |
 | `vary` | axis[] | `["outfit","color","background"]` | what must change |
 | `keep` | axis[] | `["subject","style","text"]` minus anything in `vary` | what must stay as in the prompt / references. An axis in both lists is `400` |
 | `avoid` | string[] | `[]` | up to 12 earlier variation prompts the user already saw, so the next click does not repeat them |
 | `n` | int 1–6 | `1` | how many variations |
 | `model` | string | `enhancer` | model alias or id for the rewrite |
 
-Axes: `subject`, `outfit`, `color`, `background`, `pose`, `lighting`, `camera`, `props`, `hair`, `style`, `text`, `mood`.
+Axes: `subject`, `outfit`, `color`, `background`, `pose`, `lighting`, `camera`, `props`, `hair`, `style`, `text`, `mood`, `motion`.
 
 ```json
 { "original": "Fashion photo of a woman in a red silk gown in a marble ballroom, …", "kind": "image",
@@ -532,7 +552,10 @@ For several different images at once, send `variations` on `POST /images` instea
   `400 validation_error`. `n: 1` follows the normal provider routing.
 - The prompt enhancer (`enhance: true`) runs **once**; every job gets the same enhanced prompt, unless `variations` is set: then
   each job gets its own variation of it. Its `request` then has `prompt` (the variation), `base_prompt` and
-  `variation: {changed, vary, keep}`. If the variations fail, every job falls back to the base prompt (no error).
+  `variation: {changed, vary, keep, repeated}` (`repeated: true` when the model returned fewer variations than `n` and this job
+  reuses one). If the variations fail, every job falls back to the base prompt with `variations_failed: true` (no error).
+- With `input_file_ids` (an edit), variations stay edits of those images: other takes on the requested change, same
+  person/product and composition (default `vary` `outfit, color, background, props, mood`, `keep` `subject, pose, camera, text`).
 - Each job is an ordinary job (`GET /jobs/:id`, `/jobs/:id/events`, webhooks and `callback_url` fire per job). Its
   `request` additionally has `n` and `batch_index` (0-based position in the batch).
 - Jobs fail independently: one refused image does not stop the others.
@@ -886,11 +909,11 @@ Treat any `429` or `5xx` as retryable.
 
 | | limit |
 |---|---|
-| Upload (`POST /files`) | 20 MB per file |
-| Image attachment (vision) | 7 MB. PNG, JPEG, WebP or GIF are sent inline |
+| Upload (`POST /files`) | 50 MB per file |
+| Image attachment / edit input / video frame | 50 MB for PNG, JPEG, WebP (scaled down for Qoder above ~4.5 MB); 7 MB for GIF |
 | Document attachment (sandbox) | 5 MB (Qoder limit) |
 | Content blocks per message | 50 |
-| Image prompt | 4000 characters (Folax: first 1500). 1 image per job on Qoder, 2 on Folax |
+| Image prompt | 4000 characters (Folax: 1500; under `auto` a longer prompt goes to Qoder with `fallback_reason: "prompt_too_long_for_folax"`). 1 image per job on Qoder, 2 on Folax |
 | Images per request (`n`) | 1–6 (Qoder, in parallel) |
 | Image inputs (edit) | 3 |
 | Video `seconds` | 2–30 or -1. Resolution `480P`, `720P` or `1080P`. 7 ratios (§8) |

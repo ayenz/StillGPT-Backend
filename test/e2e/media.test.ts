@@ -88,7 +88,7 @@ describe('images (native)', () => {
     const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'gabungkan', input_file_ids: [a.id, b.id], enhance: true } }));
     h.qoder.setReply(undefined);
     expect(r.body.status).toBe('completed');
-    expect(r.body.request).toMatchObject({ prompt: 'Merge both photos into one sunny beach scene', original_prompt: 'gabungkan', size: '1792x1024', enhance: true, provider_used: 'qoder' });
+    expect(r.body.request).toMatchObject({ prompt: 'Merge both photos into one sunny beach scene', original_prompt: 'gabungkan', size: '1024x1024' /* edits keep the input's shape */, enhance: true, provider_used: 'qoder' });
     const up = upstreamOf(await sessionOf(r.body.id), 'ImageGen');
     expect(up.resources).toEqual(['/data/attachments/foto.png', '/data/attachments/foto-2.png']);
     expect(up.text).toContain('["/data/attachments/foto.png","/data/attachments/foto-2.png"]');

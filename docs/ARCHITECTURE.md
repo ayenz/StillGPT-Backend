@@ -88,6 +88,7 @@ src/
     media.ts               image + video jobs (background worker, resumable; Qoder or Folax for images)
     enhancer.ts            prompt enhancer (idea → detailed prompt + aspect ratio)
     enhancerInstructions.ts admin-editable enhancer instructions (kv), cached in memory
+    references.ts          vision description of user images (cached traits) for enhancer/variations
     variations.ts          "other variation": prompt → n variants that change outfit/colours/background, away from references
     webhooks.ts            outgoing webhooks (HMAC-signed), per-request callback_url
     usage.ts               credit accounting + per-user limits
@@ -181,6 +182,12 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   `request.original_prompt` keeps the input. The LLM text is `instructions + hints + contract + <idea>`: `instructions` (persona,
   style, length, how to pick a ratio) are admin-editable per kind in `kv.enhancer.instructions.{image,video}` (cached by
   `EnhancerInstructions`, `/admin/enhancer/*`); the contract (allowed ratios, JSON shape, safety rules) stays in code.
+- Image-aware prompts (`core/references.ts`): `ReferenceReader` describes an image once with the `vision` alias (traits cached
+  in `files.traits`). The enhancer uses it for image edits (`mode: edit`, ratio from the input), video first/last frames
+  (`first_frame`: motion only) and video references; variations use it to steer away from references or stay on an edited
+  image / first frame. User and image-derived text is fenced (`<\/` escaped) inside tags.
+- Large images: uploads go up to 50 MB; `attachments.shrinkImage` makes a same-format copy under ~4.5 MB for Qoder (its file
+  limit) when a PNG/JPEG/WebP is uploaded upstream; the Qoder file id is cached so it happens once per file.
 - Prompt variations (`core/variations.ts`, `POST /api/v1/prompts/variations`, `variations` on `POST /images`): each reference image
   is first described once by the `vision` alias (a hidden one-shot turn with the image attached) into traits (outfit, palette,
   background…), cached in `files.traits`. Then one `enhancer` turn writes `n` variants that change the `vary` axes away from those

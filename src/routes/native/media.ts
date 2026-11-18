@@ -43,6 +43,11 @@ const enhanceBody = z.object({
   purpose: z.string().max(200).optional(),
   style: z.string().max(200).optional(),
   model: z.string().min(1).optional(),
+  /** Images the prompt goes with: image edits, or a video's frames / references. */
+  input_file_ids: z.array(z.string()).max(3).optional(),
+  first_frame_file_id: z.string().min(1).optional(),
+  last_frame_file_id: z.string().min(1).optional(),
+  reference_file_ids: z.array(z.string()).max(10).optional(),
 });
 
 const axes = z.array(z.enum(VARIATION_AXES));
@@ -50,6 +55,7 @@ const variationsBody = z.object({
   prompt: z.string(),
   kind: z.enum(['image', 'video']).optional(),
   reference_file_ids: z.array(z.string()).optional(),
+  first_frame_file_id: z.string().min(1).optional(),
   vary: axes.optional(),
   keep: axes.optional(),
   avoid: z.array(z.string()).optional(),
@@ -244,7 +250,20 @@ export function promptRoutes(ctx: AppContext) {
     const b = await body(c, enhanceBody);
     const userId = c.get('user').id;
     await ctx.usage.assertWithinLimit(userId);
-    return c.json(await ctx.enhancer.enhance({ userId, ...b }));
+    return c.json(
+      await ctx.enhancer.enhance({
+        userId,
+        prompt: b.prompt,
+        kind: b.kind,
+        purpose: b.purpose,
+        style: b.style,
+        model: b.model,
+        inputFileIds: b.input_file_ids,
+        firstFrameFileId: b.first_frame_file_id,
+        lastFrameFileId: b.last_frame_file_id,
+        referenceFileIds: b.reference_file_ids,
+      }),
+    );
   });
 
   /** POST /prompts/variations — the "Other variation" button: rewrites a prompt so outfit, colours, background… change. */
@@ -258,6 +277,7 @@ export function promptRoutes(ctx: AppContext) {
         prompt: b.prompt,
         kind: b.kind,
         referenceFileIds: b.reference_file_ids,
+        firstFrameFileId: b.first_frame_file_id,
         vary: b.vary,
         keep: b.keep,
         avoid: b.avoid,

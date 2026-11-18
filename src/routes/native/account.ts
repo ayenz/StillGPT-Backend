@@ -252,8 +252,12 @@ export function adminRoutes(ctx: AppContext) {
           prompt: z.string(),
           kind: z.enum(['image', 'video', 'variation']).default('image'),
           instructions: z.string().max(INSTRUCTIONS_MAX * 2).optional(),
-          /** variation only: references to read and how many variations to write. */
+          /** Images to try the image-aware modes with (edit, first frame, references). */
           reference_file_ids: z.array(z.string()).optional(),
+          input_file_ids: z.array(z.string()).optional(),
+          first_frame_file_id: z.string().min(1).optional(),
+          last_frame_file_id: z.string().min(1).optional(),
+          /** variation only: how many variations to write. */
           n: z.number().int().min(1).max(6).optional(),
           purpose: z.string().max(200).optional(),
           style: z.string().max(200).optional(),
@@ -282,6 +286,10 @@ export function adminRoutes(ctx: AppContext) {
       style: b.style,
       model: b.model,
       instructionsOverride: override,
+      inputFileIds: b.input_file_ids,
+      firstFrameFileId: b.first_frame_file_id,
+      lastFrameFileId: b.last_frame_file_id,
+      referenceFileIds: b.reference_file_ids,
     });
     return c.json({ ...r, instructions_source: source });
   });

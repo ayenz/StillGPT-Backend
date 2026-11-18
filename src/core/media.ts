@@ -6,7 +6,7 @@ import type { ImageProvider } from '../config.js';
 import { AppError, badRequest, notFound, toAppError } from '../errors.js';
 import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
-import { type FolaxClient, toFolaxRatio } from '../providers/folax.js';
+import { FOLAX_PROMPT_MAX, type FolaxClient, toFolaxRatio } from '../providers/folax.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
@@ -325,10 +325,21 @@ export class MediaService {
     const frames = [v.firstFrameFileId, v.lastFrameFileId, ...v.referenceFileIds].filter((x): x is string => !!x);
     await this.loadInputs(v.userId, frames);
     const mode = v.firstFrameFileId ? 'first_frame_to_video' : v.referenceFileIds.length ? 'reference_to_video' : 'text_to_video';
-    const e = v.enhance ? await this.d.enhancer.enhance({ userId: v.userId, prompt: v.prompt, kind: 'video' }) : null;
+    const e = v.enhance
+      ? await this.d.enhancer.enhance({
+          userId: v.userId,
+          prompt: v.prompt,
+          kind: 'video',
+          firstFrameFileId: v.firstFrameFileId,
+          lastFrameFileId: v.lastFrameFileId,
+          referenceFileIds: v.referenceFileIds,
+          seconds: v.seconds,
+          audio: v.audio,
+        })
+      : null;
     const request = {
       prompt: e?.prompt ?? v.prompt,
-      ...(e ? { original_prompt: v.prompt } : {}),
+      ...(e ? { original_prompt: v.prompt, enhanced: e.enhanced } : {}),
       enhance: v.enhance,
       mode,
       seconds: v.seconds ?? e?.seconds ?? 5,
@@ -402,16 +413,18 @@ export class MediaService {
     const axes = typeof v.variations === 'object' ? v.variations : {};
     const base = String(request.prompt);
     try {
-      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, referenceFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n });
+      // input images are what is being edited: variations stay edits of them instead of moving away from them
+      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, editFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n });
       // fewer usable variations than images: the remaining images reuse them round-robin
       return none.map((_, i) => {
         const x = r.variations[i % r.variations.length]!;
-        return { prompt: x.prompt, base_prompt: base, variation: { changed: x.changed, vary: r.vary, keep: r.keep } };
+        return { prompt: x.prompt, base_prompt: base, variation: { changed: x.changed, vary: r.vary, keep: r.keep, repeated: i >= r.variations.length } };
       });
     } catch (err) {
       if (err instanceof AppError && err.status < 500) throw err;
       this.d.log.warn('media.variations_failed', { err });
-      return none;
+      // visible on the job, so the UI can tell why the images look alike
+      return none.map(() => ({ variations_failed: true }));
     }
   }
 
@@ -422,15 +435,19 @@ export class MediaService {
     await this.loadInputs(v.userId, v.inputFileIds);
     const provider = v.provider ?? this.d.defaultImageProvider;
     const providerUsed = this.imageProviderFor(v.provider, provider, v.inputFileIds.length > 0);
-    const e = v.enhance ? await this.d.enhancer.enhance({ userId: v.userId, prompt: v.prompt, kind: 'image' }) : null;
+    const e = v.enhance ? await this.d.enhancer.enhance({ userId: v.userId, prompt: v.prompt, kind: 'image', inputFileIds: v.inputFileIds }) : null;
+    const prompt = e?.prompt ?? v.prompt;
+    // Folax cuts prompts at FOLAX_PROMPT_MAX; under `auto` a longer (e.g. enhanced) prompt goes to Qoder instead of losing its end
+    const tooLongForFolax = providerUsed === 'folax' && provider !== 'folax' && prompt.length > FOLAX_PROMPT_MAX;
     const request = {
-      prompt: e?.prompt ?? v.prompt,
-      ...(e ? { original_prompt: v.prompt } : {}),
+      prompt,
+      ...(e ? { original_prompt: v.prompt, enhanced: e.enhanced } : {}),
       size: v.size ?? e?.size ?? '1024x1024',
       enhance: v.enhance,
       input_file_ids: v.inputFileIds,
       provider,
-      provider_used: providerUsed,
+      provider_used: tooLongForFolax ? 'qoder' : providerUsed,
+      ...(tooLongForFolax ? { fallback_reason: 'prompt_too_long_for_folax' } : {}),
     };
     return { v, request };
   }

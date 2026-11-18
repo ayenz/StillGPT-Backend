@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { parseTraits, parseVariations } from '../../src/core/variations.js';
+import { parseTraits } from '../../src/core/references.js';
+import { parseVariations } from '../../src/core/variations.js';
 import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 

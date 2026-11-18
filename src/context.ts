@@ -5,6 +5,7 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { EnhancerInstructions } from './core/enhancerInstructions.js';
+import { ReferenceReader } from './core/references.js';
 import { PromptVariator } from './core/variations.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
 import { MediaHousekeeper } from './core/mediaHousekeeping.js';
@@ -126,8 +127,9 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   });
   const enhancerInstructions = new EnhancerInstructions({ db, log: log.child({ mod: 'enhancer' }) });
   await enhancerInstructions.load();
-  const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions });
-  const variator = new PromptVariator({ conversations, turns, store, log: log.child({ mod: 'variations' }), instructions: enhancerInstructions });
+  const references = new ReferenceReader({ conversations, turns, store, log: log.child({ mod: 'references' }) });
+  const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions, references });
+  const variator = new PromptVariator({ conversations, turns, references, log: log.child({ mod: 'variations' }), instructions: enhancerInstructions });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY

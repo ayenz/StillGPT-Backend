@@ -99,6 +99,8 @@ describe('POST /api/v1/prompts/enhance', () => {
       aspect_ratio: '9:16',
       size: '1024x1792',
       enhanced: true,
+      mode: 'text',
+      references: [],
       model: expect.any(String),
       credits: expect.any(Number),
     });

@@ -252,3 +252,15 @@ describe('folax provider (OpenAI images API)', () => {
     expect(ids).toContain('qoder-image');
   });
 });
+
+describe('long prompts under auto', () => {
+  it('go to Qoder instead of being cut at the Folax limit', async () => {
+    const prompt = `Poster with the headline "Diskon 50% Hari Ini" ${'and rich detail '.repeat(110)}`;
+    expect(prompt.length).toBeGreaterThan(1500);
+    const r = await h.api('/api/v1/images', { method: 'POST', json: { prompt } });
+    const job = (await r.json()) as any;
+    expect(job.request).toMatchObject({ provider: 'auto', provider_used: 'qoder', fallback_reason: 'prompt_too_long_for_folax' });
+    expect(job.status).toBe('completed');
+    expect(folax.calls).toHaveLength(0);
+  });
+});
