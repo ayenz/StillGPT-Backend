@@ -68,9 +68,11 @@ describe('variations of an image edit', () => {
   it('stay edits of the input instead of moving away from it', async () => {
     const img = await upload();
     const seen = capture({ prompt: '{"variations":[{"prompt":"Change his suit to navy","changed":{"color":"navy"}},{"prompt":"Change his suit to beige linen","changed":{"outfit":"beige linen"}}]}' });
-    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'Change his suit to black', input_file_ids: [img.id], n: 2, variations: true } }));
-    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['Change his suit to navy', 'Change his suit to beige linen']);
-    expect(r.body.jobs[0].request.variation).toMatchObject({ vary: ['outfit', 'color', 'background', 'props', 'mood'], keep: ['subject', 'pose', 'camera', 'text'], repeated: false });
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'Change his suit to black', input_file_ids: [img.id], n: 3, variations: true } }));
+    // job 0 is the edit exactly as asked
+    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['Change his suit to black', 'Change his suit to navy', 'Change his suit to beige linen']);
+    expect(r.body.jobs[0].request.variation).toEqual({ original: true });
+    expect(r.body.jobs[1].request.variation).toMatchObject({ vary: ['outfit', 'color', 'background', 'props', 'mood'], keep: ['subject', 'pose', 'camera', 'text'], repeated: false });
     expect(seen.prompt[0]).toContain('The prompt is an EDIT instruction');
     expect(seen.prompt[0]).toContain('grey suit');
     expect(seen.prompt[0]).not.toContain('clearly different from these references');
@@ -82,8 +84,9 @@ describe('variations of an image edit', () => {
     expect(failed.body.jobs.map((j: any) => j.request.variations_failed)).toEqual([true, true]);
 
     capture({ prompt: '{"variations":[{"prompt":"dog","changed":{}}]}' });
-    const short = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'cat', n: 2, variations: true } }));
-    expect(short.body.jobs.map((j: any) => j.request.variation.repeated)).toEqual([false, true]);
+    const short = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'cat', n: 3, variations: true } }));
+    expect(short.body.jobs.map((j: any) => j.request.prompt)).toEqual(['cat', 'dog', 'dog']);
+    expect(short.body.jobs.map((j: any) => j.request.variation.repeated)).toEqual([undefined, false, true]);
   });
 });
 

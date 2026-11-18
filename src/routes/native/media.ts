@@ -60,6 +60,8 @@ const variationsBody = z.object({
   keep: axes.optional(),
   avoid: z.array(z.string()).optional(),
   n: z.number().int().min(1).max(MAX_VARIATIONS).optional(),
+  /** The user's own words before enhancing: details they asked for stay unless `vary` is sent. */
+  user_prompt: z.string().optional(),
   model: z.string().min(1).optional(),
 });
 
@@ -282,6 +284,7 @@ export function promptRoutes(ctx: AppContext) {
         keep: b.keep,
         avoid: b.avoid,
         n: b.n,
+        userPrompt: b.user_prompt,
         model: b.model,
       }),
     );

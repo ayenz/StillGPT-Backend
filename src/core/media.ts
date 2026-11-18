@@ -408,29 +408,41 @@ export class MediaService {
   }
 
   /**
-   * Per-image request overrides for `variations`: a varied `prompt` plus `base_prompt` and `variation` (what changed).
-   * Variations are a nice-to-have, so a failure falls back to the same prompt for every image instead of failing the request.
+   * Per-image request overrides for `variations`. The first image always keeps the (enhanced) prompt as written
+   * (`variation: {original: true}`), so at least one result matches what the user asked for; images 1..n-1 get a varied
+   * `prompt` plus `base_prompt` and `variation: {changed, vary, keep, repeated}`. n = 1 is just the original.
+   * Variations are a nice-to-have, so a failure falls back to the original prompt for every image instead of failing.
    */
   private async variantsFor(v: ValidImage, request: Record<string, unknown>, n: number): Promise<Record<string, unknown>[]> {
-    const none = Array.from({ length: n }, () => ({}));
-    if (!v.variations) return none;
+    if (!v.variations) return Array.from({ length: n }, () => ({}));
     if (!this.d.variator) throw badRequest('Prompt variations are not available', 'validation_error', { param: 'variations' });
     const axes = typeof v.variations === 'object' ? v.variations : {};
     const base = String(request.prompt);
+    const original = { base_prompt: base, variation: { original: true } };
+    if (n === 1) return [original];
     try {
       // input images are what is being edited: variations stay edits of them instead of moving away from them.
-      // The variator writes at most MAX_VARIATIONS; larger batches reuse them round-robin below.
-      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, editFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n: Math.min(n, MAX_VARIATIONS) });
+      // `userPrompt` (the user's own words, before enhancing) tells the variator which details were asked for explicitly.
+      const r = await this.d.variator.vary({
+        userId: v.userId,
+        prompt: base,
+        userPrompt: v.prompt,
+        editFileIds: v.inputFileIds,
+        vary: axes.vary,
+        keep: axes.keep,
+        n: Math.min(n - 1, MAX_VARIATIONS),
+      });
       // fewer usable variations than images: the remaining images reuse them round-robin
-      return none.map((_, i) => {
+      const varied = Array.from({ length: n - 1 }, (_, i) => {
         const x = r.variations[i % r.variations.length]!;
         return { prompt: x.prompt, base_prompt: base, variation: { changed: x.changed, vary: r.vary, keep: r.keep, repeated: i >= r.variations.length } };
       });
+      return [original, ...varied];
     } catch (err) {
       if (err instanceof AppError && err.status < 500) throw err;
       this.d.log.warn('media.variations_failed', { err });
       // visible on the job, so the UI can tell why the images look alike
-      return none.map(() => ({ variations_failed: true }));
+      return [{ ...original, variations_failed: true }, ...Array.from({ length: n - 1 }, () => ({ base_prompt: base, variations_failed: true }))];
     }
   }
 

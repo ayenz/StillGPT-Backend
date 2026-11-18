@@ -544,7 +544,8 @@ from what the references show on the changed axes (and matched to them on the ke
 | `vary` | axis[] | `["outfit","color","background"]` | what must change |
 | `keep` | axis[] | `["subject","style","text"]` minus anything in `vary` | what must stay as in the prompt / references. An axis in both lists is `400` |
 | `avoid` | string[] | `[]` | up to 12 earlier variation prompts the user already saw, so the next click does not repeat them |
-| `n` | int 1–6 | `1` | how many variations |
+| `n` | int 1–9 | `1` | how many variations |
+| `user_prompt` | string | – | the user's own words before enhancing. Unless `vary` is sent, details they wrote themselves ("red dress", "beach") stay in every variation and only the details they left open change |
 | `model` | string | `enhancer` | model alias or id for the rewrite |
 
 Axes: `subject`, `outfit`, `color`, `background`, `pose`, `lighting`, `camera`, `props`, `hair`, `style`, `text`, `mood`, `motion`.
@@ -585,7 +586,7 @@ For several different images at once, send `variations` on `POST /images` instea
 | `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine (always Qoder) |
 | `provider` | `auto` \| `qoder` \| `folax` | server default (`IMAGE_PROVIDER_DEFAULT`, `auto`) | image generator, see below |
 | `n` | int 1–10 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
-| `variations` | `true` \| `{vary?, keep?}` | – | give each image its own variation of the prompt (as `POST /prompts/variations`; `input_file_ids` act as references) |
+| `variations` | `true` \| `{vary?, keep?}` | – | with `n` > 1: image 0 uses the prompt as written, images 1..n-1 get their own variation (see below). With `n` 1 or no `n`: just the prompt as written |
 | `async` | bool | `false` | `true` returns `202` straight away with a queued job (or batch) |
 | `callback_url` | URL | – | POSTed when the job finishes (§9) |
 
@@ -601,11 +602,20 @@ For several different images at once, send `variations` on `POST /images` instea
 (~30–40 s). Rules:
 - `n` > 1 always runs on **Qoder** (one image per job), whatever `provider` says. `provider: "folax"` with `n` > 1 is
   `400 validation_error`. `n: 1` follows the normal provider routing.
-- The prompt enhancer (`enhance: true`) runs **once**; every job gets the same enhanced prompt, unless `variations` is set: then
-  each job gets its own variation of it. Its `request` then has `prompt` (the variation), `base_prompt` and
-  `variation: {changed, vary, keep, repeated}` (`repeated: true` when the model returned fewer variations than `n` and this job
-  reuses one). If the variations fail, every job falls back to the base prompt with `variations_failed: true` (no error).
-- With `input_file_ids` (an edit), variations stay edits of those images: other takes on the requested change, same
+- The prompt enhancer (`enhance: true`) runs **once**; every job gets the same enhanced prompt, unless `variations` is set.
+- **`variations`** (`true` or `{vary?, keep?}`): one LLM call writes `n - 1` variations (at most 9).
+  - **Job 0** (`batch_index: 0`) always uses the prompt as written (enhanced if `enhance: true`), so at least one image matches
+    what the user asked for: `request.prompt` = that prompt, `request.base_prompt` = the same, **`request.variation: {"original": true}`**.
+  - **Jobs 1..n-1**: `request.prompt` = the variation, `request.base_prompt` = the prompt it was made from,
+    `request.variation: {changed, vary, keep, repeated}` (`repeated: true` when the model returned fewer variations than
+    needed and this job reuses one).
+  - Without an explicit `vary`, what the user wrote themselves (their original text, before enhancing) is kept: "gaun merah
+    di pantai" gives other red dresses on other beaches, not a blue suit in a studio. Sending `vary` (e.g. from "What may
+    change" chips) means those axes may change even where the user named them.
+  - `n: 1` (or no `n`) with `variations`: no variator call; the job uses the prompt as written with `variation: {"original": true}`.
+  - If the variations fail, every job uses the prompt as written and has `variations_failed: true` (job 0 also keeps
+    `variation: {"original": true}`; the others have no `variation`). No error.
+- With `input_file_ids` (an edit), job 0 is the edit exactly as asked, and the variations stay edits of those images: other takes on the requested change, same
   person/product and composition (default `vary` `outfit, color, background, props, mood`, `keep` `subject, pose, camera, text`).
 - Each job is an ordinary job (`GET /jobs/:id`, `/jobs/:id/events`, webhooks and `callback_url` fire per job). Its
   `request` additionally has `n` and `batch_index` (0-based position in the batch).

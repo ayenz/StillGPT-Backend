@@ -179,25 +179,30 @@ POST /videos { prompt: variation.prompt, first_frame_file_id, seconds, ratio:"ad
 ```
 Do **not** pass the first frame in `reference_file_ids`. That would tell the model to move away from it.
 
-### Flow E — "Generate 4 variations" in one tap (images)
+### Flow E — "Generate N variations" in one tap (images) — updated
 ```
-POST /images { prompt, n: 4, variations: true, size }                // or variations: { vary:[…], keep:[…] }
-◄─ batch: jobs[i].request = {
-     prompt: "<variation i>", base_prompt: "<prompt>",
-     variation: { changed:{…}, vary:[…], keep:[…], repeated:false }, n:4, batch_index:i, … }
+POST /images { prompt, n: 4, variations: true, size }       // or variations: { vary: [...] } from "What may change" chips
+◄─ batch:
+   jobs[0].request = { prompt: "<prompt as written>", base_prompt: "<same>", variation: { original: true }, batch_index: 0, … }
+   jobs[i].request = { prompt: "<variation>", base_prompt: "<prompt>",
+                       variation: { changed:{…}, vary:[…], keep:[…], repeated:false }, batch_index: i, … }   (i = 1..n-1)
 ```
-- Show `jobs[i].request.variation.changed` as a caption under each tile.
-- `variation.repeated: true` → the model returned fewer variations than `n` and this tile reuses one. Optionally show "similar".
-- `request.variations_failed: true` on all jobs → variations failed, every image used the base prompt. Show
-  "Variations unavailable, generated the same prompt" so identical-looking results make sense.
-- With `input_file_ids` (an edit batch) the variations stay edits of those images: other takes on the requested change
-  (e.g. other outfits). The person, pose and composition stay the same.
-- Takes ~10–25 s longer before the batch starts (the variation call runs first, even with `async: true`).
+- **Job 0 is always the original prompt** (`variation.original === true`): label it "Original".
+- Jobs 1..n-1: show `variation.changed` as a caption. `repeated: true` → reuses a variation (model returned too few).
+- Without `vary`, what the user typed themselves stays ("red dress on a beach" → other red dresses, other beaches). With
+  `vary` from the "What may change" chips, those axes may change even where the user named them. Send `vary` only when
+  the user actually picked chips.
+- `variations_failed: true` on all jobs → every image used the original prompt. Show "Variations unavailable".
+- `n: 1` + `variations` → just the original (no variation call).
+- Edit batches (`input_file_ids`): job 0 is the edit exactly as asked; the others are other takes on that edit.
+- Up to `n: 10` (original + 9 variations, one variation call). Adds ~10–25 s before the batch starts.
+- `POST /prompts/variations` now takes `user_prompt` (the user's own words before enhancing) with the same "keep what they
+  wrote" effect, and `n` up to 9.
 
 ### UI suggestions
 - "Other variation" button on the result card, plus an optional ⋯ menu with axis chips (Outfit, Color, Background, Pose,
   Lighting, Hair, Props, Mood; for video: Motion, Camera, Mood). The selected chips go in `vary`.
-- Batch selector "1 / 2 / 4 / 6 variations" next to Generate → Flow E.
+- Batch selector next to Generate (up to 10) → Flow E.
 
 ---
 

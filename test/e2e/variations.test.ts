@@ -134,6 +134,14 @@ describe('POST /api/v1/prompts/variations', () => {
     expect(seen.vary[0]).toContain('Change: style, pose.');
   });
 
+  it('user_prompt locks what the user wrote unless vary is explicit', async () => {
+    const seen = script(variationsReply('x'));
+    await post({ prompt: 'Enhanced: woman in a red silk dress on a beach', user_prompt: 'gaun merah di pantai' });
+    expect(seen.vary[0]).toContain('<user-words>\ngaun merah di pantai\n</user-words>');
+    await post({ prompt: 'Enhanced: woman in a red silk dress on a beach', user_prompt: 'gaun merah di pantai', vary: ['color'] });
+    expect(seen.vary[1]).not.toContain('<user-words>');
+  });
+
   it('502 when the model gives nothing usable', async () => {
     script('no json here');
     const r = await json(await post({ prompt: 'p' }));
@@ -144,7 +152,7 @@ describe('POST /api/v1/prompts/variations', () => {
   it('validates the body', async () => {
     expect((await json(await post({}))).status).toBe(400);
     expect((await json(await post({ prompt: ' ' }))).status).toBe(400);
-    expect((await json(await post({ prompt: 'p', n: 7 }))).status).toBe(400);
+    expect((await json(await post({ prompt: 'p', n: 10 }))).status).toBe(400);
     expect((await json(await post({ prompt: 'p', vary: ['shoes'] }))).status).toBe(400);
     expect((await json(await post({ prompt: 'p', vary: ['outfit'], keep: ['outfit'] }))).body.error.message).toMatch(/both vary and keep/);
     expect((await json(await post({ prompt: 'p', reference_file_ids: ['file_nope'] }))).status).toBe(404);
@@ -152,29 +160,65 @@ describe('POST /api/v1/prompts/variations', () => {
 });
 
 describe('POST /api/v1/images with variations', () => {
-  it('gives every image of a batch its own variation', async () => {
-    script(variationsReply('Var A', 'Var B', 'Var C'));
+  it('the first image keeps the original prompt, the others get variations', async () => {
+    const seen = script(variationsReply('Var A', 'Var B'));
     const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', n: 3, variations: { vary: ['outfit', 'background'] } } }));
     expect(r.status).toBe(200);
-    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['Var A', 'Var B', 'Var C']);
-    for (const j of r.body.jobs) {
-      expect(j.status).toBe('completed');
-      expect(j.request).toMatchObject({ base_prompt: 'base prompt', variation: { vary: ['outfit', 'background'], changed: expect.any(Object) } });
+    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['base prompt', 'Var A', 'Var B']);
+    expect(r.body.jobs[0].request).toMatchObject({ batch_index: 0, base_prompt: 'base prompt', variation: { original: true } });
+    for (const j of r.body.jobs.slice(1)) {
+      expect(j.request).toMatchObject({ base_prompt: 'base prompt', variation: { vary: ['outfit', 'background'], changed: expect.any(Object), repeated: false } });
     }
+    for (const j of r.body.jobs) expect(j.status).toBe('completed');
+    expect(seen.vary).toHaveLength(1);
+    expect(seen.vary[0]).toContain('Write 2 variations'); // n - 1
+    // explicit vary: the user chose what changes, so their words do not lock anything
+    expect(seen.vary[0]).not.toContain('<user-words>');
   });
 
-  it('single image: variations: true varies the prompt', async () => {
-    script(variationsReply('Only var'));
-    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', variations: true } }));
-    expect(r.body).toMatchObject({ status: 'completed', request: { prompt: 'Only var', base_prompt: 'base prompt' } });
+  it('default axes keep what the user wrote themselves (their words, not the enhanced text)', async () => {
+    const seen = { vary: [] as string[] };
+    h.qoder.setReply((text) => {
+      if (text.includes('<idea>')) return '{"prompt":"Fashion photo of a woman in a flowing red silk dress on a tropical beach at golden hour","aspect_ratio":"3:4"}';
+      if (text.includes('<prompt>')) {
+        seen.vary.push(text);
+        return variationsReply('V1');
+      }
+      return undefined;
+    });
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'cewek pakai gaun merah di pantai', enhance: true, n: 2, variations: true } }));
+    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['Fashion photo of a woman in a flowing red silk dress on a tropical beach at golden hour', 'V1']);
+    expect(r.body.jobs[0].request).toMatchObject({ original_prompt: 'cewek pakai gaun merah di pantai', variation: { original: true } });
+    expect(seen.vary[0]).toContain('<user-words>\ncewek pakai gaun merah di pantai\n</user-words>');
+    expect(seen.vary[0]).toContain('keep it in every variation even if its axis is listed under "Change"');
   });
 
-  it('falls back to the same prompt when variations fail', async () => {
+  it('n = 1 (or no n) with variations keeps the original prompt and skips the variator', async () => {
+    const seen = script(variationsReply('should not be used'));
+    const single = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', variations: true } }));
+    expect(single.body).toMatchObject({ status: 'completed', request: { prompt: 'base prompt', base_prompt: 'base prompt', variation: { original: true } } });
+    const one = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', n: 1, variations: true } }));
+    expect(one.body.jobs[0].request).toMatchObject({ prompt: 'base prompt', variation: { original: true } });
+    expect(seen.vary).toHaveLength(0);
+  });
+
+  it('a batch of 10 is the original plus 9 distinct variations from one call', async () => {
+    const seen = script(variationsReply(...Array.from({ length: 9 }, (_, i) => `Var ${i}`)));
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', n: 10, variations: true, async: true } }));
+    expect(r.status).toBe(202);
+    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['base prompt', ...Array.from({ length: 9 }, (_, i) => `Var ${i}`)]);
+    expect(r.body.jobs.some((j: any) => j.request.variation?.repeated)).toBe(false);
+    expect(seen.vary[0]).toContain('Write 9 variations');
+  });
+
+  it('falls back to the original prompt everywhere when variations fail', async () => {
     script('nope');
     const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', n: 2, variations: true } }));
     expect(r.status).toBe(200);
     expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['base prompt', 'base prompt']);
-    expect(r.body.jobs[0].request.variation).toBeUndefined();
+    expect(r.body.jobs[0].request).toMatchObject({ variation: { original: true }, variations_failed: true });
+    expect(r.body.jobs[1].request.variation).toBeUndefined();
+    expect(r.body.jobs[1].request.variations_failed).toBe(true);
   });
 
   it('rejects bad variation options', async () => {
