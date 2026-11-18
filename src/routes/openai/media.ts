@@ -5,7 +5,7 @@ import { IMAGE_SIZES, type ImageSize, MAX_IMAGE_BATCH, type MediaJobView, VIDEO_
 import { FOLAX_IMAGE_MODEL, IMAGE_MODEL, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, badRequest, notFound } from '../../errors.js';
 import { type Env, jsonBody, requireUser } from '../../http.js';
-import { assertUploadSize, formFiles, saveUpload } from '../native/util.js';
+import { assertUploadSize, formFiles, saveUpload, UPLOAD_LIMIT } from '../native/util.js';
 import { serveFile } from '../serveFile.js';
 
 const MAX_EDIT_IMAGES = 3;
@@ -26,7 +26,7 @@ export function openaiMediaRoutes(ctx: AppContext) {
   });
 
   app.post('/images/edits', async (c) => {
-    assertUploadSize(c, 3 * 20 * 1024 * 1024);
+    assertUploadSize(c, 3 * UPLOAD_LIMIT);
     const form = await multipart(c);
     const images = formFiles(form, 'image');
     if (!images.length) throw badRequest('At least one `image` is required', 'missing_image', { param: 'image' });

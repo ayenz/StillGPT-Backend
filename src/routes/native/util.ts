@@ -162,7 +162,8 @@ export const wantsStream = (c: Context) => c.req.query('stream') === 'true' || (
 
 // ── uploads ─────────────────────────────────────────────────────────────────
 
-export const UPLOAD_LIMIT = 20 * 1024 * 1024;
+/** Large images are fine: the copy sent upstream is shrunk (attachments.shrinkImage). Documents stay capped at 5 MB by Qoder. */
+export const UPLOAD_LIMIT = 50 * 1024 * 1024;
 
 const MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',

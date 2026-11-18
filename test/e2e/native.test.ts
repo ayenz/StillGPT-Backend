@@ -267,9 +267,9 @@ describe('files and attachments', () => {
     expect(mounted()).toContain('/data/attachments/wajah.png');
   });
 
-  it('rejects uploads over 20 MB and requests without a file', async () => {
+  it('rejects uploads over 50 MB and requests without a file', async () => {
     const big = new FormData();
-    big.append('file', new Blob([new Uint8Array(21 * 1024 * 1024)]), 'big.bin');
+    big.append('file', new Blob([new Uint8Array(51 * 1024 * 1024)]), 'big.bin');
     const res = await json(await h.api('/api/v1/files', { method: 'POST', body: big }));
     expect(res.status).toBe(413);
     expect(res.body.error.code).toBe('file_too_large');

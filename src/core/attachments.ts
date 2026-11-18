@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import type { ContentBlock } from '../db/schema.js';
 import { AppError } from '../errors.js';
 import type { QoderClient } from '../qoder/client.js';
@@ -11,6 +12,11 @@ export const UPLOAD_MAX = 5 * 1024 * 1024;
 export const ATTACHMENT_DIR = '/data/attachments';
 
 export const INLINE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+/** Still images we can shrink for the upstream copy (GIFs may be animated, so they are sent as they are). */
+export const SHRINKABLE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+/** Target size of a shrunk upstream copy, safely under UPLOAD_MAX. */
+const UPSTREAM_IMAGE_TARGET = Math.floor(4.5 * 1024 * 1024);
+const canShrink = (f: StoredFile) => SHRINKABLE_IMAGE_TYPES.includes(f.mimeType);
 
 export interface PreparedInput {
   content: QoderContentBlock[];
@@ -51,7 +57,7 @@ export async function prepareInput(
         content.push({ type: 'image', source: { type: 'file', file_id: await ensureUploaded(file, store, qoder) } });
       }
       // Vision input only lets the model *see* the image; tools (ImageGen edits, Read, Bash) need a real file.
-      if (opts.mountImages && file.size <= UPLOAD_MAX) {
+      if (opts.mountImages && (file.size <= UPLOAD_MAX || canShrink(file))) {
         const mountPath = uniquePath(`${ATTACHMENT_DIR}/${file.filename}`, usedPaths);
         mounts.push({ qoderFileId: await ensureUploaded(file, store, qoder), mountPath });
         notes.push(`- ${mountPath} (${file.mimeType}, ${file.size} bytes; the image shown above)`);
@@ -74,12 +80,43 @@ export async function prepareInput(
 
 async function ensureUploaded(file: StoredFile, store: MediaStore, qoder: QoderClient): Promise<string> {
   if (file.qoderFileId) return file.qoderFileId;
-  if (file.size > UPLOAD_MAX) {
+  let bytes = await store.read(file);
+  if (bytes.length > UPLOAD_MAX && canShrink(file)) bytes = await shrinkImage(bytes, file.mimeType);
+  if (bytes.length > UPLOAD_MAX) {
     throw new AppError(413, 'attachment_too_large', `${file.filename} is ${(file.size / 1e6).toFixed(1)} MB; documents are limited to 5 MB`);
   }
-  const uploaded = await qoder.uploadFile(await store.read(file), file.filename, file.mimeType);
+  const uploaded = await qoder.uploadFile(bytes, file.filename, file.mimeType);
   await store.setQoderFileId(file.id, uploaded.id);
   return uploaded.id;
+}
+
+/**
+ * A smaller copy of a large image for Qoder (which takes ~5 MB per file): same format, so the file name and type
+ * stay right, scaled down step by step until it fits. The stored original is untouched.
+ */
+export async function shrinkImage(bytes: Buffer, mimeType: string, target = UPSTREAM_IMAGE_TARGET): Promise<Buffer> {
+  // decode once (capped at 4096 px), then re-encode from the raw pixels; the next size is estimated from the last result
+  const { data, info } = await sharp(bytes, { limitInputPixels: false })
+    .rotate()
+    .resize({ width: 4096, height: 4096, fit: 'inside', withoutEnlargement: true })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const raw = { width: info.width, height: info.height, channels: info.channels };
+  let edge = Math.max(info.width, info.height);
+  let out = bytes;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const img = sharp(data, { raw }).resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true });
+    out =
+      mimeType === 'image/png'
+        ? await img.png({ compressionLevel: 6 }).toBuffer()
+        : mimeType === 'image/webp'
+          ? await img.webp({ quality: 88 }).toBuffer()
+          : await img.jpeg({ quality: 88, mozjpeg: true }).toBuffer();
+    if (out.length <= target || edge <= 512) return out;
+    // bytes scale roughly with pixel count
+    edge = Math.max(512, Math.floor(edge * Math.sqrt(target / out.length) * 0.92));
+  }
+  return out;
 }
 
 function uniquePath(path: string, used: Set<string>): string {

@@ -2,7 +2,7 @@ import { and, desc, eq, lt } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { AppContext } from '../../context.js';
-import { INLINE_IMAGE_TYPES, UPLOAD_MAX } from '../../core/attachments.js';
+import { INLINE_IMAGE_TYPES, SHRINKABLE_IMAGE_TYPES, UPLOAD_MAX } from '../../core/attachments.js';
 import type { TurnHandle } from '../../core/turns.js';
 import { type ContentBlock, messages } from '../../db/schema.js';
 import { AppError, notFound } from '../../errors.js';
@@ -10,7 +10,7 @@ import type { Env } from '../../http.js';
 import { imageProviders } from './media.js';
 import { body, conversationView, limitParam, messageView, type SseEvent, sse, turnEventView, wantsStream } from './util.js';
 
-/** Images above this are not inlined and would need an upstream upload (capped at 5 MB). */
+/** GIFs above this are not inlined and would need an upstream upload (capped at 5 MB). Still images of any size are shrunk upstream. */
 const IMAGE_MAX = 7 * 1024 * 1024;
 const MAX_BLOCKS = 50;
 
@@ -205,7 +205,7 @@ async function toContentBlocks(ctx: AppContext, userId: string, input: MessageIn
     });
     const asImage = b.type === 'image' || (b.type === 'auto' && INLINE_IMAGE_TYPES.includes(file.mimeType));
     if (asImage) {
-      if (file.size > IMAGE_MAX) throw tooLarge(file.filename, IMAGE_MAX, 'image');
+      if (file.size > IMAGE_MAX && !SHRINKABLE_IMAGE_TYPES.includes(file.mimeType)) throw tooLarge(file.filename, IMAGE_MAX, 'image');
       out.push({ type: 'image', fileId: file.id, mimeType: file.mimeType });
     } else {
       if (file.size > UPLOAD_MAX) throw tooLarge(file.filename, UPLOAD_MAX, 'document');
