@@ -133,7 +133,8 @@ export class AuthService {
     await this.db.update(refreshTokens).set({ revokedAt: new Date() }).where(eq(refreshTokens.tokenHash, sha256(refreshToken)));
   }
 
-  private async issueTokens(userId: string): Promise<TokenPair> {
+  /** A new access/refresh pair (also used by passkey sign-in). */
+  async issueTokens(userId: string): Promise<TokenPair> {
     const access = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject(userId).setIssuedAt().setExpirationTime(`${ACCESS_TTL_SEC}s`).sign(this.key);
     const refresh = `rt_${randomId(40)}`;
     await this.db.insert(refreshTokens).values({ id: newId('rt'), userId, tokenHash: sha256(refresh), expiresAt: new Date(Date.now() + REFRESH_TTL_MS) });

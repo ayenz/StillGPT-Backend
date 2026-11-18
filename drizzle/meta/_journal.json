@@ -29,6 +29,13 @@
       "when": 1794976599643,
       "tag": "0003_file_traits",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794979279812,
+      "tag": "0004_passkeys",
+      "breakpoints": true
     }
   ]
 }

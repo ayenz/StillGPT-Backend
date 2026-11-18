@@ -85,6 +85,15 @@ const schema = z
       .string()
       .default('*')
       .transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean)),
+    /**
+     * Passkeys (WebAuthn). The RP ID is the frontend's domain; a passkey only works on that domain (and its subdomains),
+     * so changing it later makes existing passkeys unusable. Default: the host of the first https entry of CORS_ORIGINS.
+     */
+    PASSKEY_RP_ID: optionalString(z.string().min(1)),
+    /** Shown by the browser/OS when creating a passkey. */
+    PASSKEY_RP_NAME: z.string().min(1).default('StillGPT'),
+    /** Web origins allowed to use passkeys (comma-separated). Default: CORS_ORIGINS without "*". */
+    PASSKEY_ORIGINS: optionalString(z.string().transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean))),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   })
   .refine((c) => !c.FOLAX_URL === !c.FOLAX_API_KEY, { message: 'Set both FOLAX_URL and FOLAX_API_KEY (or neither)' })

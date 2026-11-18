@@ -69,7 +69,7 @@ src/
   errors.ts                AppError + mappers to native/OpenAI/Anthropic error envelopes
   log.ts                   tiny JSON logger
   db/schema.ts, db/client.ts, db/migrate.ts   Drizzle schema; pg or PGlite
-  auth/                    passwords (scrypt), jwt (jose), apiKeys, middleware (resolveUser)
+  auth/                    passwords (scrypt), jwt (jose), apiKeys, passkeys (WebAuthn, @simplewebauthn/server), middleware (resolveUser)
   qoder/
     client.ts              QoderClient: typed REST + streamEvents() async iterator
     sse.ts                 SSE line parser
@@ -260,6 +260,10 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 
 - Users: `email`, scrypt `password_hash`, `role admin|user`, `monthly_credit_limit` (null = unlimited). First admin from `ADMIN_EMAIL`/`ADMIN_PASSWORD`.
 - PWA: `POST /api/v1/auth/login` → `{access_token (JWT, 15 min), refresh_token (opaque, 30 d, stored hashed)}`; `/auth/refresh`, `/auth/logout`.
+- Passkeys (`auth/passkeys.ts`): usernameless WebAuthn sign-in (`/auth/passkey/options|verify`, discoverable credentials, user
+  verification required) issuing the same token pair. Credentials in `passkeys` (public key, counter, AAGUID → provider name),
+  one-time challenges in `webauthn_challenges` (5 min, deleted on use, so ceremonies survive restarts). RP ID = the frontend's
+  domain (`PASSKEY_RP_ID`, default the first https `CORS_ORIGINS` host); `localhost` origins use RP ID `localhost`.
 - API keys `qr_<random>` (sha256 stored, shown once) for n8n/SDKs. Accepted as `Authorization: Bearer` or `x-api-key`.
 - Every route resolves `c.get('user')`; admin routes require `role=admin`.
 

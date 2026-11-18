@@ -26,6 +26,44 @@ export const refreshTokens = pgTable('refresh_tokens', {
   createdAt: createdAt(),
 });
 
+/** WebAuthn credentials ("passkeys") a user can sign in with instead of a password. */
+export const passkeys = pgTable(
+  'passkeys',
+  {
+    /** Credential id as base64url (what the browser reports as `id`). */
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    /** COSE public key, base64url. */
+    publicKey: text('public_key').notNull(),
+    /** Signature counter (0 for most synced passkeys). */
+    counter: integer('counter').notNull().default(0),
+    transports: jsonb('transports').$type<string[]>().notNull().default([]),
+    /** `singleDevice` (hardware key) or `multiDevice` (synced: iCloud Keychain, Google Password Manager…). */
+    deviceType: text('device_type').notNull(),
+    backedUp: boolean('backed_up').notNull().default(false),
+    /** Authenticator model id; maps to a provider name such as "iCloud Keychain". */
+    aaguid: text('aaguid'),
+    name: text('name').notNull(),
+    /** RP ID the credential was created for (the frontend's domain). */
+    rpId: text('rp_id').notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: ts('last_used_at'),
+  },
+  (t) => [index('passkeys_user_idx').on(t.userId)],
+);
+
+/** One-time WebAuthn challenges (registration or sign-in), valid for a few minutes. */
+export const webauthnChallenges = pgTable('webauthn_challenges', {
+  id: text('id').primaryKey(),
+  challenge: text('challenge').notNull(),
+  kind: text('kind', { enum: ['register', 'login'] }).notNull(),
+  /** Registration only: who is adding the passkey. */
+  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  rpId: text('rp_id').notNull(),
+  expiresAt: ts('expires_at').notNull(),
+  createdAt: createdAt(),
+});
+
 export const apiKeys = pgTable('api_keys', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),

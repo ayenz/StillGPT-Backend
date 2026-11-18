@@ -45,7 +45,7 @@ There are two kinds of credentials:
 
 | Credential | Use it for | Lifetime |
 |---|---|---|
-| **Access token** (JWT) from `/auth/login` | Apps where a person signs in (PWA, Flutter) | 15 min (`expires_in` seconds), renewed with the refresh token |
+| **Access token** (JWT) from `/auth/login` or `/auth/passkey/verify` | Apps where a person signs in (PWA, Flutter) | 15 min (`expires_in` seconds), renewed with the refresh token |
 | **API key** `qr_…` from `/api-keys` | Server-to-server calls: n8n, scripts, SDKs | Valid until revoked |
 
 ### POST /auth/login
@@ -78,6 +78,52 @@ and the response contains a new one, so always store the new one. If you reuse a
 ```
 → `204`. This revokes the refresh token. The current access token stays valid until it expires (at most 15 min).
 
+### Passkeys (sign in with fingerprint / Face ID)
+A passkey replaces the password: the user taps "Sign in with passkey", confirms with fingerprint, face or device PIN, and is
+signed in. No email is typed: the browser shows the passkeys it holds for this site and the chosen one identifies the user.
+Passkeys are WebAuthn credentials bound to the **frontend's domain** (the RP ID, `stillgpt.ayenz.my.id` on prod;
+`localhost` for `http://localhost:*` dev origins listed in `CORS_ORIGINS`). Use `@simplewebauthn/browser` on the client:
+the `options` objects below go straight into it and its results go straight back.
+
+**Sign in** (no auth header):
+| Step | Call | Body | Response |
+|---|---|---|---|
+| 1 | `POST /auth/passkey/options` | – | `{challenge_id, options}` (`options` = `PublicKeyCredentialRequestOptionsJSON`, no `allowCredentials`) |
+| 2 | browser | `startAuthentication({ optionsJSON: options })` | `response` |
+| 3 | `POST /auth/passkey/verify` | `{challenge_id, response}` | same as `/auth/login`: `{user, access_token, token_type, expires_in, refresh_token}` |
+
+**Add a passkey** (signed in, e.g. Settings → Security):
+| Step | Call | Body | Response |
+|---|---|---|---|
+| 1 | `POST /me/passkeys/options` | – | `{challenge_id, options}` (`PublicKeyCredentialCreationOptionsJSON`) |
+| 2 | browser | `startRegistration({ optionsJSON: options })` | `response` |
+| 3 | `POST /me/passkeys` | `{challenge_id, response, name?}` | `201 passkey` |
+
+**Manage:** `GET /me/passkeys` → `{data: [passkey]}` · `PATCH /me/passkeys/:id {name}` → `passkey` · `DELETE /me/passkeys/:id` → `204`.
+`passkey` = `{id, name, provider, synced, backed_up, created_at, last_used_at}`. `name` defaults to the provider
+(`"iCloud Keychain"`, `"Google Password Manager"`, `"Windows Hello"`, `"1Password"`, …, else `"Passkey"`); `provider` is
+`null` when unknown; `synced` = available on the user's other devices through that provider.
+
+Errors:
+| status / code | when | UI |
+|---|---|---|
+| `400 invalid_challenge` | challenge expired (5 min), already used, or from another session | restart the flow |
+| `400 passkey_invalid` | registration response did not verify (no user verification, wrong origin…) | "Couldn't add the passkey" |
+| `401 passkey_not_found` | sign-in with a passkey we do not know (removed here, or for a deleted account) | "This passkey was removed. Sign in another way"; optionally `PublicKeyCredential.signalUnknownCredential` |
+| `401 unauthorized` | signature/origin check failed, account disabled | generic sign-in error |
+| `403 origin_not_allowed` | request `Origin` is not in `CORS_ORIGINS` / `PASSKEY_ORIGINS` | config problem |
+| `409 passkey_exists` / `too_many_passkeys` (20) | | |
+| `409 last_sign_in_method` | deleting the only passkey of an account without password | "Set a password or add another passkey first" |
+| `503 passkeys_not_configured` | server has no https origin / `PASSKEY_RP_ID` | hide passkey UI (`/me` → `sign_in.passkeys_available`) |
+
+- Challenges are single-use and expire after 5 minutes. User verification (biometric/PIN) is always required.
+- Config: `PASSKEY_RP_ID` (default: host of the first https `CORS_ORIGINS` entry; **changing it orphans existing passkeys**),
+  `PASSKEY_RP_NAME` (default `StillGPT`), `PASSKEY_ORIGINS` (default: `CORS_ORIGINS` minus `*`).
+- Native apps (Flutter) need the RP domain to serve `/.well-known/assetlinks.json` (Android) and
+  `apple-app-site-association` (iOS) before they can use these passkeys. Not set up yet.
+- Admin (lost device): `GET /admin/users/:id/passkeys`, `DELETE /admin/users/:id/passkeys/:passkeyId` (no last-method guard;
+  set a password for the user with `PATCH /admin/users/:id` if needed).
+
 ### Client guidance
 - **PWA:** keep the access token in memory only. Put the refresh token in IndexedDB or `localStorage`, and accept the XSS
   trade-off, or wrap it with a service worker. When the app loads, call `/auth/refresh`. When any call returns `401`,
@@ -98,9 +144,11 @@ and the response contains a new one, so always store the new one. If you reuse a
   "user": { "id": "usr_…", "email": "…", "display_name": "…", "role": "user", "monthly_credit_limit": 50,
             "disabled": false, "created_at": "…" },
   "usage": { "period_start": "2026-11-01T00:00:00.000Z", "credits_used": 1.23, "credits_limit": 50,
-             "by_kind": { "chat": { "credits": 0.4, "requests": 31 }, "image": { "credits": 0.83, "requests": 12 } } }
+             "by_kind": { "chat": { "credits": 0.4, "requests": 31 }, "image": { "credits": 0.83, "requests": 12 } } },
+  "sign_in": { "password": true, "passkeys": 1, "passkeys_available": true }
 }
 ```
+`sign_in`: which sign-in methods the account has (`passkeys` = count) and whether the server supports passkeys.
 
 ### PATCH /me
 ```json

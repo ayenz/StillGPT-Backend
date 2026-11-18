@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { verifyPassword } from '../../auth/auth.js';
+import { passkeyView, signInMethods } from '../../auth/passkeys.js';
 import type { AppContext } from '../../context.js';
 import { type HousekeepingReport, type HousekeepingStatus, INTERVAL_HOURS_MAX, RETENTION_HOURS_MAX } from '../../core/housekeeping.js';
 import { type EnhancerInstructionsStatus, INSTRUCTION_KINDS, type InstructionKind, validateInstructions } from '../../core/enhancerInstructions.js';
@@ -13,13 +14,26 @@ import { body, parse, userView } from './util.js';
 
 const PASSWORD = z.string().min(8, 'password must be at least 8 characters').max(200);
 
-/** POST /auth/login|refresh|logout — the only unauthenticated native routes. */
+/** WebAuthn response JSON from the browser (`navigator.credentials.*` via @simplewebauthn/browser); verified by the library. */
+const webauthnResponse = z.object({ id: z.string().min(1).max(1024), rawId: z.string().min(1), type: z.literal('public-key'), response: z.record(z.string(), z.unknown()) }).passthrough();
+
+/** POST /auth/login|refresh|logout and /auth/passkey/* — the only unauthenticated native routes. */
 export function authRoutes(ctx: AppContext) {
   const app = new Hono<Env>();
 
   app.post('/auth/login', async (c) => {
     const b = await body(c, z.object({ email: z.string().min(1), password: z.string().min(1) }));
     const { user, tokens } = await ctx.auth.login(b.email, b.password);
+    return c.json({ user: userView(user), ...tokens });
+  });
+
+  /** Passkey sign-in, step 1: a challenge for the browser (no email needed). */
+  app.post('/auth/passkey/options', async (c) => c.json(await ctx.passkeys.loginOptions(c.req.header('origin'))));
+
+  /** Passkey sign-in, step 2: the browser's signed answer → the same response as /auth/login. */
+  app.post('/auth/passkey/verify', async (c) => {
+    const b = await body(c, z.object({ challenge_id: z.string().min(1), response: webauthnResponse }));
+    const { user, tokens } = await ctx.passkeys.verifyLogin(b.challenge_id, b.response as never);
     return c.json({ user: userView(user), ...tokens });
   });
 
@@ -42,7 +56,34 @@ export function meRoutes(ctx: AppContext) {
   const app = new Hono<Env>();
   app.get('/me', async (c) => {
     const user = c.get('user');
-    return c.json({ user: userView(user), usage: await ctx.usage.summary(user.id) });
+    return c.json({
+      user: userView(user),
+      usage: await ctx.usage.summary(user.id),
+      sign_in: { ...signInMethods(user, await ctx.passkeys.countFor(user.id)), passkeys_available: ctx.passkeys.enabled },
+    });
+  });
+
+  // ── passkeys ──
+  app.get('/me/passkeys', async (c) => c.json({ data: (await ctx.passkeys.list(c.get('user').id)).map(passkeyView) }));
+
+  /** Add a passkey, step 1: options for navigator.credentials.create(). */
+  app.post('/me/passkeys/options', async (c) => c.json(await ctx.passkeys.registrationOptions(c.get('user'), c.req.header('origin'))));
+
+  /** Add a passkey, step 2: the browser's attestation. */
+  app.post('/me/passkeys', async (c) => {
+    const b = await body(c, z.object({ challenge_id: z.string().min(1), response: webauthnResponse, name: z.string().max(200).optional() }));
+    const pk = await ctx.passkeys.verifyRegistration(c.get('user'), b.challenge_id, b.response as never, b.name);
+    return c.json(passkeyView(pk), 201);
+  });
+
+  app.patch('/me/passkeys/:id', async (c) => {
+    const b = await body(c, z.object({ name: z.string().max(200) }).strict());
+    return c.json(passkeyView(await ctx.passkeys.rename(c.get('user').id, c.req.param('id'), b.name)));
+  });
+
+  app.delete('/me/passkeys/:id', async (c) => {
+    await ctx.passkeys.remove(c.get('user'), c.req.param('id'));
+    return c.body(null, 204);
   });
 
   app.patch('/me', async (c) => {
@@ -106,6 +147,17 @@ export function adminRoutes(ctx: AppContext) {
     );
     const user = await ctx.auth.createUser({ email: b.email, password: b.password, displayName: b.display_name, role: b.role, monthlyCreditLimit: b.monthly_credit_limit });
     return c.json({ user: userView(user) }, 201);
+  });
+
+  /** A user's passkeys (support: lost device). */
+  app.get('/admin/users/:id/passkeys', async (c) => {
+    const user = await ctx.auth.getUser(c.req.param('id'));
+    return c.json({ data: (await ctx.passkeys.list(user.id)).map(passkeyView) });
+  });
+
+  app.delete('/admin/users/:id/passkeys/:passkeyId', async (c) => {
+    await ctx.passkeys.adminRemove(c.req.param('id'), c.req.param('passkeyId'));
+    return c.body(null, 204);
   });
 
   app.patch('/admin/users/:id', async (c) => {

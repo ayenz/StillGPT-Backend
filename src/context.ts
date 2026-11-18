@@ -1,4 +1,5 @@
 import { AuthService } from './auth/auth.js';
+import { PasskeyService, passkeyConfig } from './auth/passkeys.js';
 import type { Config } from './config.js';
 import { AgentPool } from './core/agentPool.js';
 import { EventBus } from './core/bus.js';
@@ -40,6 +41,7 @@ export interface AppContext {
   turns: TurnRunner;
   bus: EventBus;
   auth: AuthService;
+  passkeys: PasskeyService;
   media: MediaService;
   enhancer: PromptEnhancer;
   enhancerInstructions: EnhancerInstructions;
@@ -105,6 +107,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const usage = new UsageService(db);
   const conversations = new ConversationService(db);
   const auth = new AuthService(db, config.JWT_SECRET);
+  const passkeys = new PasskeyService({ db, auth, log: log.child({ mod: 'passkeys' }), config: passkeyConfig(config) });
   const webhooks = new WebhookService(db, log.child({ mod: 'webhooks' }), o.fetchImpl, { pollIntervalMs: config.WEBHOOK_POLL_INTERVAL_MS });
   const turns = new TurnRunner({ db, qoder, agents, models, store, usage, conversations, bus, log: log.child({ mod: 'turns' }), sessionBudgetCredits: config.SESSION_BUDGET_CREDITS });
   const housekeeper = new QoderHousekeeper({
@@ -174,6 +177,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     turns,
     bus,
     auth,
+    passkeys,
     media,
     enhancer,
     enhancerInstructions,
