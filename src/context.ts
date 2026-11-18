@@ -4,6 +4,7 @@ import { AgentPool } from './core/agentPool.js';
 import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
+import { EnhancerInstructions } from './core/enhancerInstructions.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
 import { MediaHousekeeper } from './core/mediaHousekeeping.js';
 import { QoderCredentialService } from './core/qoderCredential.js';
@@ -39,6 +40,7 @@ export interface AppContext {
   auth: AuthService;
   media: MediaService;
   enhancer: PromptEnhancer;
+  enhancerInstructions: EnhancerInstructions;
   /** null when AUTO_TITLE=false. */
   titler: ConversationTitler | null;
   /** null when FOLAX_URL/FOLAX_API_KEY are unset. */
@@ -120,7 +122,9 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     envSession: config.QODER_WEB_SESSION,
     fetchImpl: o.fetchImpl,
   });
-  const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }) });
+  const enhancerInstructions = new EnhancerInstructions({ db, log: log.child({ mod: 'enhancer' }) });
+  await enhancerInstructions.load();
+  const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY
@@ -166,6 +170,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     auth,
     media,
     enhancer,
+    enhancerInstructions,
     titler,
     folax,
     webhooks,

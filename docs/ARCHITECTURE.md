@@ -87,6 +87,7 @@ src/
     variants.ts            gallery renditions: WebP thumb (400) / preview (1280) via sharp, video stills via ffmpeg
     media.ts               image + video jobs (background worker, resumable; Qoder or Folax for images)
     enhancer.ts            prompt enhancer (idea → detailed prompt + aspect ratio)
+    enhancerInstructions.ts admin-editable enhancer instructions (kv), cached in memory
     webhooks.ts            outgoing webhooks (HMAC-signed), per-request callback_url
     usage.ts               credit accounting + per-user limits
     bus.ts                 in-memory pub/sub for live turn/job events
@@ -176,7 +177,9 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 - Prompt enhancer (`core/enhancer.ts`, `POST /api/v1/prompts/enhance`): one turn on a hidden `chat` conversation with the `enhancer` model
   alias that rewrites an idea into an English prompt + aspect ratio (image size, or video ratio/seconds). `enhance: true` on
   image/video jobs runs it at creation time; its size/ratio/seconds apply only where the request left them unset, and
-  `request.original_prompt` keeps the input.
+  `request.original_prompt` keeps the input. The LLM text is `instructions + hints + contract + <idea>`: `instructions` (persona,
+  style, length, how to pick a ratio) are admin-editable per kind in `kv.enhancer.instructions.{image,video}` (cached by
+  `EnhancerInstructions`, `/admin/enhancer/*`); the contract (allowed ratios, JSON shape, safety rules) stays in code.
 - Videos are **jobs**: table `media_jobs` (status `queued|in_progress|completed|failed`, qoder session id, last event id, progress, result artifact, error, `callback_url`).
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).
