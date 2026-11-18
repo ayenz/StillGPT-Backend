@@ -164,7 +164,7 @@ export class MediaStore {
     return { url, thumbnailUrl: `${url}&variant=thumb`, previewUrl: `${url}&variant=preview` };
   }
 
-  async setQoderFileId(id: string, qoderFileId: string) {
+  async setQoderFileId(id: string, qoderFileId: string | null) {
     await this.db.update(files).set({ qoderFileId }).where(eq(files.id, id));
   }
 

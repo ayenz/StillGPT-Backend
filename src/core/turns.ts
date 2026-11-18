@@ -7,7 +7,7 @@ import type { Logger } from '../log.js';
 import { isModelUnavailable, type QoderClient } from '../qoder/client.js';
 import type { QoderContentBlock, QoderEvent, QoderStreamFrame } from '../qoder/types.js';
 import { AGENT_BASE_MODEL, type AgentPool } from './agentPool.js';
-import { prepareInput } from './attachments.js';
+import { prepareInput, reupload } from './attachments.js';
 import type { EventBus } from './bus.js';
 import type { ConversationRow, ConversationService } from './conversations.js';
 import { type Artifact, type Credits, type StopReason, type TurnEvent, zeroCredits } from './events.js';
@@ -227,7 +227,7 @@ export class TurnRunner {
         if (ensured.recreated && !preamble) preamble = await this.historyPreamble(conv.id, handle.userMessageId);
         if (attempt === 0) emit({ type: 'turn.started', conversationId: conv.id, messageId: handle.messageId, model: st.model });
 
-        for (const m of input.mounts) await this.d.qoder.addFileResource(st.sessionId, m.qoderFileId, m.mountPath).catch(ignoreDuplicateMount);
+        for (const m of input.mounts) await this.mount(st.sessionId, m, req.userId);
         const content: QoderContentBlock[] = preamble ? [{ type: 'text', text: preamble }, ...input.content] : input.content;
 
         stopReason = await this.pump(st, content, emit, timeout.signal);
@@ -309,6 +309,21 @@ export class TurnRunner {
    * Make sure the conversation has a Qoder session configured with the resolved model, system prompt and tools.
    * Retired models are detected here (400 from the patch) and replaced via the registry fallback chain.
    */
+  /**
+   * Mount an uploaded attachment into the session. Our cached Qoder file id can be stale (deleted upstream, or
+   * uploaded under a previous PAT/account): on 404 the file is uploaded again and mounted with the new id.
+   */
+  private async mount(sessionId: string, m: { fileId: string; qoderFileId: string; mountPath: string }, userId: string) {
+    try {
+      await this.d.qoder.addFileResource(sessionId, m.qoderFileId, m.mountPath);
+    } catch (err) {
+      if (!isUpstreamNotFound(err)) return ignoreDuplicateMount(err);
+      this.d.log.warn('turn.attachment_reupload', { fileId: m.fileId, staleQoderFileId: m.qoderFileId });
+      m.qoderFileId = await reupload(m.fileId, userId, this.d.store, this.d.qoder);
+      await this.d.qoder.addFileResource(sessionId, m.qoderFileId, m.mountPath).catch(ignoreDuplicateMount);
+    }
+  }
+
   private async ensureSession(st: RunState, needsDocTools: boolean, emit: (e: TurnEvent) => void): Promise<{ recreated: boolean }> {
     const conv = st.conv;
     const profile = PROFILES[conv.profile as ProfileName] ?? PROFILES.chat;
@@ -600,6 +615,8 @@ function normalizeStop(reason: string): StopReason {
   if (reason === 'interrupted' || reason === 'requires_action' || reason === 'budget_exceeded') return reason;
   return 'end_turn';
 }
+
+const isUpstreamNotFound = (err: unknown) => err instanceof AppError && err.code === 'upstream_not_found';
 
 const ignoreDuplicateMount = (err: unknown) => {
   if (err instanceof AppError && err.status === 409) return;

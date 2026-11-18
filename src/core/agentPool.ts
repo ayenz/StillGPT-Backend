@@ -1,6 +1,6 @@
-import { eq } from 'drizzle-orm';
+import { eq, isNotNull } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
-import { kv, qoderAgents } from '../db/schema.js';
+import { files, kv, qoderAgents } from '../db/schema.js';
 import type { Logger } from '../log.js';
 import type { QoderClient } from '../qoder/client.js';
 import { PROFILES, type ProfileName } from './profiles.js';
@@ -43,7 +43,7 @@ export class AgentPool {
   }
 
   /**
-   * Drop cached environment/agent ids when the Qoder credential changed since they were created
+   * Drop cached environment/agent/upload ids when the Qoder credential changed since they were created
    * (a new PAT is usually a different account, where the old ids do not exist). Call once at startup.
    */
   async syncAccount(fingerprint: string): Promise<void> {
@@ -52,8 +52,14 @@ export class AgentPool {
       const agents = await this.db.select().from(qoderAgents);
       await this.db.delete(qoderAgents);
       await this.db.delete(kv).where(eq(kv.key, ENV_KEY));
+      // uploads live in the old account too: forget them so attachments are re-uploaded on next use
+      const uploads = await this.db.update(files).set({ qoderFileId: null }).where(isNotNull(files.qoderFileId)).returning({ id: files.id });
       this.envId = undefined;
-      this.log.warn('qoder.account_changed', { droppedAgents: agents.length, effect: 'environment and agents are re-resolved on next use' });
+      this.log.warn('qoder.account_changed', {
+        droppedAgents: agents.length,
+        droppedUploads: uploads.length,
+        effect: 'environment, agents and file uploads are re-resolved on next use',
+      });
       // same account with a rotated token: the old agents are still there, so archive them (best effort)
       for (const a of agents) this.qoder.archiveAgent(a.agentId).catch(() => {});
     }
