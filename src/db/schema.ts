@@ -155,6 +155,8 @@ export const files = pgTable(
     qoderFileId: text('qoder_file_id'),
     conversationId: text('conversation_id'),
     jobId: text('job_id'),
+    /** What a vision model saw in this image (outfit, palette, background…), cached for prompt variations. */
+    traits: jsonb('traits').$type<Record<string, string>>(),
     createdAt: createdAt(),
     /** Set while the file's job is in the trash: hidden from users (404), still served to admins via trash URLs. */
     deletedAt: ts('deleted_at'),

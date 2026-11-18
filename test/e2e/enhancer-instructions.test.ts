@@ -36,7 +36,7 @@ describe('admin enhancer instructions', () => {
   it('lists the defaults and the fixed contract', async () => {
     const r = await json(await admin('/instructions'));
     expect(r.status).toBe(200);
-    expect(r.body.data.map((d: any) => d.kind)).toEqual(['image', 'video']);
+    expect(r.body.data.map((d: any) => d.kind)).toEqual(['image', 'video', 'variation']);
     const image = r.body.data[0];
     expect(image).toMatchObject({ source: 'default', updated_at: null, instructions: DEFAULT_INSTRUCTIONS.image, default: DEFAULT_INSTRUCTIONS.image });
     expect(image.contract).toContain('Reply with ONLY a JSON object');

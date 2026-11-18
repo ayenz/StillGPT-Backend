@@ -168,6 +168,11 @@ export class MediaStore {
     await this.db.update(files).set({ qoderFileId }).where(eq(files.id, id));
   }
 
+  /** Cache what a vision model read from an image (used by prompt variations). */
+  async setTraits(id: string, traits: Record<string, string>) {
+    await this.db.update(files).set({ traits }).where(eq(files.id, id));
+  }
+
   /**
    * Valid for at least `ttlSec`. The expiry is rounded up to the next day boundary so repeated listings return the
    * exact same URL and the browser cache actually hits (a fresh `exp` per request made every gallery load re-download).

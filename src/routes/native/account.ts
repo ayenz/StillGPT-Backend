@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { verifyPassword } from '../../auth/auth.js';
 import type { AppContext } from '../../context.js';
 import { type HousekeepingReport, type HousekeepingStatus, INTERVAL_HOURS_MAX, RETENTION_HOURS_MAX } from '../../core/housekeeping.js';
-import { type EnhancerInstructionsStatus, validateInstructions } from '../../core/enhancerInstructions.js';
+import { type EnhancerInstructionsStatus, INSTRUCTION_KINDS, type InstructionKind, validateInstructions } from '../../core/enhancerInstructions.js';
 import { INSTRUCTIONS_MAX } from '../../core/enhancer.js';
 import type { QoderCredentialStatus } from '../../core/qoderCredential.js';
 import { HISTORY_PAGE_SIZE_MAX, type QoderCreditHistory, type QoderCreditsStatus, type QuotaSummary } from '../../core/qoderCredits.js';
@@ -229,7 +229,7 @@ export function adminRoutes(ctx: AppContext) {
 
   /** Prompt-enhancer instructions (the editable part; the output contract is fixed). */
   app.get('/admin/enhancer/instructions', async (c) =>
-    c.json({ data: (['image', 'video'] as const).map((k) => instructionsView(ctx.enhancerInstructions.status(k))) }),
+    c.json({ data: INSTRUCTION_KINDS.map((k) => instructionsView(ctx.enhancerInstructions.status(k))) }),
   );
 
   app.get('/admin/enhancer/instructions/:kind', async (c) => c.json(instructionsView(ctx.enhancerInstructions.status(kindParam(c.req.param('kind'))))));
@@ -250,8 +250,11 @@ export function adminRoutes(ctx: AppContext) {
       z
         .object({
           prompt: z.string(),
-          kind: z.enum(['image', 'video']).default('image'),
+          kind: z.enum(['image', 'video', 'variation']).default('image'),
           instructions: z.string().max(INSTRUCTIONS_MAX * 2).optional(),
+          /** variation only: references to read and how many variations to write. */
+          reference_file_ids: z.array(z.string()).optional(),
+          n: z.number().int().min(1).max(6).optional(),
           purpose: z.string().max(200).optional(),
           style: z.string().max(200).optional(),
           model: z.string().min(1).optional(),
@@ -259,6 +262,18 @@ export function adminRoutes(ctx: AppContext) {
         .strict(),
     );
     const override = b.instructions === undefined ? undefined : validateInstructions(b.instructions);
+    const source = override === undefined ? ctx.enhancerInstructions.status(b.kind).source : 'draft';
+    if (b.kind === 'variation') {
+      const v = await ctx.variator.vary({
+        userId: c.get('user').id,
+        prompt: b.prompt,
+        referenceFileIds: b.reference_file_ids,
+        n: b.n,
+        model: b.model,
+        instructionsOverride: override,
+      });
+      return c.json({ ...v, instructions_source: source });
+    }
     const r = await ctx.enhancer.enhance({
       userId: c.get('user').id,
       prompt: b.prompt,
@@ -268,15 +283,15 @@ export function adminRoutes(ctx: AppContext) {
       model: b.model,
       instructionsOverride: override,
     });
-    return c.json({ ...r, instructions_source: override === undefined ? ctx.enhancerInstructions.status(b.kind).source : 'draft' });
+    return c.json({ ...r, instructions_source: source });
   });
 
   return app;
 }
 
-function kindParam(v: string): 'image' | 'video' {
-  if (v !== 'image' && v !== 'video') throw badRequest('kind must be "image" or "video"', 'validation_error');
-  return v;
+function kindParam(v: string): InstructionKind {
+  if (!(INSTRUCTION_KINDS as string[]).includes(v)) throw badRequest('kind must be "image", "video" or "variation"', 'validation_error');
+  return v as InstructionKind;
 }
 
 function instructionsView(s: EnhancerInstructionsStatus) {

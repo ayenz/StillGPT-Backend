@@ -13,6 +13,7 @@ import { ATTACHMENT_DIR } from './attachments.js';
 import type { EventBus } from './bus.js';
 import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
+import { type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
 import type { Artifact, Credits, TurnEvent } from './events.js';
 import type { MediaStore, StoredFile, UrlScope } from './storage.js';
 import type { TurnResult, TurnRunner } from './turns.js';
@@ -40,6 +41,11 @@ export interface ImageRequest {
   inputFileIds?: string[];
   /** Image generator; default from config IMAGE_PROVIDER_DEFAULT. */
   provider?: ImageProvider;
+  /**
+   * Give each image its own variation of the (enhanced) prompt: outfit, colours, background… change while the
+   * subject stays. `true` uses the default axes. Input images count as references to move away from.
+   */
+  variations?: boolean | { vary?: VariationAxis[]; keep?: VariationAxis[] };
   callbackUrl?: string;
 }
 
@@ -155,6 +161,8 @@ export interface MediaServiceDeps {
   bus: EventBus;
   log: Logger;
   enhancer: PromptEnhancer;
+  /** Needed for `variations` on image requests. */
+  variator?: PromptVariator;
   /** null when Folax is not configured. */
   folax: FolaxClient | null;
   defaultImageProvider: ImageProvider;
@@ -188,6 +196,9 @@ const imageSchema = z.object({
   enhance: z.boolean().default(false),
   inputFileIds: fileIds(3, 'input images').default([]),
   provider: z.enum(['auto', 'qoder', 'folax']).optional(),
+  variations: z
+    .union([z.boolean(), z.object({ vary: z.array(z.enum(VARIATION_AXES)).min(1).optional(), keep: z.array(z.enum(VARIATION_AXES)).optional() }).strict()])
+    .optional(),
   callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
 });
 
@@ -278,10 +289,20 @@ export class MediaService {
     if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGE_BATCH) throw badRequest(`n must be an integer between 1 and ${MAX_IMAGE_BATCH}`, 'validation_error', { param: 'n' });
     if (n > 1 && req.provider === 'folax') throw badRequest('n > 1 is only supported by the qoder provider', 'validation_error', { param: 'provider' });
     const { v, request } = await this.prepareImage(n > 1 ? { ...req, provider: 'qoder' } : req);
+    const variants = await this.variantsFor(v, request, n);
     const batchId = newId('batch');
     const rows = await this.d.db
       .insert(mediaJobs)
-      .values(Array.from({ length: n }, (_, i) => ({ id: newId('img'), userId: v.userId, kind: 'image' as const, request: { ...request, n, batch_index: i }, callbackUrl: v.callbackUrl ?? null, batchId })))
+      .values(
+        Array.from({ length: n }, (_, i) => ({
+          id: newId('img'),
+          userId: v.userId,
+          kind: 'image' as const,
+          request: { ...request, ...variants[i], n, batch_index: i },
+          callbackUrl: v.callbackUrl ?? null,
+          batchId,
+        })),
+      )
       .returning();
     const runs = rows.map((job) => this.run(job));
     if (opts.wait) await Promise.all(runs);
@@ -366,7 +387,32 @@ export class MediaService {
 
   private async createImage(req: ImageRequest): Promise<MediaJob> {
     const { v, request } = await this.prepareImage(req);
-    return this.insertJob(v.userId, 'image', request, v.callbackUrl);
+    const [variant] = await this.variantsFor(v, request, 1);
+    return this.insertJob(v.userId, 'image', { ...request, ...variant }, v.callbackUrl);
+  }
+
+  /**
+   * Per-image request overrides for `variations`: a varied `prompt` plus `base_prompt` and `variation` (what changed).
+   * Variations are a nice-to-have, so a failure falls back to the same prompt for every image instead of failing the request.
+   */
+  private async variantsFor(v: ValidImage, request: Record<string, unknown>, n: number): Promise<Record<string, unknown>[]> {
+    const none = Array.from({ length: n }, () => ({}));
+    if (!v.variations) return none;
+    if (!this.d.variator) throw badRequest('Prompt variations are not available', 'validation_error', { param: 'variations' });
+    const axes = typeof v.variations === 'object' ? v.variations : {};
+    const base = String(request.prompt);
+    try {
+      const r = await this.d.variator.vary({ userId: v.userId, prompt: base, referenceFileIds: v.inputFileIds, vary: axes.vary, keep: axes.keep, n });
+      // fewer usable variations than images: the remaining images reuse them round-robin
+      return none.map((_, i) => {
+        const x = r.variations[i % r.variations.length]!;
+        return { prompt: x.prompt, base_prompt: base, variation: { changed: x.changed, vary: r.vary, keep: r.keep } };
+      });
+    } catch (err) {
+      if (err instanceof AppError && err.status < 500) throw err;
+      this.d.log.warn('media.variations_failed', { err });
+      return none;
+    }
   }
 
   /** Validate, check limits and inputs, pick the provider and run the enhancer: the stored `request` of an image job. */

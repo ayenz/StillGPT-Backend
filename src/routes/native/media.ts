@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppContext } from '../../context.js';
 import { batchViewOf, IMAGE_SIZES, type ImageBatchView, type ImageRequest, imageBatchJson, isTerminal, jobTopic, MAX_IMAGE_BATCH, type MediaJobEvent, type MediaJobView, mediaJobJson, type VideoRequest } from '../../core/media.js';
+import { MAX_VARIATIONS, VARIATION_AXES } from '../../core/variations.js';
 import { WEBHOOK_EVENTS } from '../../core/webhooks.js';
 import { badRequest } from '../../errors.js';
 import type { Env } from '../../http.js';
@@ -17,6 +18,8 @@ const imageBody = z.object({
   provider: z.unknown().optional(),
   /** 1–6 images in parallel; when present the response is a batch instead of a single job. */
   n: z.unknown().optional(),
+  /** true or {vary, keep}: every image gets its own variation of the prompt. */
+  variations: z.unknown().optional(),
   async: z.boolean().optional(),
   callback_url: z.unknown().optional(),
 });
@@ -39,6 +42,18 @@ const enhanceBody = z.object({
   kind: z.enum(['image', 'video']).optional(),
   purpose: z.string().max(200).optional(),
   style: z.string().max(200).optional(),
+  model: z.string().min(1).optional(),
+});
+
+const axes = z.array(z.enum(VARIATION_AXES));
+const variationsBody = z.object({
+  prompt: z.string(),
+  kind: z.enum(['image', 'video']).optional(),
+  reference_file_ids: z.array(z.string()).optional(),
+  vary: axes.optional(),
+  keep: axes.optional(),
+  avoid: z.array(z.string()).optional(),
+  n: z.number().int().min(1).max(MAX_VARIATIONS).optional(),
   model: z.string().min(1).optional(),
 });
 
@@ -75,6 +90,7 @@ export function mediaJobRoutes(ctx: AppContext) {
       enhance: b.enhance,
       inputFileIds: b.input_file_ids,
       provider: b.provider,
+      variations: b.variations,
       callbackUrl: b.callback_url,
     } as ImageRequest;
     if (b.n !== undefined) {
@@ -220,7 +236,7 @@ export function imageProviders(ctx: AppContext) {
   };
 }
 
-/** POST /prompts/enhance — the PWA's "✨ Enhance" button. */
+/** POST /prompts/enhance and /prompts/variations. */
 export function promptRoutes(ctx: AppContext) {
   const app = new Hono<Env>();
 
@@ -229,6 +245,26 @@ export function promptRoutes(ctx: AppContext) {
     const userId = c.get('user').id;
     await ctx.usage.assertWithinLimit(userId);
     return c.json(await ctx.enhancer.enhance({ userId, ...b }));
+  });
+
+  /** POST /prompts/variations — the "Other variation" button: rewrites a prompt so outfit, colours, background… change. */
+  app.post('/prompts/variations', async (c) => {
+    const b = await body(c, variationsBody);
+    const userId = c.get('user').id;
+    await ctx.usage.assertWithinLimit(userId);
+    return c.json(
+      await ctx.variator.vary({
+        userId,
+        prompt: b.prompt,
+        kind: b.kind,
+        referenceFileIds: b.reference_file_ids,
+        vary: b.vary,
+        keep: b.keep,
+        avoid: b.avoid,
+        n: b.n,
+        model: b.model,
+      }),
+    );
   });
 
   return app;

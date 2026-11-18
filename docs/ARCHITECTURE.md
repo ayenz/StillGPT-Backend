@@ -88,6 +88,7 @@ src/
     media.ts               image + video jobs (background worker, resumable; Qoder or Folax for images)
     enhancer.ts            prompt enhancer (idea → detailed prompt + aspect ratio)
     enhancerInstructions.ts admin-editable enhancer instructions (kv), cached in memory
+    variations.ts          "other variation": prompt → n variants that change outfit/colours/background, away from references
     webhooks.ts            outgoing webhooks (HMAC-signed), per-request callback_url
     usage.ts               credit accounting + per-user limits
     bus.ts                 in-memory pub/sub for live turn/job events
@@ -180,6 +181,11 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   `request.original_prompt` keeps the input. The LLM text is `instructions + hints + contract + <idea>`: `instructions` (persona,
   style, length, how to pick a ratio) are admin-editable per kind in `kv.enhancer.instructions.{image,video}` (cached by
   `EnhancerInstructions`, `/admin/enhancer/*`); the contract (allowed ratios, JSON shape, safety rules) stays in code.
+- Prompt variations (`core/variations.ts`, `POST /api/v1/prompts/variations`, `variations` on `POST /images`): each reference image
+  is first described once by the `vision` alias (a hidden one-shot turn with the image attached) into traits (outfit, palette,
+  background…), cached in `files.traits`. Then one `enhancer` turn writes `n` variants that change the `vary` axes away from those
+  traits and from `avoid` (earlier variants), and keep the `keep` axes. Instructions are editable as kind `variation`
+  (`kv.enhancer.instructions.variation`). On image jobs a variation failure falls back to the unvaried prompt.
 - Videos are **jobs**: table `media_jobs` (status `queued|in_progress|completed|failed`, qoder session id, last event id, progress, result artifact, error, `callback_url`).
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).

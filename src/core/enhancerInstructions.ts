@@ -4,9 +4,15 @@ import { kv } from '../db/schema.js';
 import { badRequest } from '../errors.js';
 import type { Logger } from '../log.js';
 import { DEFAULT_INSTRUCTIONS, type EnhanceKind, INSTRUCTIONS_MAX, outputContract } from './enhancer.js';
+import { DEFAULT_VARIATION_INSTRUCTIONS, variationContract } from './variations.js';
 
-const KINDS: EnhanceKind[] = ['image', 'video'];
-const keyOf = (kind: EnhanceKind) => `enhancer.instructions.${kind}`;
+/** `image`/`video`: the ✨ Enhance rewrite; `variation`: the "other variation" rewrite. */
+export type InstructionKind = EnhanceKind | 'variation';
+export const INSTRUCTION_KINDS: InstructionKind[] = ['image', 'video', 'variation'];
+const keyOf = (kind: InstructionKind) => `enhancer.instructions.${kind}`;
+
+const defaultOf = (kind: InstructionKind) => (kind === 'variation' ? DEFAULT_VARIATION_INSTRUCTIONS : DEFAULT_INSTRUCTIONS[kind]);
+const contractOf = (kind: InstructionKind) => (kind === 'variation' ? variationContract() : outputContract(kind));
 
 interface Stored {
   text: string;
@@ -14,7 +20,7 @@ interface Stored {
 }
 
 export interface EnhancerInstructionsStatus {
-  kind: EnhanceKind;
+  kind: InstructionKind;
   /** What the enhancer uses now. */
   instructions: string;
   /** `admin` = saved via the admin API, `default` = built in. */
@@ -31,37 +37,37 @@ export interface EnhancerInstructionsStatus {
  * contract (allowed ratios, JSON shape, safety rules) stays in code.
  */
 export class EnhancerInstructions {
-  private stored: Partial<Record<EnhanceKind, Stored>> = {};
+  private stored: Partial<Record<InstructionKind, Stored>> = {};
 
   constructor(private readonly d: { db: DB; log: Logger }) {}
 
   async load(): Promise<void> {
-    const rows = await this.d.db.select().from(kv).where(inArray(kv.key, KINDS.map(keyOf)));
-    for (const kind of KINDS) {
+    const rows = await this.d.db.select().from(kv).where(inArray(kv.key, INSTRUCTION_KINDS.map(keyOf)));
+    for (const kind of INSTRUCTION_KINDS) {
       const row = rows.find((r) => r.key === keyOf(kind));
       const v = row?.value as Stored | undefined;
       if (v?.text) this.stored[kind] = v;
     }
   }
 
-  get(kind: EnhanceKind): string {
-    return this.stored[kind]?.text ?? DEFAULT_INSTRUCTIONS[kind];
+  get(kind: InstructionKind): string {
+    return this.stored[kind]?.text ?? defaultOf(kind);
   }
 
-  status(kind: EnhanceKind): EnhancerInstructionsStatus {
+  status(kind: InstructionKind): EnhancerInstructionsStatus {
     const s = this.stored[kind];
     return {
       kind,
       instructions: this.get(kind),
       source: s ? 'admin' : 'default',
       updatedAt: s?.updatedAt ?? null,
-      default: DEFAULT_INSTRUCTIONS[kind],
-      contract: outputContract(kind),
+      default: defaultOf(kind),
+      contract: contractOf(kind),
     };
   }
 
   /** Save new instructions for `kind`; `null` resets to the built-in default. */
-  async set(kind: EnhanceKind, text: string | null): Promise<EnhancerInstructionsStatus> {
+  async set(kind: InstructionKind, text: string | null): Promise<EnhancerInstructionsStatus> {
     if (text === null) {
       await this.d.db.delete(kv).where(eq(kv.key, keyOf(kind)));
       delete this.stored[kind];

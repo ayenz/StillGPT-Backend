@@ -5,6 +5,7 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { EnhancerInstructions } from './core/enhancerInstructions.js';
+import { PromptVariator } from './core/variations.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
 import { MediaHousekeeper } from './core/mediaHousekeeping.js';
 import { QoderCredentialService } from './core/qoderCredential.js';
@@ -41,6 +42,7 @@ export interface AppContext {
   media: MediaService;
   enhancer: PromptEnhancer;
   enhancerInstructions: EnhancerInstructions;
+  variator: PromptVariator;
   /** null when AUTO_TITLE=false. */
   titler: ConversationTitler | null;
   /** null when FOLAX_URL/FOLAX_API_KEY are unset. */
@@ -125,6 +127,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const enhancerInstructions = new EnhancerInstructions({ db, log: log.child({ mod: 'enhancer' }) });
   await enhancerInstructions.load();
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions });
+  const variator = new PromptVariator({ conversations, turns, store, log: log.child({ mod: 'variations' }), instructions: enhancerInstructions });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY
@@ -141,6 +144,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     bus,
     log: log.child({ mod: 'media' }),
     enhancer,
+    variator,
     folax,
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
@@ -171,6 +175,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     media,
     enhancer,
     enhancerInstructions,
+    variator,
     titler,
     folax,
     webhooks,
