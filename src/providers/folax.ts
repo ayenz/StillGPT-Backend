@@ -20,25 +20,37 @@ export interface FolaxOptions {
   fetchImpl?: typeof fetch;
   /** Adapter waits up to 120 s upstream + grace; keep a little above that. */
   timeoutMs?: number;
+  /** Calls in flight at once; later calls wait in FIFO order. Keep ≤ the adapter's `max_concurrency`. Default 8. */
+  concurrency?: number;
 }
 
 /**
  * Client for the Folax image adapter (Python sidecar wrapping the Folax ImageGenerationAgent).
- * Fast (~10 s) and returns several images per prompt, but only 5 ratios and one job at a time upstream,
- * so `generate` calls are serialised in-process (later calls wait in FIFO order).
+ * Fast (~10 s per call) and returns 2 images per prompt, but only 5 ratios. Upstream takes parallel calls
+ * (benchmarked: 16 at once still ~11 s each), so up to `concurrency` calls run together; the rest wait in FIFO order.
  */
 export class FolaxClient {
   private readonly fetch: typeof fetch;
-  private tail: Promise<unknown> = Promise.resolve();
+  private readonly limit: number;
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
 
   constructor(private readonly o: FolaxOptions) {
     this.fetch = o.fetchImpl ?? fetch;
+    this.limit = Math.max(1, o.concurrency ?? 8);
   }
 
-  generate(prompt: string, ratio: FolaxRatio): Promise<FolaxImage[]> {
-    const run = this.tail.then(() => this.request(prompt, ratio));
-    this.tail = run.catch(() => {});
-    return run;
+  async generate(prompt: string, ratio: FolaxRatio): Promise<FolaxImage[]> {
+    if (this.active >= this.limit) await new Promise<void>((r) => this.waiting.push(r));
+    else this.active++;
+    try {
+      return await this.request(prompt, ratio);
+    } finally {
+      // hand the slot straight to the next waiter (active stays the same), or free it
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active--;
+    }
   }
 
   private async request(prompt: string, ratio: FolaxRatio): Promise<FolaxImage[]> {

@@ -304,14 +304,14 @@ export class MediaService {
   }
 
   /**
-   * `n` images of one prompt as `n` parallel jobs sharing a batch id. The prompt is enhanced once for all of them.
-   * n > 1 always runs on Qoder (one image per job); n = 1 follows the normal provider routing.
+   * `n` parallel jobs of one prompt sharing a batch id. The prompt is enhanced once for all of them.
+   * Every job follows the normal provider routing: a Qoder job makes 1 image, a Folax job 2 (so a Folax batch of n
+   * gives 2n images; Folax calls run in parallel up to FOLAX_CONCURRENCY).
    * `wait` resolves once every job finished (synchronous APIs); otherwise right after the jobs started.
    */
   async createImageBatch(req: ImageRequest, n: number, opts: { wait?: boolean } = {}): Promise<ImageBatchView> {
     if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGE_BATCH) throw badRequest(`n must be an integer between 1 and ${MAX_IMAGE_BATCH}`, 'validation_error', { param: 'n' });
-    if (n > 1 && req.provider === 'folax') throw badRequest('n > 1 is only supported by the qoder provider', 'validation_error', { param: 'provider' });
-    const { v, request } = await this.prepareImage(n > 1 ? { ...req, provider: 'qoder' } : req);
+    const { v, request } = await this.prepareImage(req);
     const variants = await this.variantsFor(v, request, n);
     const batchId = newId('batch');
     const rows = await this.d.db

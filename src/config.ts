@@ -81,6 +81,8 @@ const schema = z
     /** folax-adapter sidecar (fast external image generator); the provider is disabled when unset. */
     FOLAX_URL: optionalString(z.string().url()),
     FOLAX_API_KEY: optionalString(z.string().min(1)),
+    /** Folax calls in flight at once (a batch of n runs n calls). Keep ≤ the adapter's `max_concurrency`. */
+    FOLAX_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
     IMAGE_PROVIDER_DEFAULT: z.enum(IMAGE_PROVIDERS).default('auto'),
     /** Auto-name native conversations from their first message (ChatGPT style). */
     AUTO_TITLE: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),

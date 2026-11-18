@@ -172,7 +172,8 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 - Images are synchronous for callers (~30 s): one-shot session on `image` profile with an instruction that pins `size` and the prompt verbatim; edits mount inputs under `/data/attachments/`.
 - Image providers (`provider: auto|qoder|folax`, default `IMAGE_PROVIDER_DEFAULT`): **Folax** (`providers/folax.ts`, a Python sidecar
   `folax-adapter`) is a fast (~10 s), free generator that returns 2 images per prompt but only knows 5 ratios, ≤1500-char prompts, no edits
-  and one request at a time (calls are serialised in-process by `FolaxClient`). A Folax job runs no Qoder turn: the images are saved as
+  and accepts parallel requests (`FolaxClient` caps calls in flight at `FOLAX_CONCURRENCY`, default 8, matching the adapter's
+  `max_concurrency`; a batch of n Folax jobs makes n parallel calls). A Folax job runs no Qoder turn: the images are saved as
   artifacts of the job and usage is recorded with 0 credits (model `folax`). `auto` = Folax for text-to-image when configured, Qoder
   otherwise, and Qoder as transparent fallback when Folax fails; edits always use Qoder. `request.provider`, `provider_used` and
   `fallback_reason` record the decision. Folax `AUTH_INVALID` emits the admin webhook `provider.degraded` (throttled to 1/h).

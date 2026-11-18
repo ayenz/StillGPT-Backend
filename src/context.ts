@@ -136,7 +136,13 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY
-      ? new FolaxClient({ baseUrl: config.FOLAX_URL, apiKey: config.FOLAX_API_KEY, log: log.child({ mod: 'folax' }), fetchImpl: o.fetchImpl })
+      ? new FolaxClient({
+          baseUrl: config.FOLAX_URL,
+          apiKey: config.FOLAX_API_KEY,
+          concurrency: config.FOLAX_CONCURRENCY,
+          log: log.child({ mod: 'folax' }),
+          fetchImpl: o.fetchImpl,
+        })
       : null;
   const media = new MediaService({
     db,

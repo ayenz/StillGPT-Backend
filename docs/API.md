@@ -194,7 +194,7 @@ Returns the same usage object as `/me` (this calendar month, UTC).
   "default_model": "default",
   "image_providers": [
     { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "max_n": 10, "sizes": ["1024x1024", "…"] },
-    { "id": "folax", "available": true, "edits": false, "images_per_call": 2, "max_n": 1,
+    { "id": "folax", "available": true, "edits": false, "images_per_call": 2, "max_n": 10,
       "ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"], "prompt_max": 1500 }
   ],
   "default_image_provider": "auto"
@@ -599,10 +599,11 @@ For several different images at once, send `variations` on `POST /images` instea
   The enhancer runs before the response, so even `async` requests take a few seconds longer.
 
 #### Several images at once (`n`)
-`n` creates `n` jobs that run **in parallel** and share a `batch_id`. A batch of 4 takes about as long as one image
-(~30–40 s). Rules:
-- `n` > 1 always runs on **Qoder** (one image per job), whatever `provider` says. `provider: "folax"` with `n` > 1 is
-  `400 validation_error`. `n: 1` follows the normal provider routing.
+`n` creates `n` jobs that run **in parallel** and share a `batch_id`. A batch takes about as long as one job
+(Qoder ~30–40 s, Folax ~10–15 s). Rules:
+- Every job follows the normal provider routing (`provider`, input images, prompt length), so under `auto` a text-to-image
+  batch runs on **Folax**. A Qoder job makes **1** image, a Folax job **2**: a Folax batch of `n` gives **2n images**
+  (`n: 4` → 8 images). Count images from `jobs[].outputs`, not from `n`.
 - The prompt enhancer (`enhance: true`) runs **once**; every job gets the same enhanced prompt, unless `variations` is set.
 - **`variations`** (`true` or `{vary?, keep?}`): one LLM call writes `n - 1` variations (at most 9).
   - **Job 0** (`batch_index: 0`) always uses the prompt as written (enhanced if `enhance: true`), so at least one image matches
@@ -649,7 +650,7 @@ Response (`200` when synchronous, `202` with `async: true`):
   `400 validation_error`; `provider: "folax"` on a server without Folax is `400 provider_unavailable`.
 - An explicit `provider: "folax"` never falls back: a Folax failure fails the job (`folax_failed`, `folax_timeout`,
   `folax_auth_invalid`, `folax_unavailable`).
-- Folax handles one image request at a time; further requests wait in line.
+- Folax runs up to 8 requests at once (server setting `FOLAX_CONCURRENCY`); further requests wait in line.
 - The job's `request` records the choice: `provider` (what was asked or defaulted), `provider_used` (what generated
   the outputs) and, after a fallback, `fallback_reason` (e.g. `folax_auth_invalid`).
 
@@ -988,7 +989,7 @@ Treat any `429` or `5xx` as retryable.
 | Document attachment (sandbox) | 5 MB (Qoder limit) |
 | Content blocks per message | 50 |
 | Image prompt | 4000 characters (Folax: 1500; under `auto` a longer prompt goes to Qoder with `fallback_reason: "prompt_too_long_for_folax"`). 1 image per job on Qoder, 2 on Folax |
-| Images per request (`n`) | 1–6 (Qoder, in parallel) |
+| Jobs per request (`n`) | 1–10, in parallel (Qoder: 1 image per job, Folax: 2) |
 | Image inputs (edit) | 3 |
 | Video `seconds` | 2–30 or -1. Resolution `480P`, `720P` or `1080P`. 7 ratios (§8) |
 | Video references | 1–10, or first frame (+ last frame) |
@@ -1004,7 +1005,7 @@ Latencies observed (model `efficient`):
 | reply about attached documents | 8–20 s |
 | image (Qoder) | about 30 s |
 | image batch, `n` up to 6 (Qoder) | about 30–40 s (parallel) |
-| image (Folax) | about 10 s, plus waiting time when several requests queue |
+| image (Folax) | about 10–15 s per job, also for a batch (jobs run in parallel, up to 8 at once) |
 | prompt enhancer | 2–10 s |
 | video | 3–4 min (up to 30) |
 
@@ -1022,7 +1023,7 @@ conversation. Errors use each provider's own envelope.
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
-| `POST /v1/images/generations` | `{prompt, model?, n? (1–6), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images; StillGPT calls again when `n` needs more. If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |
+| `POST /v1/images/generations` | `{prompt, model?, n? (1–10), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images, so StillGPT makes ceil(n/2) Folax calls in parallel (~10–15 s for all). If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |
 | `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Always Qoder (`folax-image` → `400`) |
 | `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url` |
 | `GET /v1/videos`, `GET /v1/videos/:id` | video object `{id, object: "video", model, status, progress, created_at, completed_at, seconds, size, error}` (unix seconds) |

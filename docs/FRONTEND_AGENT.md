@@ -41,8 +41,9 @@ The app should feel like a mainstream AI chat app. UI language: **Bahasa Indones
      Optional "Tujuan" field sent as `purpose` (e.g. poster, katalog fashion, Instagram post).
    - Size/ratio picker (sizes from API.md §8), provider selector (`auto` default; hide `folax` when unavailable per `image_providers`).
    - Optional input images (max 3) for edits → forces provider `qoder`.
-   - Image count selector 1–`max_n` (from `GET /models` → `image_providers`, qoder; default 1). With `n` the response is
-     a **batch**: render `n` placeholder tiles at once and fill each as its job finishes (`GET /images/batches/:id/events`:
+   - Image count selector 1–`max_n` (from `GET /models` → `image_providers`; default 1). `n` is the number of **jobs**; each
+     job makes `images_per_call` images (Qoder 1, Folax 2), so a Folax batch of `n` gives 2n images. With `n` the response is
+     a **batch**: render `n` placeholder job tiles at once (Folax tiles hold 2 images) and fill each as its job finishes (`GET /images/batches/:id/events`:
      `job.completed` / `job.failed` per tile, `batch.done` at the end). A failed tile shows its error and a retry
      (= `POST /images` with the same request and `n: 1`); the batch status `partial` means some tiles failed.
    - Result grid (Folax returns 2 images), download buttons, "use as video first frame" action.

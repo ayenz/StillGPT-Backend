@@ -82,7 +82,7 @@ let client: OpenAI;
 beforeAll(async () => {
   folax = await startFakeFolax();
   rx = await startReceiver();
-  h = await startHarness({ env: { FOLAX_URL: folax.url, FOLAX_API_KEY: FOLAX_KEY, MEDIA_POLL_INTERVAL_MS: '50', WEBHOOK_POLL_INTERVAL_MS: '50' } });
+  h = await startHarness({ env: { FOLAX_URL: folax.url, FOLAX_API_KEY: FOLAX_KEY, FOLAX_CONCURRENCY: '3', MEDIA_POLL_INTERVAL_MS: '50', WEBHOOK_POLL_INTERVAL_MS: '50' } });
   client = new OpenAI({ apiKey: h.apiKey, baseURL: `${h.url}/v1`, maxRetries: 0 });
 });
 afterEach(() => folax.reset());
@@ -156,11 +156,56 @@ describe('folax provider (native)', () => {
     expect(folax.calls[0]!.body.ratio).toBe('3:4');
   });
 
-  it('serialises folax calls (upstream concurrency 1)', async () => {
-    const jobs = await Promise.all([1, 2, 3].map((i) => createImage({ prompt: `antre ${i}`, async: true })));
+  it('runs folax calls in parallel up to FOLAX_CONCURRENCY (3 here)', async () => {
+    const jobs = await Promise.all([1, 2, 3, 4, 5].map((i) => createImage({ prompt: `antre ${i}`, async: true })));
     for (const j of jobs) await waitFor(async () => (await json(await h.api(`/api/v1/jobs/${j.body.id}`))).body.status, (s) => s === 'completed');
+    expect(folax.calls).toHaveLength(5);
+    expect(folax.maxActive()).toBe(3);
+  });
+
+  it('a batch of n runs n folax jobs in parallel, 2 images each', async () => {
+    const before = sessionCount();
+    const r = await createImage({ prompt: 'kucing di taman', n: 3, size: '1024x1792' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: 'completed', n: 3, completed: 3, credits: 0 });
+    expect(r.body.jobs).toHaveLength(3);
+    for (const j of r.body.jobs) {
+      expect(j.request).toMatchObject({ provider: 'auto', provider_used: 'folax', n: 3 });
+      expect(j.outputs).toHaveLength(2);
+    }
     expect(folax.calls).toHaveLength(3);
-    expect(folax.maxActive()).toBe(1);
+    expect(folax.calls.every((c) => c.body.ratio === '9:16')).toBe(true);
+    expect(folax.maxActive()).toBe(3);
+    expect(sessionCount()).toBe(before);
+
+    const explicit = await createImage({ prompt: 'anjing', n: 2, provider: 'folax' });
+    expect(explicit.status).toBe(200);
+    expect(explicit.body.jobs.flatMap((j: any) => j.outputs)).toHaveLength(4);
+  });
+
+  it('variations + folax: one prompt per job, each sent to folax and making 2 images', async () => {
+    h.qoder.setReply((text) =>
+      text.includes('<prompt>')
+        ? JSON.stringify({ variations: ['Var A', 'Var B', 'Var C'].map((p) => ({ prompt: p, changed: { outfit: p } })) })
+        : undefined,
+    );
+    try {
+      const r = await createImage({ prompt: 'base prompt', n: 4, variations: true });
+      expect(r.body).toMatchObject({ status: 'completed', n: 4, credits: 0 });
+      expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual(['base prompt', 'Var A', 'Var B', 'Var C']);
+      expect(r.body.jobs.map((j: any) => j.request.provider_used)).toEqual(['folax', 'folax', 'folax', 'folax']);
+      expect(r.body.jobs.map((j: any) => j.outputs.length)).toEqual([2, 2, 2, 2]);
+      expect(folax.calls.map((c) => c.body.prompt).sort()).toEqual(['Var A', 'Var B', 'Var C', 'base prompt']);
+    } finally {
+      h.qoder.setReply(undefined);
+    }
+  });
+
+  it('a folax batch with input images still goes to Qoder', async () => {
+    const png = await upload(makePng());
+    const r = await createImage({ prompt: 'tambah topi', n: 2, input_file_ids: [png.id] });
+    expect(r.body.jobs.map((j: any) => j.request.provider_used)).toEqual(['qoder', 'qoder']);
+    expect(folax.calls).toHaveLength(0);
   });
 
   it('auto falls back to Qoder when folax fails and tells admins once per hour', async () => {
@@ -222,10 +267,11 @@ describe('folax provider (native)', () => {
 });
 
 describe('folax provider (OpenAI images API)', () => {
-  it('folax-image returns up to n images, calling folax again when n > 2', async () => {
+  it('folax-image returns n images from ceil(n/2) parallel calls', async () => {
     const three = await client.images.generate({ model: 'folax-image', prompt: 'pemandangan', n: 3, size: '1536x1024' });
     expect(three.data).toHaveLength(3);
     expect(folax.calls).toHaveLength(2);
+    expect(folax.maxActive()).toBe(2);
     expect(folax.calls.every((c) => c.body.ratio === '4:3')).toBe(true);
 
     folax.reset();

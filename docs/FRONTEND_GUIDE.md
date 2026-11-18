@@ -214,8 +214,10 @@ POST /images {prompt, n: 1..10, size?, enhance?, input_file_ids?, async: true}
 → 202 batch {id: "batch_…", status, progress, n, completed, failed, credits, jobs: [job, …]}
 ```
 - Kalau `n` dikirim, respons berupa **batch** (bukan job). Tanpa `n`, respons tetap satu job seperti 5.2.
-- Semua gambar jalan **paralel** di Qoder: 4–6 gambar selesai sekitar 30–40 detik, sama seperti satu gambar.
-- `n` > 1 selalu memakai Qoder (berbayar credit per gambar). `provider: "folax"` + `n` > 1 → `400`.
+- Semua job jalan **paralel**: batch selesai kira-kira secepat satu job (Qoder ~30–40 detik, Folax ~10–15 detik).
+- Tiap job ikut routing provider biasa. Di `auto`, text-to-image (tanpa `input_file_ids`) jalan di **Folax** (gratis).
+- **Satu job Qoder = 1 gambar, satu job Folax = 2 gambar.** Batch Folax `n: 4` = 8 gambar. Hitung gambar dari
+  `jobs[].outputs`, jangan dari `n`.
 - Enhance hanya sekali untuk seluruh batch; semua gambar memakai prompt yang sama.
 - Tiap gambar adalah job biasa (`jobs[i]`), urut sesuai `request.batch_index`. Satu gambar gagal tidak menggagalkan yang lain.
 - `status` batch: `queued` → `in_progress` → `completed` (semua sukses) / `partial` (sebagian gagal) / `failed` (semua gagal).
@@ -225,7 +227,7 @@ Mengikuti batch:
   `job.completed` / `job.failed` per gambar → `batch.done` (batch final), lalu stream ditutup.
 - Atau polling `GET /images/batches/:id` tiap 5 detik. Daftar job satu batch: `GET /jobs?batch_id=…`.
 - Jika SSE putus: `GET /images/batches/:id`, lalu sambung ulang bila masih `queued`/`in_progress`.
-- Jumlah maksimum dibaca dari `GET /models` → `image_providers[id=qoder].max_n` (jangan hardcode 10).
+- Jumlah maksimum `n` dibaca dari `GET /models` → `image_providers[].max_n` provider yang dipakai (jangan hardcode 10); gambar per job = `images_per_call`.
 
 ### 5.6 Hapus dari galeri + Urungkan
 ```

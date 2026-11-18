@@ -12,7 +12,7 @@ const MAX_EDIT_IMAGES = 3;
 
 /**
  * OpenAI-style media endpoints, mounted at /v1 by the OpenAI router:
- *   POST /images/generations, POST /images/edits      (synchronous; Qoder runs the n images in parallel, ~30 s total; Folax ~10 s per call)
+ *   POST /images/generations, POST /images/edits      (synchronous; the n images run in parallel: Qoder ~30 s, Folax ~10 s)
  *   POST /videos, GET /videos, GET /videos/:id, GET /videos/:id/content, DELETE /videos/:id
  */
 export function openaiMediaRoutes(ctx: AppContext) {
@@ -105,7 +105,7 @@ function imageProviderOf(model: unknown): ImageProvider | undefined {
   throw badRequest(`Unknown image model '${String(model)}'; use '${IMAGE_MODEL}' or '${FOLAX_IMAGE_MODEL}'`, 'model_not_found', { param: 'model' });
 }
 
-/** Qoder: n parallel jobs (one image each). Folax: sequential calls until n images are collected (2 per call). */
+/** Qoder: n parallel jobs (one image each). Folax: ceil(n/2) parallel jobs (2 images each). */
 async function generateImages(ctx: AppContext, c: Context<Env>, call: ImageCall) {
   const provider = imageProviderOf(call.model);
   const n = call.n === undefined || call.n === null ? 1 : Number(call.n);
@@ -119,16 +119,12 @@ async function generateImages(ctx: AppContext, c: Context<Env>, call: ImageCall)
   let jobs: MediaJobView[];
   // edits always run on Qoder; otherwise Qoder when asked for or when the default provider cannot be Folax
   const onQoder = provider === 'qoder' || call.inputFileIds.length > 0 || (provider === undefined && (ctx.config.IMAGE_PROVIDER_DEFAULT === 'qoder' || !ctx.folax));
-  if (n > 1 && onQoder) {
-    jobs = (await ctx.media.createImageBatch({ ...req, provider: 'qoder' }, n, { wait: true })).jobs;
+  // Qoder: one image per job; Folax: two per job, so ceil(n/2) jobs (all in parallel) and the extra image is dropped
+  const calls = onQoder ? n : Math.ceil(n / 2);
+  if (calls > 1) {
+    jobs = (await ctx.media.createImageBatch(onQoder ? { ...req, provider: 'qoder' } : req, calls, { wait: true })).jobs;
   } else {
-    jobs = [];
-    for (let got = 0; got < n; ) {
-      const job = await ctx.media.generateImage(req);
-      jobs.push(job);
-      if (job.status !== 'completed' || !job.outputs.length) break;
-      got += job.outputs.length;
-    }
+    jobs = [await ctx.media.generateImage(req)];
   }
 
   const outputs = jobs.flatMap((j) => (j.status === 'completed' ? j.outputs : [])).slice(0, n);

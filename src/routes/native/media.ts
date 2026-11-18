@@ -18,7 +18,7 @@ const imageBody = z.object({
   enhance: z.unknown().optional(),
   input_file_ids: z.unknown().optional(),
   provider: z.unknown().optional(),
-  /** 1–6 images in parallel; when present the response is a batch instead of a single job. */
+  /** 1–10 parallel jobs (Qoder: 1 image each, Folax: 2 each); when present the response is a batch instead of a single job. */
   n: z.unknown().optional(),
   /** true or {vary, keep}: every image gets its own variation of the prompt. */
   variations: z.unknown().optional(),
@@ -254,7 +254,7 @@ export function imageProviders(ctx: AppContext) {
   return {
     image_providers: [
       { id: 'qoder', available: true, edits: true, images_per_call: 1, max_n: MAX_IMAGE_BATCH, sizes: IMAGE_SIZES },
-      { id: 'folax', available: !!ctx.folax, edits: false, images_per_call: 2, max_n: 1, ratios: FOLAX_RATIOS, prompt_max: FOLAX_PROMPT_MAX },
+      { id: 'folax', available: !!ctx.folax, edits: false, images_per_call: 2, max_n: MAX_IMAGE_BATCH, ratios: FOLAX_RATIOS, prompt_max: FOLAX_PROMPT_MAX },
     ],
     default_image_provider: ctx.config.IMAGE_PROVIDER_DEFAULT,
   };

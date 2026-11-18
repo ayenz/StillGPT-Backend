@@ -101,7 +101,7 @@ describe('image batches (native)', () => {
     expect((await bad({ prompt: 'x', n: 11 })).message).toContain('between 1 and 10');
     expect((await bad({ prompt: 'x', n: 2.5 })).code).toBe('validation_error');
     expect((await bad({ prompt: 'x', n: '3' })).code).toBe('validation_error');
-    expect((await bad({ prompt: 'x', n: 2, provider: 'folax' })).message).toContain('qoder');
+    expect((await bad({ prompt: 'x', n: 2, provider: 'folax' })).code).toBe('provider_unavailable');
     expect((await h.api('/api/v1/images/batches/batch_nope')).status).toBe(404);
   });
 
