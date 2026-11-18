@@ -156,6 +156,8 @@ export const files = pgTable(
     conversationId: text('conversation_id'),
     jobId: text('job_id'),
     createdAt: createdAt(),
+    /** Set while the file's job is in the trash: hidden from users (404), still served to admins via trash URLs. */
+    deletedAt: ts('deleted_at'),
   },
   (t) => [index('files_user_idx').on(t.userId, t.createdAt)],
 );
@@ -176,12 +178,16 @@ export const mediaJobs = pgTable(
     callbackUrl: text('callback_url'),
     /** Jobs created together by one `POST /images` with `n` share a batch id (null for single jobs). */
     batchId: text('batch_id'),
+    /** In the trash since (hidden from the gallery); purged for good after the grace period. */
+    deletedAt: ts('deleted_at'),
+    /** Who trashed it: the owner, an admin, or housekeeping (old failed jobs, retention). */
+    deletedBy: text('deleted_by', { enum: ['user', 'admin', 'system'] }),
     credits: doublePrecision('credits'),
     createdAt: createdAt(),
     startedAt: ts('started_at'),
     completedAt: ts('completed_at'),
   },
-  (t) => [index('media_jobs_status_idx').on(t.status, t.createdAt), index('media_jobs_batch_idx').on(t.batchId)],
+  (t) => [index('media_jobs_status_idx').on(t.status, t.createdAt), index('media_jobs_batch_idx').on(t.batchId), index('media_jobs_deleted_idx').on(t.deletedAt)],
 );
 
 // ── webhooks & usage ────────────────────────────────────────────────────────

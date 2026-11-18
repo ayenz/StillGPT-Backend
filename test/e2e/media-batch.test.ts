@@ -1,5 +1,7 @@
+import { inArray } from 'drizzle-orm';
 import OpenAI from 'openai';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mediaJobs } from '../../src/db/schema.js';
 import { type Harness, startHarness } from './harness.js';
 import { readSse } from './native-sse.js';
 
@@ -13,6 +15,15 @@ afterAll(() => h?.close());
 const json = async (res: Response) => ({ status: res.status, body: (await res.json()) as any });
 const post = (payload: unknown) => h.api('/api/v1/images', { method: 'POST', json: payload });
 
+/** The jobs ran at the same time: the last one started before the first one finished (robust under load, unlike wall time). */
+async function expectOverlap(jobIds: string[]) {
+  const rows = await h.ctx.database.db.select().from(mediaJobs).where(inArray(mediaJobs.id, jobIds));
+  expect(rows).toHaveLength(jobIds.length);
+  const lastStart = Math.max(...rows.map((r) => r.startedAt!.getTime()));
+  const firstEnd = Math.min(...rows.map((r) => r.completedAt!.getTime()));
+  expect(lastStart).toBeLessThan(firstEnd);
+}
+
 /** Fail the k-th ImageGen call (1-based) from now on, succeed the others. */
 function failCall(k: number) {
   let calls = 0;
@@ -21,9 +32,7 @@ function failCall(k: number) {
 
 describe('image batches (native)', () => {
   it('runs n images in parallel as one batch (sync)', async () => {
-    const t0 = Date.now();
     const r = await json(await post({ prompt: 'kucing astronot', n: 4, size: '1024x1536' }));
-    const took = Date.now() - t0;
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ status: 'completed', n: 4, completed: 4, failed: 0, progress: 100 });
     expect(r.body.id).toMatch(/^batch_/);
@@ -34,7 +43,7 @@ describe('image batches (native)', () => {
     }
     expect(new Set(r.body.jobs.flatMap((j: any) => j.outputs.map((o: any) => o.id))).size).toBe(4);
     expect(r.body.credits).toBeCloseTo(r.body.jobs.reduce((s: number, j: any) => s + j.credits, 0));
-    expect(took).toBeLessThan(IMAGE_MS * 4); // parallel, not one after another
+    await expectOverlap(r.body.jobs.map((j: any) => j.id)); // parallel, not one after another
   });
 
   it('async: 202 with the batch, observable via GET, SSE and /jobs?batch_id', async () => {
@@ -113,10 +122,11 @@ describe('image batches (native)', () => {
 describe('image batches (OpenAI n)', () => {
   it('runs n Qoder images in parallel and returns them all', async () => {
     const client = new OpenAI({ apiKey: h.apiKey, baseURL: `${h.url}/v1` });
-    const t0 = Date.now();
-    const res = await client.images.generate({ model: 'qoder-image', prompt: 'robot', n: 6 });
+    const res = await client.images.generate({ model: 'qoder-image', prompt: 'robot-paralel', n: 6 });
     expect(res.data).toHaveLength(6);
-    expect(Date.now() - t0).toBeLessThan(IMAGE_MS * 4);
+    const jobs = (await json(await h.api('/api/v1/jobs?kind=image&limit=6'))).body.data;
+    expect(jobs.every((j: any) => j.request.prompt === 'robot-paralel')).toBe(true);
+    await expectOverlap(jobs.map((j: any) => j.id));
   });
 
   it('returns the images that succeeded when some fail', async () => {

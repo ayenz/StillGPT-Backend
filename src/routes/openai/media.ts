@@ -73,9 +73,11 @@ export function openaiMediaRoutes(ctx: AppContext) {
     return serveFile(c, await ctx.store.original(file), { cacheControl: 'private, no-cache' });
   });
 
+  /** Moves the video to the gallery trash (deleted for good after the grace period). */
   app.delete('/videos/:id', async (c) => {
-    await videoJob(ctx, c);
-    throw new AppError(501, 'not_supported', 'Deleting videos is not supported');
+    const job = await videoJob(ctx, c);
+    await ctx.trash.trashOne(job.id, 'user', c.get('user').id);
+    return c.json({ id: job.id, object: 'video.deleted', deleted: true });
   });
 
   return app;

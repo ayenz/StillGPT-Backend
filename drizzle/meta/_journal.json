@@ -15,6 +15,13 @@
       "when": 1794902229792,
       "tag": "0001_image_batches",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794972264320,
+      "tag": "0002_gallery_trash",
+      "breakpoints": true
     }
   ]
 }

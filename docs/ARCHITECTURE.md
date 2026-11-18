@@ -206,6 +206,22 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   (status `terminated`) the same delete → 200 `file_deleted`. `ensureSession` treats an archived/terminated session as lost.
 - Trade-off: after a session is archived, images from older turns are no longer in the sandbox; the user re-attaches one to edit it.
 
+### Gallery trash and media housekeeping (core/trash.ts, core/mediaHousekeeping.ts)
+
+- Deleting from the gallery is a soft delete: `media_jobs.deleted_at/deleted_by` hides the job; its output files get
+  `files.deleted_at`, which makes `MediaStore.get` treat them as missing (user URLs 404 at once). Exception: an output a
+  non-archived chat message shows is not hidden. `restore` clears both. Admin trash URLs are signed with a `trash` scope
+  (`sig` over `id.exp.trash`, `&scope=trash`) and are the only way to serve a hidden file.
+- Purge = delete the job row and its hidden `image`/`video` conversation, then remove each output from disk (original +
+  cached variants) and DB **only if nothing else uses it**: any remaining job (output, `input_file_ids`,
+  `reference_file_ids`, first/last frame; trashed jobs count, so a restore never finds holes) or a message in a visible,
+  non-archived chat (`content`/`artifacts` jsonb containment). Kept files stay hidden and a later pass sweeps them.
+- `MediaHousekeeper` mirrors the Qoder housekeeper (settings in `kv` `media_housekeeping.settings`, built-in defaults, ticks
+  2 min after boot then every 10 min, `media_housekeeping.last_run`). A pass: trash old failed jobs (and, if
+  `retentionDays` > 0, old finished jobs) as `system` → purge trash older than `trashGraceDays` → remove media of chats
+  archived longer than `archivedChatMediaDays` → remove uploads older than `unusedUploadDays` that no job or chat
+  (archived ones included) uses → sweep hidden files past the grace period. Each step handles ≤ 2000 rows.
+
 ### Qoder credential (core/qoderCredential.ts)
 
 - `QoderCredentialService` is the `QoderClient`'s `TokenProvider`: `QODER_SA_KEY` → admin PAT (`kv.qoder.pat`) → `QODER_PAT`.

@@ -5,11 +5,13 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
+import { MediaHousekeeper } from './core/mediaHousekeeping.js';
 import { QoderCredentialService } from './core/qoderCredential.js';
 import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
+import { MediaTrash } from './core/trash.js';
 import { MediaStore } from './core/storage.js';
 import { probeFfmpeg } from './core/variants.js';
 import { TurnRunner } from './core/turns.js';
@@ -43,6 +45,10 @@ export interface AppContext {
   folax: FolaxClient | null;
   webhooks: WebhookService;
   housekeeper: QoderHousekeeper;
+  /** Gallery trash (soft delete, restore, purge). */
+  trash: MediaTrash;
+  /** Local media housekeeping (trash grace period, old failed jobs, archived chats, unused uploads). */
+  mediaHousekeeper: MediaHousekeeper;
   qoderCredits: QoderCreditsService;
   qoderCredential: QoderCredentialService;
   /** Start background work (model sync, media worker, webhook retries). */
@@ -137,6 +143,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
     queueRetryDelaysMs: config.MEDIA_QUEUE_RETRY_DELAYS_MS,
   });
+  const trash = new MediaTrash({ db, store, media, log: log.child({ mod: 'trash' }) });
+  const mediaHousekeeper = new MediaHousekeeper({ db, trash, log: log.child({ mod: 'media_housekeeping' }) });
 
   models.onChange = (changes) => {
     for (const c of changes) void webhooks.emit(null, c.type, { model: { id: c.model.id, display_name: c.model.displayName }, ...('previous' in c ? { previous: c.previous } : {}) });
@@ -162,6 +170,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     folax,
     webhooks,
     housekeeper,
+    trash,
+    mediaHousekeeper,
     qoderCredits,
     qoderCredential,
     async start() {
@@ -176,10 +186,12 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
       webhooks.start();
       media.start();
       housekeeper.start();
+      mediaHousekeeper.start();
     },
     async close() {
       if (timer) clearInterval(timer);
       housekeeper.stop();
+      mediaHousekeeper.stop();
       await media.stop();
       await webhooks.stop();
       await database.close();

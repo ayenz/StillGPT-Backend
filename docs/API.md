@@ -578,6 +578,24 @@ If this stream drops, call `GET /jobs/:id` once, then reconnect to `/events` if 
 
 If this stream drops, call `GET /images/batches/:id` and reconnect if `status` is still `queued` or `in_progress`.
 
+### Deleting from the gallery
+Deleting moves jobs to the **trash**. They disappear from `GET /jobs`, `GET /jobs/:id` and batches at once, and their media
+URLs return `404` straight away (even though the signed URL has not expired). Housekeeping deletes them for good after the
+grace period (default 7 days, set by an admin, see §10). Users cannot list the trash; only admins can (§10).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| DELETE | `/jobs/:id` | – | `204`. `404` unknown job, `409 job_running` while it still runs |
+| POST | `/jobs/delete` | `{ids: [1–100 job ids]}` | `{trashed: [ids], skipped: [{id, reason}]}`, reason `not_found` or `job_running` |
+| POST | `/jobs/clear-failed` | – | same shape: every failed job of the user |
+| DELETE | `/images/batches/:id` | – | same shape. `409 job_running` (nothing deleted) while any image still runs |
+| POST | `/jobs/:id/restore` | – | the restored job. `400 not_in_trash` when it is not (or no longer) in the trash |
+
+- Use `restore` for an **Undo** right after deleting: the client still knows the id.
+- Running jobs cannot be deleted (generation cannot be cancelled). Delete them once they finished.
+- An image that a chat message shows (as an attachment) stays visible in that chat while its job is in the trash.
+- `DELETE /v1/videos/:id` (OpenAI) does the same for a video and returns `{id, object: "video.deleted", deleted: true}`.
+
 ---
 
 ## 9. Webhooks
@@ -661,6 +679,47 @@ with the chat history, but images from earlier turns have to be attached again b
 - `last_run`: `null` or `{at, trigger: "schedule"|"manual", retention_hours, report, error}`. Dry runs are not recorded.
 - `report`: `{dry_run, sessions_archived, files_deleted, files_in_use, bytes_freed, errors}`.
 - `dry_run: true` changes nothing and returns what a pass would do. Add `retention_hours` to preview another window before saving it.
+
+### Gallery trash and media housekeeping
+
+The trash of **all users** (jobs deleted from galleries, old failed jobs, retention):
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/admin/trash` | `?user_id=&kind=image\|video&limit=50 (max 200)&before=<deleted_at>` | `{data: [item], next_before}`, newest deletion first |
+| POST | `/admin/trash/restore` | `{ids: [1–100 job ids]}` | `{restored: [ids]}`: back in the owner's gallery |
+| POST | `/admin/trash/purge` | `{ids: [1–100 job ids]}` | `{report}`: deleted for good now, without waiting for the grace period |
+
+- `item`: `{job, user: {id, email}, deleted_at, deleted_by: "user"|"admin"|"system", purge_at, bytes}`. `purge_at` =
+  `deleted_at` + the grace period (the earliest moment a housekeeping pass deletes it). `job.outputs[]` URLs carry
+  `scope=trash` and keep working while the job is in the trash: show these as thumbnails. Never hand them to users.
+- Page with `before = next_before` until `next_before` is `null`.
+
+Local media housekeeping (separate from the Qoder housekeeping above, same scheduler pattern):
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/admin/media-housekeeping` | – | `{settings, source, running, next_run_at, last_run, storage}` |
+| PATCH | `/admin/media-housekeeping` | any of the settings below | same as GET |
+| POST | `/admin/media-housekeeping/run` | optional `{dry_run = false}` | `{report}` + same as GET |
+
+| setting | default | range | meaning |
+|---|---|---|---|
+| `enabled` | `true` | | automatic passes on/off (manual runs always work) |
+| `trash_grace_days` | 7 | 0–365 | days in the trash before deletion for good. `0` = at the next pass. Applies to what is already in the trash too |
+| `hide_failed_after_days` | 7 | 0–3650 | failed jobs older than this move to the trash. `0` = off |
+| `archived_chat_media_days` | 30 | 0–3650 | uploads and generated files of chats archived (deleted) longer than this are deleted. `0` = off |
+| `unused_upload_days` | 30 | 0–3650 | uploads that no chat or job uses, older than this, are deleted. `0` = off |
+| `retention_days` | 0 | 0–3650 | finished jobs older than this move to the trash. `0` = keep forever |
+| `interval_hours` | 24 | 1–720 | time between automatic passes |
+
+- A file is only deleted from disk when nothing still uses it: no other job (as output, edit input, video frame or
+  reference) and no message in a chat that is not archived. Such files are kept and counted in `files_in_use`.
+- `source`: `"default"` until an admin saves settings, then `"admin"`.
+- `storage`: `{files, bytes, trash_jobs, trash_files, trash_bytes}` (`files`/`bytes` = media users can still see).
+- `report`: `{dry_run, jobs_trashed, jobs_purged, files_deleted, files_in_use, bytes_freed, errors}`.
+- `last_run`: `null` or `{at, trigger: "schedule"|"manual", report, error}`. Dry runs are not recorded.
+- One pass handles at most 2000 items per step; a larger backlog is worked off over the next passes.
 
 ### Qoder credential (PAT)
 

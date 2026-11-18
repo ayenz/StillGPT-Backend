@@ -52,8 +52,12 @@ The app should feel like a mainstream AI chat app. UI language: **Bahasa Indones
    - Submitting creates a job (`202`); show it as a card with an **estimated** progress bar (`GET /jobs/:id/events` SSE,
      fallback polling every 10 s). Make clear it can take several minutes and runs in the background.
 5. **Gallery** — `GET /jobs` (images and videos), statuses, retry (= submit the same request again), open/download.
+   Delete (single, multi-select, whole batch, "clear failed") with an **Undo** toast (`POST /jobs/:id/restore`); finished jobs only.
+   Users have no trash view. See FRONTEND_GUIDE §5.6.
+6. **Admin: Trash & media housekeeping** (admins only) — trash of all users with restore / delete forever, and the media
+   housekeeping settings form (grace period etc.). See FRONTEND_GUIDE §5.7.
 
-Out of scope for the MVP: admin screens, webhooks, API key management, sign-up, payments.
+Out of scope for the MVP: admin screens (except item 6), webhooks, API key management, sign-up, payments.
 
 ## Technical requirements
 

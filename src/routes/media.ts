@@ -17,10 +17,12 @@ export function mediaRoutes(ctx: AppContext) {
   app.get('/media/:id', async (c) => {
     const id = c.req.param('id');
     const exp = c.req.query('exp');
-    if (!ctx.store.verify(id, exp, c.req.query('sig'))) throw new AppError(403, 'invalid_signature', 'Link expired or invalid');
+    // `scope=trash` URLs are only handed out by the admin trash listing and also serve trashed files
+    const scope = c.req.query('scope') === 'trash' ? 'trash' : undefined;
+    if (!ctx.store.verify(id, exp, c.req.query('sig'), scope)) throw new AppError(403, 'invalid_signature', 'Link expired or invalid');
     const variant = c.req.query('variant');
     if (variant !== undefined && !VARIANTS.includes(variant as Variant)) throw badRequest(`variant must be one of: ${VARIANTS.join(', ')}`, 'validation_error');
-    const file = await ctx.store.get(id);
+    const file = await ctx.store.get(id, undefined, { includeDeleted: scope === 'trash' });
 
     // Files never change once stored, so the browser may keep them for as long as the signed URL is valid.
     const maxAge = Math.max(0, Number(exp) - Math.floor(Date.now() / 1000));

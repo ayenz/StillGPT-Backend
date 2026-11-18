@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { DB } from '../db/client.js';
 import { type ContentBlock, conversations, files, mediaJobs } from '../db/schema.js';
@@ -14,7 +14,7 @@ import type { EventBus } from './bus.js';
 import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
 import type { Artifact, Credits, TurnEvent } from './events.js';
-import type { MediaStore, StoredFile } from './storage.js';
+import type { MediaStore, StoredFile, UrlScope } from './storage.js';
 import type { TurnResult, TurnRunner } from './turns.js';
 import type { UsageService } from './usage.js';
 import type { WebhookService } from './webhooks.js';
@@ -292,7 +292,7 @@ export class MediaService {
     const rows = await this.d.db
       .select()
       .from(mediaJobs)
-      .where(and(eq(mediaJobs.batchId, id), eq(mediaJobs.userId, userId)));
+      .where(and(eq(mediaJobs.batchId, id), eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)));
     if (!rows.length) throw notFound('Batch');
     rows.sort((a, b) => Number(a.request.batch_index ?? 0) - Number(b.request.batch_index ?? 0));
     return batchViewOf(id, await Promise.all(rows.map((r) => this.view(r))));
@@ -329,7 +329,7 @@ export class MediaService {
   }
 
   async listJobs(userId: string, opts: { kind?: 'image' | 'video'; batchId?: string; limit?: number } = {}): Promise<MediaJobView[]> {
-    const conds = [eq(mediaJobs.userId, userId)];
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
     if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     const rows = await this.d.db
@@ -788,16 +788,22 @@ export class MediaService {
 
   // ── views ───────────────────────────────────────────────────────────────
 
+  /** A user's job; jobs in the trash count as missing. */
   private async getRow(id: string, userId: string): Promise<MediaJob> {
     const [row] = await this.d.db
       .select()
       .from(mediaJobs)
-      .where(and(eq(mediaJobs.id, id), eq(mediaJobs.userId, userId)));
+      .where(and(eq(mediaJobs.id, id), eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)));
     if (!row) throw notFound('Job');
     return row;
   }
 
-  private async view(job: MediaJob): Promise<MediaJobView> {
+  /** Public view of a job row (used by the trash too, with trash-scoped output URLs). */
+  jobView(job: MediaJob, scope?: UrlScope): Promise<MediaJobView> {
+    return this.view(job, scope);
+  }
+
+  private async view(job: MediaJob, scope?: UrlScope): Promise<MediaJobView> {
     const outputs = job.resultFileIds.length ? await this.d.db.select().from(files).where(inArray(files.id, job.resultFileIds)) : [];
     const byId = new Map(outputs.map((f) => [f.id, f]));
     return {
@@ -806,7 +812,7 @@ export class MediaService {
       status: job.status,
       progress: job.progress,
       request: job.request,
-      outputs: job.resultFileIds.flatMap((id) => (byId.has(id) ? [this.d.store.toArtifact(byId.get(id)!)] : [])),
+      outputs: job.resultFileIds.flatMap((id) => (byId.has(id) ? [this.d.store.toArtifact(byId.get(id)!, scope)] : [])),
       error: job.error ?? null,
       credits: job.credits,
       batch_id: job.batchId ?? null,

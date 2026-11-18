@@ -3,6 +3,7 @@ import type { AppContext } from '../../context.js';
 import { type Env, requireAdmin, requireUser } from '../../http.js';
 import { adminRoutes, authRoutes, meRoutes } from './account.js';
 import { conversationRoutes } from './conversations.js';
+import { galleryAdminRoutes, galleryRoutes } from './gallery.js';
 import { fileRoutes, mediaJobRoutes, promptRoutes, webhookRoutes } from './media.js';
 
 /**
@@ -19,8 +20,10 @@ export function nativeRoutes(ctx: AppContext) {
 
   app.route('/', meRoutes(ctx));
   app.route('/', adminRoutes(ctx));
+  app.route('/', galleryAdminRoutes(ctx));
   app.route('/', conversationRoutes(ctx));
   app.route('/', fileRoutes(ctx));
+  app.route('/', galleryRoutes(ctx));
   app.route('/', mediaJobRoutes(ctx));
   app.route('/', promptRoutes(ctx));
   app.route('/', webhookRoutes(ctx));

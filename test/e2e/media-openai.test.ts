@@ -89,8 +89,10 @@ describe('/v1/videos (OpenAI Videos API shape)', () => {
     expect(list.body.data.map((v: any) => v.id)).toContain(video.id);
 
     const del = await json(await h.api(`/v1/videos/${video.id}`, { method: 'DELETE' }));
-    expect(del.status).toBe(501);
-    expect(del.body.error.code).toBe('not_supported');
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ id: video.id, object: 'video.deleted', deleted: true });
+    expect((await h.api(`/v1/videos/${video.id}`)).status).toBe(404);
+    expect((await json(await h.api('/v1/videos'))).body.data.map((v: any) => v.id)).not.toContain(video.id);
   });
 
   it('multipart with input_reference becomes a first-frame video', async () => {

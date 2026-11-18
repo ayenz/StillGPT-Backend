@@ -225,6 +225,32 @@ Mengikuti batch:
 - Jika SSE putus: `GET /images/batches/:id`, lalu sambung ulang bila masih `queued`/`in_progress`.
 - Jumlah maksimum dibaca dari `GET /models` → `image_providers[id=qoder].max_n` (jangan hardcode 6).
 
+### 5.6 Hapus dari galeri + Urungkan
+```
+DELETE /jobs/:id                      → 204          (409 job_running jika masih diproses)
+POST   /jobs/delete {ids: [..maks 100]} → {trashed: [..], skipped: [{id, reason}]}
+DELETE /images/batches/:id            → {trashed, skipped}
+POST   /jobs/clear-failed             → {trashed, skipped}   (tombol "Bersihkan yang gagal")
+POST   /jobs/:id/restore              → job          (tombol Urungkan)
+```
+- Hapus = masuk **sampah**: langsung hilang dari `GET /jobs`, dan URL gambar/videonya langsung 404. File baru dihapus
+  permanen setelah masa tenggang (default 7 hari, diatur admin).
+- User **tidak** bisa melihat sampah. Setelah menghapus, tampilkan toast "Dihapus · **Urungkan**" (±5–10 detik) yang
+  memanggil `POST /jobs/:id/restore` untuk tiap id yang dihapus. Lewat dari itu, pemulihan hanya lewat admin.
+- Job yang masih `queued`/`in_progress` tidak bisa dihapus: nonaktifkan tombol hapus sampai selesai.
+- Hapus banyak: mode pilih di galeri → `POST /jobs/delete`. Tampilkan jumlah `skipped` bila ada.
+- Setelah menghapus, buang item dari state lokal; jangan simpan URL lama (akan 404).
+
+### 5.7 Halaman admin: Sampah & housekeeping media (khusus admin)
+- **Sampah:** `GET /admin/trash?kind=&user_id=&limit=50` → grid dengan pemilik (`user.email`), `deleted_at`, `purge_at`
+  ("dihapus permanen mulai …"), ukuran. Thumbnail pakai `job.outputs[].thumbnail_url` dari respons ini (URL khusus admin).
+  Aksi: **Pulihkan** (`POST /admin/trash/restore {ids}`) dan **Hapus permanen** (`POST /admin/trash/purge {ids}`, minta konfirmasi).
+  Paging: kirim `before = next_before` sampai `null`.
+- **Pengaturan:** `GET /admin/media-housekeeping` → form untuk `trash_grace_days` (masa tenggang), `hide_failed_after_days`,
+  `archived_chat_media_days`, `unused_upload_days`, `retention_days` (0 = mati), `interval_hours`, `enabled`;
+  simpan dengan `PATCH` (kirim field yang diubah saja). Tampilkan juga `storage` (total & isi sampah), `last_run.report`
+  dan `next_run_at`. Tombol **Simulasi** (`POST /admin/media-housekeeping/run {dry_run: true}`) dan **Jalankan sekarang**.
+
 ---
 
 ## 6. File & URL media

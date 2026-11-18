@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
 import { files } from '../db/schema.js';
@@ -40,6 +40,9 @@ export interface MediaUrls {
 
 /** Signed URL expiries are rounded up to this so a file's URL stays identical (and browser-cacheable) for a day. */
 const EXP_BUCKET_SEC = 24 * 3600;
+
+/** `trash`: an admin URL that also serves files whose job is in the trash. */
+export type UrlScope = 'trash';
 
 /** Local disk media store + HMAC-signed URLs (`/media/:id?exp=…&sig=…[&variant=thumb|preview]`). */
 export class MediaStore {
@@ -86,11 +89,28 @@ export class MediaStore {
     return row!;
   }
 
-  async get(id: string, userId?: string): Promise<StoredFile> {
+  /** A stored file; files in the trash count as missing unless `includeDeleted`. */
+  async get(id: string, userId?: string, opts: { includeDeleted?: boolean } = {}): Promise<StoredFile> {
     const where = userId ? and(eq(files.id, id), eq(files.userId, userId)) : eq(files.id, id);
     const [row] = await this.db.select().from(files).where(where).limit(1);
-    if (!row) throw notFound('File');
+    if (!row || (row.deletedAt && !opts.includeDeleted)) throw notFound('File');
     return row;
+  }
+
+  /** Delete a file for good: the original, its cached variants and the row. Returns the bytes freed on disk. */
+  async remove(file: StoredFile): Promise<number> {
+    const path = this.pathOf(file);
+    const name = basename(path);
+    let freed = 0;
+    const siblings = await readdir(dirname(path)).catch(() => [] as string[]);
+    for (const entry of siblings) {
+      if (entry !== name && !entry.startsWith(`${name}.`)) continue;
+      const p = join(dirname(path), entry);
+      freed += (await stat(p).catch(() => null))?.size ?? 0;
+      await rm(p, { force: true });
+    }
+    await this.db.delete(files).where(eq(files.id, file.id));
+    return freed;
   }
 
   read(file: StoredFile): Promise<Buffer> {
@@ -138,8 +158,8 @@ export class MediaStore {
   }
 
   /** Original + thumbnail/preview URLs for a file id (thumbnail/preview null when the type has none). */
-  urls(fileId: string, mimeType: string): MediaUrls {
-    const url = this.signedUrl(fileId);
+  urls(fileId: string, mimeType: string, scope?: UrlScope): MediaUrls {
+    const url = this.signedUrl(fileId, this.ttlSec, scope);
     if (!this.hasVariants(mimeType)) return { url, thumbnailUrl: null, previewUrl: null };
     return { url, thumbnailUrl: `${url}&variant=thumb`, previewUrl: `${url}&variant=preview` };
   }
@@ -152,24 +172,25 @@ export class MediaStore {
    * Valid for at least `ttlSec`. The expiry is rounded up to the next day boundary so repeated listings return the
    * exact same URL and the browser cache actually hits (a fresh `exp` per request made every gallery load re-download).
    */
-  signedUrl(fileId: string, ttlSec = this.ttlSec): string {
+  signedUrl(fileId: string, ttlSec = this.ttlSec, scope?: UrlScope): string {
     const bucket = Math.max(1, Math.min(EXP_BUCKET_SEC, ttlSec));
     const exp = Math.ceil((Math.floor(Date.now() / 1000) + ttlSec) / bucket) * bucket;
-    return `${this.publicBaseUrl.replace(/\/$/, '')}/media/${fileId}?exp=${exp}&sig=${this.sign(fileId, exp)}`;
+    return `${this.publicBaseUrl.replace(/\/$/, '')}/media/${fileId}?exp=${exp}&sig=${this.sign(fileId, exp, scope)}${scope ? `&scope=${scope}` : ''}`;
   }
 
-  verify(fileId: string, exp: string | undefined, sig: string | undefined): boolean {
+  verify(fileId: string, exp: string | undefined, sig: string | undefined, scope?: UrlScope): boolean {
     const expNum = Number(exp);
     if (!sig || !Number.isFinite(expNum) || expNum < Date.now() / 1000) return false;
-    return safeEqual(sig, this.sign(fileId, expNum));
+    return safeEqual(sig, this.sign(fileId, expNum, scope));
   }
 
-  toArtifact(file: StoredFile): Artifact {
-    return { id: file.id, name: file.filename, mimeType: file.mimeType, size: file.size, kind: artifactKind(file.mimeType), ...this.urls(file.id, file.mimeType) };
+  /** `scope: 'trash'` signs URLs that still work while the file is in the trash (admin trash view only). */
+  toArtifact(file: StoredFile, scope?: UrlScope): Artifact {
+    return { id: file.id, name: file.filename, mimeType: file.mimeType, size: file.size, kind: artifactKind(file.mimeType), ...this.urls(file.id, file.mimeType, scope) };
   }
 
-  private sign(fileId: string, exp: number) {
-    return createHmac('sha256', this.secret).update(`${fileId}.${exp}`).digest('base64url');
+  private sign(fileId: string, exp: number, scope?: UrlScope) {
+    return createHmac('sha256', this.secret).update(scope ? `${fileId}.${exp}.${scope}` : `${fileId}.${exp}`).digest('base64url');
   }
 }
 
