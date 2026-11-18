@@ -586,6 +586,7 @@ For several different images at once, send `variations` on `POST /images` instea
 | `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine (always Qoder) |
 | `provider` | `auto` \| `qoder` \| `folax` | server default (`IMAGE_PROVIDER_DEFAULT`, `auto`) | image generator, see below |
 | `n` | int 1–10 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
+| `user_prompt` | string | – | with `variations`: what the user typed when `prompt` was already enhanced client-side (✨ then Generate). The variator keeps the details from this text. Default: `prompt`. Stored as `request.user_prompt` |
 | `variations` | `true` \| `{vary?, keep?}` | – | with `n` > 1: image 0 uses the prompt as written, images 1..n-1 get their own variation (see below). With `n` 1 or no `n`: just the prompt as written |
 | `async` | bool | `false` | `true` returns `202` straight away with a queued job (or batch) |
 | `callback_url` | URL | – | POSTed when the job finishes (§9) |
@@ -609,7 +610,9 @@ For several different images at once, send `variations` on `POST /images` instea
   - **Jobs 1..n-1**: `request.prompt` = the variation, `request.base_prompt` = the prompt it was made from,
     `request.variation: {changed, vary, keep, repeated}` (`repeated: true` when the model returned fewer variations than
     needed and this job reuses one).
-  - Without an explicit `vary`, what the user wrote themselves (their original text, before enhancing) is kept: "gaun merah
+  - Without an explicit `vary`, what the user wrote themselves is kept. "Their own text" is `user_prompt` if sent, else
+    `original_prompt` of a server-side `enhance: true`, else `prompt`. **Send `user_prompt` when the prompt was enhanced
+    with ✨ before Generate**, otherwise every enhanced detail counts as the user's and the variations come out too similar: "gaun merah
     di pantai" gives other red dresses on other beaches, not a blue suit in a studio. Sending `vary` (e.g. from "What may
     change" chips) means those axes may change even where the user named them.
   - `n: 1` (or no `n`) with `variations`: no variator call; the job uses the prompt as written with `variation: {"original": true}`.

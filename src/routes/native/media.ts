@@ -20,6 +20,8 @@ const imageBody = z.object({
   n: z.unknown().optional(),
   /** true or {vary, keep}: every image gets its own variation of the prompt. */
   variations: z.unknown().optional(),
+  /** The user's typed text when `prompt` is already enhanced; used by `variations`. */
+  user_prompt: z.unknown().optional(),
   async: z.boolean().optional(),
   callback_url: z.unknown().optional(),
 });
@@ -99,6 +101,7 @@ export function mediaJobRoutes(ctx: AppContext) {
       inputFileIds: b.input_file_ids,
       provider: b.provider,
       variations: b.variations,
+      userPrompt: b.user_prompt,
       callbackUrl: b.callback_url,
     } as ImageRequest;
     if (b.n !== undefined) {

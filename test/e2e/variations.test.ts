@@ -193,6 +193,21 @@ describe('POST /api/v1/images with variations', () => {
     expect(seen.vary[0]).toContain('keep it in every variation even if its axis is listed under "Change"');
   });
 
+  it('user_prompt: a prompt enhanced client-side is varied against what the user typed', async () => {
+    const seen = script(variationsReply('V1', 'V2'));
+    const enhanced = 'Fashion photo of a woman in a flowing red silk dress with gold earrings on a tropical beach at golden hour, 85mm';
+    const r = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: enhanced, user_prompt: 'gaun merah di pantai', n: 3, variations: true } }));
+    expect(r.body.jobs.map((j: any) => j.request.prompt)).toEqual([enhanced, 'V1', 'V2']);
+    for (const j of r.body.jobs) expect(j.request.user_prompt).toBe('gaun merah di pantai');
+    expect(seen.vary[0]).toContain('<user-words>\ngaun merah di pantai\n</user-words>');
+    expect(seen.vary[0]).not.toContain(`<user-words>\n${enhanced}`);
+
+    // without user_prompt the sent prompt counts as the user's words (unchanged behaviour)
+    await h.api('/api/v1/images', { method: 'POST', json: { prompt: enhanced, n: 2, variations: true } });
+    expect(seen.vary[1]).toContain(`<user-words>\n${enhanced}\n</user-words>`);
+    expect((await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'p', user_prompt: 5 } }))).status).toBe(400);
+  });
+
   it('n = 1 (or no n) with variations keeps the original prompt and skips the variator', async () => {
     const seen = script(variationsReply('should not be used'));
     const single = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'base prompt', variations: true } }));

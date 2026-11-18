@@ -46,6 +46,11 @@ export interface ImageRequest {
    * subject stays. `true` uses the default axes. Input images count as references to move away from.
    */
   variations?: boolean | { vary?: VariationAxis[]; keep?: VariationAxis[] };
+  /**
+   * The user's own words when `prompt` was already enhanced client-side (✨ then Generate). Tells the variator which
+   * details the user asked for; default: `prompt` itself.
+   */
+  userPrompt?: string;
   callbackUrl?: string;
 }
 
@@ -204,6 +209,7 @@ const imageSchema = z.object({
   variations: z
     .union([z.boolean(), z.object({ vary: z.array(z.enum(VARIATION_AXES)).min(1).optional(), keep: z.array(z.enum(VARIATION_AXES)).optional() }).strict()])
     .optional(),
+  userPrompt: z.string().trim().max(PROMPT_MAX).optional(),
   callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
 });
 
@@ -426,7 +432,9 @@ export class MediaService {
       const r = await this.d.variator.vary({
         userId: v.userId,
         prompt: base,
-        userPrompt: v.prompt,
+        // the typed text before a client-side enhance, else what was sent (which is then the user's own text,
+        // or the input of a server-side `enhance: true`)
+        userPrompt: v.userPrompt || v.prompt,
         editFileIds: v.inputFileIds,
         vary: axes.vary,
         keep: axes.keep,
@@ -460,6 +468,7 @@ export class MediaService {
     const request = {
       prompt,
       ...(e ? { original_prompt: v.prompt, enhanced: e.enhanced } : {}),
+      ...(v.userPrompt ? { user_prompt: v.userPrompt } : {}),
       size: v.size ?? e?.size ?? '1024x1024',
       enhance: v.enhance,
       input_file_ids: v.inputFileIds,

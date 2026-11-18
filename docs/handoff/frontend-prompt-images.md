@@ -196,6 +196,8 @@ POST /images { prompt, n: 4, variations: true, size }       // or variations: { 
 - `n: 1` + `variations` → just the original (no variation call).
 - Edit batches (`input_file_ids`): job 0 is the edit exactly as asked; the others are other takes on that edit.
 - Up to `n: 10` (original + 9 variations, one variation call). Adds ~10–25 s before the batch starts.
+- If the prompt was enhanced with ✨ before Generate, send the typed text as `user_prompt` on `POST /images` too
+  (only when it differs from `prompt`). Without it the whole enhanced text counts as "what the user wrote".
 - `POST /prompts/variations` now takes `user_prompt` (the user's own words before enhancing) with the same "keep what they
   wrote" effect, and `n` up to 9.
 
