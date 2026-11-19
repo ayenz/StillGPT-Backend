@@ -1,0 +1,30 @@
+# StillGPT upscale sidecar for an NVIDIA GPU host (linux/amd64 only). Same app as Dockerfile, but with
+# onnxruntime-gpu + CUDA 12.2 / cuDNN 9.1 pip libraries (no CUDA base image needed; the host only needs the NVIDIA
+# driver + nvidia-container-toolkit). Runs in upscale-only mode: detector + 3 upscalers (~86 MB) in /models.
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    FACESWAP_MODEL_DIR=/models \
+    FACESWAP_UPSCALE_ONLY=1 \
+    UPSCALE_DEVICE=cuda \
+    PORT=8080
+
+WORKDIR /app
+COPY requirements-gpu.txt .
+RUN pip install --only-binary=:all: -r requirements-gpu.txt \
+    && useradd --uid 10001 --create-home --shell /usr/sbin/nologin faceswap \
+    && mkdir -p /models && chown faceswap:faceswap /models
+
+COPY app ./app
+
+USER faceswap
+EXPOSE 8080
+VOLUME ["/models"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=4).status == 200 else 1)"
+
+CMD ["python", "-m", "app"]

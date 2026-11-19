@@ -1,0 +1,51 @@
+# GPU upscale sidecar for stillmen.dell (GTX 1060, shared with Immich ML).
+#   cd faceswap/deploy/gpu && cp .env.example .env && docker compose up -d --build
+# Reached by the StillGPT backend over ZeroTier only (UPSCALE_GPU_URL=http://10.121.21.101:8090).
+name: stillgpt-upscale
+
+services:
+  upscale-gpu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.gpu
+    image: stillgpt-upscale-gpu:latest
+    container_name: stillgpt-upscale-gpu
+    restart: unless-stopped
+    environment:
+      FACESWAP_API_KEY: ${FACESWAP_API_KEY:?set FACESWAP_API_KEY in .env}
+      FACESWAP_UPSCALE_ONLY: "1"
+      UPSCALE_DEVICE: cuda
+      UPSCALE_WORKERS: "1"
+      FACESWAP_ORT_THREADS: ${FACESWAP_ORT_THREADS:-4}
+      UPSCALE_GPU_IDLE_S: ${UPSCALE_GPU_IDLE_S:-150}
+      UPSCALE_PAUSE_CONTAINERS: immich_machine_learning
+      DOCKER_HOST: tcp://docker-proxy:2375
+    volumes:
+      - upscale_models:/models
+    ports:
+      - "10.121.21.101:8090:8080"   # ZeroTier IP only
+    depends_on:
+      - docker-proxy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Only what the pause controller needs: inspect / start / stop containers. Not published to the host.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    container_name: stillgpt-upscale-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      POST: "1"
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  upscale_models:

@@ -1,15 +1,17 @@
-"""FastAPI app: /health/ready, /v1/swap, /v1/face-crop, /v1/face-paste (see faceswap/README.md)."""
+"""FastAPI app: /health/ready, /v1/swap, /v1/face-crop, /v1/face-paste, /v1/upscale (see faceswap/README.md)."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import hmac
 import logging
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Annotated, Literal
 
 import cv2
@@ -19,11 +21,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import imaging
+from . import gpugate, imaging, upscale
 from .engine import estimate_alignment, pick_face
 from .logs import setup_logging
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 log = logging.getLogger("faceswap")
 
 
@@ -37,6 +39,22 @@ def _int_env(name: str, default: int) -> int:
 WORKERS = _int_env("FACESWAP_WORKERS", 2)
 ORT_THREADS = _int_env("FACESWAP_ORT_THREADS", max(1, (os.cpu_count() or 4) // WORKERS))
 MODEL_DIR = os.environ.get("FACESWAP_MODEL_DIR", "/models")
+# Upscale-only mode (GPU box): no face-swap models, only the detector + upscalers.
+UPSCALE_ONLY = os.environ.get("FACESWAP_UPSCALE_ONLY") == "1"
+UPSCALE_DEVICE = (os.environ.get("UPSCALE_DEVICE", "") or "cpu").strip().lower()  # cpu | cuda | off
+UPSCALE_WORKERS = _int_env("UPSCALE_WORKERS", 1)
+UPSCALE_MAX_PIXELS = _int_env("UPSCALE_MAX_PIXELS", 4_200_000)
+UPSCALE_JPEG_QUALITY = min(100, max(50, _int_env("UPSCALE_JPEG_QUALITY", 97)))
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+UPSCALE_BIG_FACE_MP = _float_env("UPSCALE_BIG_FACE_MP", 0.15)
 
 
 class State:
@@ -44,6 +62,11 @@ class State:
     error: str | None = None
     loading = False
     executor: ThreadPoolExecutor | None = None
+    upscaler: upscale.Upscaler | None = None
+    upscale_error: str | None = None
+    upscale_loading = False
+    upscale_executor: ThreadPoolExecutor | None = None
+    gate: gpugate.GpuGate | None = None
 
 
 state = State()
@@ -51,29 +74,82 @@ state = State()
 
 def _load_models() -> None:
     from .engine import Engine
-    from .models import ensure_models
+    from .models import FACE_KEYS
 
-    state.loading = True
+    detector = None
+    if not UPSCALE_ONLY:
+        state.loading = True
+        try:
+            from .models import ensure_models
+
+            state.engine = Engine(ensure_models(MODEL_DIR, FACE_KEYS), ORT_THREADS)
+            state.error = None
+            detector = state.engine.detector
+        except Exception as e:  # noqa: BLE001
+            state.error = str(e)
+            log.exception("model loading failed")
+        finally:
+            state.loading = False
+    _load_upscaler(detector)
+
+
+def _load_upscaler(detector=None) -> None:
+    """Separate from the face-swap models: an upscaler failure never takes face swap down."""
+    from .engine import Detector
+    from .models import UPSCALE_KEYS, ensure_models
+
+    if UPSCALE_DEVICE == "off":
+        return
+    state.upscale_loading = True
     try:
-        paths = ensure_models(MODEL_DIR)
-        state.engine = Engine(paths, ORT_THREADS)
-        state.error = None
+        if UPSCALE_DEVICE not in ("cpu", "cuda"):
+            raise RuntimeError(f"invalid UPSCALE_DEVICE {UPSCALE_DEVICE!r} (cpu | cuda | off)")
+        paths = ensure_models(MODEL_DIR, UPSCALE_KEYS)
+        upscale.prepare_device(UPSCALE_DEVICE)
+        if detector is None:
+            detector = Detector(paths["detector"], ORT_THREADS)
+        up = upscale.Upscaler(
+            upscale.ort_factory(paths, UPSCALE_DEVICE, ORT_THREADS), detector, UPSCALE_DEVICE, UPSCALE_BIG_FACE_MP, eager=False
+        )
+        upscale.self_test(up)
+        if UPSCALE_DEVICE == "cuda":
+            up.release()  # GPU sessions are created on demand (inside the gate), not held while idle
+        state.upscaler = up
+        state.upscale_error = None
     except Exception as e:  # noqa: BLE001
-        state.error = str(e)
-        log.exception("model loading failed")
+        state.upscale_error = str(e)
+        log.exception("upscaler loading failed")
     finally:
-        state.loading = False
+        state.upscale_loading = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     state.executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="infer")
+    state.upscale_executor = ThreadPoolExecutor(max_workers=UPSCALE_WORKERS, thread_name_prefix="upscale")
+    if UPSCALE_DEVICE == "cuda":
+        state.gate = gpugate.from_env(MODEL_DIR, lambda: state.upscaler.release() if state.upscaler else None)
+        state.gate.startup()
     if os.environ.get("FACESWAP_SKIP_MODELS") != "1":
         threading.Thread(target=_load_models, name="model-loader", daemon=True).start()
-    log.info("starting", extra={"version": VERSION, "workers": WORKERS, "ort_threads": ORT_THREADS, "model_dir": MODEL_DIR})
+    log.info(
+        "starting",
+        extra={
+            "version": VERSION,
+            "workers": WORKERS,
+            "ort_threads": ORT_THREADS,
+            "model_dir": MODEL_DIR,
+            "upscale_only": UPSCALE_ONLY,
+            "upscale_device": UPSCALE_DEVICE,
+            "upscale_workers": UPSCALE_WORKERS,
+        },
+    )
     yield
     state.executor.shutdown(wait=False, cancel_futures=True)
+    state.upscale_executor.shutdown(wait=False, cancel_futures=True)
+    if state.gate is not None:
+        state.gate.shutdown()
 
 
 app = FastAPI(title="stillgpt-faceswap", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -116,6 +192,8 @@ def require_key(x_api_key: Annotated[str | None, Header()] = None) -> None:
 
 
 def engine():
+    if UPSCALE_ONLY:
+        raise HTTPException(status_code=503, detail="UPSCALE_ONLY")
     if state.engine is None:
         raise HTTPException(status_code=503, detail="MODELS_LOADING" if state.error is None else "MODELS_FAILED")
     return state.engine
@@ -124,6 +202,14 @@ def engine():
 async def run_cpu(fn, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(state.executor, fn, *args)
+
+
+def upscaler() -> upscale.Upscaler:
+    if UPSCALE_DEVICE == "off":
+        raise HTTPException(status_code=503, detail="UPSCALE_DISABLED")
+    if state.upscaler is None:
+        raise HTTPException(status_code=503, detail="MODELS_LOADING" if state.upscale_error is None else "MODELS_FAILED")
+    return state.upscaler
 
 
 # ---------------------------------------------------------------- schemas
@@ -166,6 +252,14 @@ class PasteRequest(BaseModel):
     max_shift: float = Field(0.12, ge=0.0, le=1.0)
     output_format: Literal["png", "jpeg"] = "jpeg"
     jpeg_quality: int = Field(95, ge=50, le=100)
+
+
+class UpscaleRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    image: str = Field(min_length=1)
+    scale: Literal[2, 4] = 4
+    mode: Literal["natural", "sharp"] = "natural"
+    jpeg_quality: int | None = Field(None, ge=50, le=100)
 
 
 # ---------------------------------------------------------------- handlers (sync, run in the pool)
@@ -331,18 +425,102 @@ def do_paste(eng, req: PasteRequest) -> dict:
     return {"image": b64, "mime_type": mime, "width": W, "height": H, "alignment": info}
 
 
+def do_upscale(up: upscale.Upscaler, req: UpscaleRequest) -> dict:
+    timings: dict[str, int] = {}
+    t_all = t = time.perf_counter()
+    img = imaging.decode_image(req.image, max_pixels=UPSCALE_MAX_PIXELS)  # alpha is dropped
+    seed = int.from_bytes(hashlib.sha256(img.raw).digest()[:8], "big")
+    timings["decode"] = _ms(t)
+
+    t = time.perf_counter()
+    with state.gate.job() if state.gate is not None else nullcontext():
+        if state.gate is not None:
+            timings["gpu_wait"] = _ms(t)  # pausing other GPU containers
+        out, info = up.upscale(img.bgr, req.scale, req.mode, seed)
+    del img
+    timings.update(info["timings_ms"])
+
+    t = time.perf_counter()
+    jpeg = upscale.encode_jpeg(out, req.jpeg_quality or UPSCALE_JPEG_QUALITY)
+    h, w = out.shape[:2]
+    del out
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    del jpeg
+    timings["encode"] = _ms(t)
+    timings["total"] = _ms(t_all)
+    log.info(
+        "upscale",
+        extra={
+            "scale": req.scale,
+            "mode": req.mode,
+            "pipeline": info["pipeline"],
+            "device": up.device,
+            "size": [w, h],
+            "faces": info["faces"],
+            "faces_enhanced": info["faces_enhanced"],
+            "timings_ms": timings,
+        },
+    )
+    return {
+        "image": b64,
+        "mime_type": "image/jpeg",
+        "width": int(w),
+        "height": int(h),
+        "scale": req.scale,
+        "mode": req.mode,
+        "pipeline": info["pipeline"],
+        "device": up.device,
+        "faces": info["faces"],
+        "faces_enhanced": info["faces_enhanced"],
+        "timings_ms": timings,
+    }
+
+
 # ---------------------------------------------------------------- routes
+
+
+def _upscale_status() -> dict:
+    up = state.upscaler
+    if up is not None:
+        return {"ready": True, "device": up.device, "pipelines": up.pipelines}
+    return {
+        "ready": False,
+        "device": UPSCALE_DEVICE,
+        "disabled": UPSCALE_DEVICE == "off",
+        "loading": state.upscale_loading,
+        "error": state.upscale_error,
+    }
+
+
+UPSCALERS = ["clear_reality_x4", "span_kendata_x4", "nomos8k_sc_x4"]
 
 
 @app.get("/health/ready")
 async def ready():
+    if UPSCALE_ONLY:  # ready = upscaler loaded
+        if state.upscaler is None:
+            return JSONResponse(
+                {"ready": False, "mode": "upscale_only", "loading": state.upscale_loading, "error": state.upscale_error,
+                 "upscale": _upscale_status(), "version": VERSION},
+                status_code=503,
+            )
+        return {
+            "ready": True,
+            "mode": "upscale_only",
+            "models": {"detector": "scrfd_10g", "upscalers": UPSCALERS},
+            "upscale": _upscale_status(),
+            "version": VERSION,
+            "workers": UPSCALE_WORKERS,
+        }
     if state.engine is None:
         return JSONResponse(
-            {"ready": False, "loading": state.loading, "error": state.error, "version": VERSION}, status_code=503
+            {"ready": False, "loading": state.loading, "error": state.error, "upscale": _upscale_status(), "version": VERSION},
+            status_code=503,
         )
     return {
         "ready": True,
         "models": {"detector": "scrfd_10g", "recognizer": "arcface_w600k_r50", "swapper": "inswapper_128", "restorers": ["codeformer", "gfpgan"]},
+        "upscale": _upscale_status(),
         "version": VERSION,
         "workers": WORKERS,
     }
@@ -366,6 +544,14 @@ async def face_crop(req: CropRequest):
 @app.post("/v1/face-paste", dependencies=[Depends(require_key)])
 async def face_paste(req: PasteRequest):
     return await run_cpu(do_paste, engine(), req)
+
+
+@app.post("/v1/upscale", dependencies=[Depends(require_key)])
+async def upscale_image(req: UpscaleRequest):
+    up = upscaler()
+    loop = asyncio.get_running_loop()
+    # own pool (UPSCALE_WORKERS): a long upscale never takes all face-swap workers
+    return JSONResponse(await loop.run_in_executor(state.upscale_executor, do_upscale, up, req))
 
 
 def _cv_threads() -> None:

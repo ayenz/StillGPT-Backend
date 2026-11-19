@@ -6,3 +6,4 @@ scripts
 *.md
 .venv
 models
+deploy

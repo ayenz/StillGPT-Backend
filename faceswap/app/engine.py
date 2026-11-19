@@ -160,7 +160,7 @@ class Face:
         return float(max(0.0, self.box[2] - self.box[0]) * max(0.0, self.box[3] - self.box[1]))
 
 
-def _session(path: Path, threads: int) -> ort.InferenceSession:
+def _session(path: Path, threads: int, providers: list | None = None) -> ort.InferenceSession:
     so = ort.SessionOptions()
     so.intra_op_num_threads = threads
     so.inter_op_num_threads = 1
@@ -170,7 +170,7 @@ def _session(path: Path, threads: int) -> ort.InferenceSession:
     # The BFC arena keeps the peak activation memory of every session (CodeFormer/GFPGAN: several hundred MB each)
     # resident forever; without it RSS stays much lower at a negligible speed cost. FACESWAP_ORT_ARENA=1 re-enables.
     so.enable_cpu_mem_arena = os.environ.get("FACESWAP_ORT_ARENA") == "1"
-    return ort.InferenceSession(str(path), sess_options=so, providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(str(path), sess_options=so, providers=providers or ["CPUExecutionProvider"])
 
 
 class Detector:

@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 models/
 smoke-out/
+deploy/gpu/.env

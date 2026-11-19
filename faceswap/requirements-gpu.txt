@@ -1,0 +1,17 @@
+# GPU build (x86_64 only): onnxruntime-gpu instead of onnxruntime. The CUDA/cuDNN libraries come from the nvidia
+# pip wheels (loaded by onnxruntime.preload_dlls()); pinned to the CUDA 12.2 line because the GPU host runs driver 535
+# - newer libs fail there with CUDNN_STATUS_EXECUTION_FAILED. Upscale-only: no `onnx` package needed.
+fastapi==0.165.0
+uvicorn==0.54.0
+pydantic==2.14.3
+onnxruntime-gpu==1.22.0
+opencv-python-headless==5.1.0.95
+numpy==2.5.5
+pillow==13.0.0
+nvidia-cuda-runtime-cu12==12.2.*
+nvidia-cublas-cu12==12.2.*
+nvidia-cuda-nvrtc-cu12==12.2.*
+nvidia-cufft-cu12==11.0.8.*
+nvidia-curand-cu12==10.3.3.*
+nvidia-nvjitlink-cu12==12.2.*
+nvidia-cudnn-cu12==9.1.*

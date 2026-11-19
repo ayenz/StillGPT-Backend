@@ -60,12 +60,12 @@ def b64_to_bytes(data: str) -> bytes:
     return raw
 
 
-def decode_image(data: str) -> Decoded:
+def decode_image(data: str, max_pixels: int | None = None) -> Decoded:
     raw = b64_to_bytes(data)
     try:
         im = Image.open(io.BytesIO(raw))
         w, h = im.size
-        if w * h > MAX_PIXELS:
+        if w * h > min(MAX_PIXELS, max_pixels or MAX_PIXELS):
             raise ImageError("TOO_LARGE", 413)
         fmt = im.format
         im = ImageOps.exif_transpose(im)
