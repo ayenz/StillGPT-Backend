@@ -11,6 +11,9 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-stillgpt}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-stillgpt}
       MEDIA_DIR: /data/media
+      # GPU upscaler over ZeroTier (empty = CPU faceswap sidecar only)
+      UPSCALE_GPU_URL: ${UPSCALE_GPU_URL:-}
+      UPSCALE_GPU_API_KEY: ${UPSCALE_GPU_API_KEY:-}
     ports:
       - "127.0.0.1:${STILLGPT_HOST_PORT:-8790}:8790"   # cloudflared (Zero Trust) on the host points the public domain here
     volumes:

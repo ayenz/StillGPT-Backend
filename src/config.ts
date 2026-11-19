@@ -93,6 +93,14 @@ const schema = z
     FACESWAP_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
     /** Per sidecar call. */
     FACESWAP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+    /** GPU upscaler (the faceswap sidecar in upscale-only mode on the GPU box, over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
+    UPSCALE_GPU_URL: optionalString(z.string().url()),
+    /** Sent as X-API-Key to the GPU upscaler; empty = no auth. */
+    UPSCALE_GPU_API_KEY: optionalString(z.string().min(1)),
+    /** Per upscale call on the GPU; past it the job falls back to the CPU. */
+    UPSCALE_GPU_TIMEOUT_MS: z.coerce.number().int().min(1000).default(240_000),
+    /** Per upscale call on the CPU sidecar (a 4.2 MP photo with faces takes minutes). */
+    UPSCALE_CPU_TIMEOUT_MS: z.coerce.number().int().min(1000).default(600_000),
     IMAGE_PROVIDER_DEFAULT: z.enum(IMAGE_PROVIDERS).default('auto'),
     /** Auto-name native conversations from their first message (ChatGPT style). */
     AUTO_TITLE: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),

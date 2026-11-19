@@ -9,6 +9,7 @@ import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
 import { type FaceBox, type FaceSwapClient, PATCH_MISALIGNED, type PasteAlignment, type SwapperOptions } from '../providers/faceswap.js';
 import { FOLAX_PROMPT_MAX, type FolaxClient, type FolaxEditMode, type FolaxVideoJob, folaxError, toFolaxRatio } from '../providers/folax.js';
+import { UPSCALE_MAX_PIXELS, UPSCALE_MODES, UPSCALE_SCALES, type UpscaleBackend, type UpscaleClient, type UpscaleMode, type UpscaleScale } from '../providers/upscale.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
@@ -109,6 +110,30 @@ export interface RemovePeopleRequest {
   userId: string;
   fileId: string;
   callbackUrl?: string;
+}
+
+/** Upscale of one of the user's images (free, no quota). */
+export interface UpscaleRequest {
+  userId: string;
+  fileId: string;
+  /** Default 4. */
+  scale?: UpscaleScale;
+  /** Default `natural`. */
+  mode?: UpscaleMode;
+  callbackUrl?: string;
+}
+
+/** `request.upscale` of an upscale job; the optional fields are filled in when it finishes. */
+export interface UpscaleJobInfo {
+  source_file_id: string;
+  scale: UpscaleScale;
+  mode: UpscaleMode;
+  backend?: UpscaleBackend;
+  pipeline?: string;
+  device?: string;
+  width?: number;
+  height?: number;
+  faces_enhanced?: number;
 }
 
 /** A face swap: target image (`:fileId`) + a saved face. */
@@ -281,6 +306,8 @@ export interface MediaServiceDeps {
   faceswap?: FaceSwapClient | null;
   /** Face swap settings (engine default, prompts, swapper options). Needed for face swaps. */
   faceSwapSettings?: FaceSwapSettingsService;
+  /** Image upscaler; null/absent when no upscale backend is configured. */
+  upscaler?: UpscaleClient | null;
   defaultImageProvider: ImageProvider;
   videoConcurrency: number;
   /** Progress ticks and restart-recovery polling. Default 5 s. */
@@ -302,7 +329,7 @@ const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
-const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, folax_video: 150_000, faceswap: 15_000 } as const;
+const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, folax_video: 150_000, faceswap: 15_000, upscale: 60_000 } as const;
 /** A Folax video is given up after this long (the adapter's own job timeout is 15 min). */
 const FOLAX_VIDEO_MAX_MS = 20 * 60_000;
 /** Consecutive failed status polls (adapter unreachable, upstream hiccups) before a Folax video job fails. */
@@ -343,6 +370,14 @@ const imageSchema = z.object({
   userPrompt: z.string().trim().max(PROMPT_MAX).optional(),
   callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
   extra: z.record(z.string(), z.unknown()).optional(),
+});
+
+const upscaleSchema = z.object({
+  userId: z.string().min(1),
+  fileId: z.string().min(1),
+  scale: z.union(UPSCALE_SCALES.map((n) => z.literal(n))).default(4),
+  mode: z.enum(UPSCALE_MODES).default('natural'),
+  callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
 });
 
 const videoSchema = z
@@ -481,6 +516,36 @@ export class MediaService {
     }
     await this.run(job);
     return this.getJob(job.id, v.userId);
+  }
+
+  /**
+   * Upscale one of the user's images 2x/4x (`natural` or `sharp`) on the upscale sidecar: an async image job with
+   * `provider_used: upscale` and `request.upscale`. Free and deliberately without the credit-limit check.
+   */
+  async upscale(req: UpscaleRequest): Promise<MediaJobView> {
+    const v = validate(upscaleSchema, req);
+    if (!this.d.upscaler) throw new AppError(503, 'upscale_unavailable', 'Upscaling is not configured');
+    const [input] = await this.loadInputs(v.userId, [v.fileId]);
+    // unreadable here: let the sidecar judge it (BAD_IMAGE fails the job)
+    const { width, height } = await imageSizeOf(this.d.store.pathOf(input!.file));
+    if (width && height && width * height > UPSCALE_MAX_PIXELS)
+      throw badRequest(`The image has ${width}x${height} pixels; upscaling takes at most ${UPSCALE_MAX_PIXELS / 1e6} MP`, 'image_too_large', {
+        width,
+        height,
+        max_pixels: UPSCALE_MAX_PIXELS,
+      });
+    const info: UpscaleJobInfo = { source_file_id: v.fileId, scale: v.scale, mode: v.mode };
+    const request = {
+      prompt: `Upscale ${v.scale}x (${v.mode === 'sharp' ? 'Sharp' : 'Natural'})`,
+      enhance: false,
+      input_file_ids: [v.fileId],
+      provider: 'upscale',
+      provider_used: 'upscale',
+      upscale: info,
+    };
+    const job = await this.insertJob(v.userId, 'image', request, v.callbackUrl);
+    void this.run(job);
+    return this.view(job);
   }
 
   /** Folax is configured and not known to be down (cached state; no probe). */
@@ -831,6 +896,7 @@ export class MediaService {
       await this.d.db.update(mediaJobs).set({ status: 'in_progress', startedAt: started, progress: 0 }).where(eq(mediaJobs.id, job.id));
       this.publishProgress(job.id, 'in_progress', 0);
       stopProgress = this.trackProgress(job, started);
+      if (upscaleOf(job)) return await this.finish(job.id, await this.runUpscale(job));
       let current = job;
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
@@ -1013,6 +1079,34 @@ export class MediaService {
     folax.invalidateUsage();
     const file = await this.d.store.save({ userId: job.userId, kind: 'artifact', filename: `folax-${job.id}.mp4`, mimeType: 'video/mp4', bytes, jobId: job.id });
     await this.d.usage.record({ userId: job.userId, kind: 'video', model: 'folax-video', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
+    return { fileIds: [file.id], credits: 0, error: null };
+  }
+
+  /** Upscale on the sidecar (GPU, else CPU); the JPEG is the only output, `request.upscale` gets what ran. Free. */
+  private async runUpscale(job: MediaJob): Promise<Outcome> {
+    if (!this.d.upscaler) throw new AppError(503, 'upscale_unavailable', 'Upscaling is not configured');
+    const info = upscaleOf(job)!;
+    const [source] = await this.loadInputs(job.userId, [info.source_file_id]);
+    const r = await this.d.upscaler.upscale(await this.d.store.read(source!.file), { scale: info.scale, mode: info.mode });
+    const file = await this.d.store.save({
+      userId: job.userId,
+      kind: 'artifact',
+      filename: `upscale-${info.scale}x-${baseName(source!.file.filename)}.${extOf(r.mimeType)}`,
+      mimeType: r.mimeType,
+      bytes: r.bytes,
+      jobId: job.id,
+    });
+    const done: UpscaleJobInfo = {
+      ...info,
+      backend: r.backend,
+      pipeline: r.pipeline,
+      device: r.device,
+      width: r.width,
+      height: r.height,
+      faces_enhanced: r.facesEnhanced,
+    };
+    await this.d.db.update(mediaJobs).set({ request: { ...job.request, upscale: done } }).where(eq(mediaJobs.id, job.id));
+    await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'upscale', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
     return { fileIds: [file.id], credits: 0, error: null };
   }
 
@@ -1234,7 +1328,7 @@ export class MediaService {
   /** Time-based progress estimate (upstream reports none), capped at 95 until the job is done. */
   private trackProgress(job: MediaJob, startedAt: Date): () => void {
     const edit = folaxEditOf(job);
-    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : EXPECTED_MS[job.kind];
+    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : upscaleOf(job) ? EXPECTED_MS.upscale : EXPECTED_MS[job.kind];
     const expected = base * (job.kind === 'video' && !usesFolaxVideo(job) ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
     let last = 0;
     const timer = setInterval(() => {
@@ -1563,6 +1657,11 @@ async function imageSizeOf(path: string): Promise<{ width?: number; height?: num
 function faceSwapEngineOf(job: MediaJob): FaceSwapEngine | null {
   const fs = job.request.face_swap as FaceSwapJobInfo | undefined;
   return fs ? (fs.engine ?? 'qoder') : null;
+}
+
+/** `request.upscale` of an upscale job, null for any other job. */
+function upscaleOf(job: MediaJob): UpscaleJobInfo | null {
+  return job.kind === 'image' && job.request.provider_used === 'upscale' ? ((job.request.upscale as UpscaleJobInfo | undefined) ?? null) : null;
 }
 
 /** Engines that let Qoder edit a close-up of the face and paste it back (sidecar crop → Qoder → sidecar paste). */

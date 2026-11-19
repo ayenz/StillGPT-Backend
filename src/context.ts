@@ -27,6 +27,7 @@ import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
 import { createLogger, type Logger } from './log.js';
 import { FaceSwapClient } from './providers/faceswap.js';
+import { UpscaleClient } from './providers/upscale.js';
 import { AppError } from './errors.js';
 import { FolaxClient } from './providers/folax.js';
 import { QoderClient } from './qoder/client.js';
@@ -56,6 +57,8 @@ export interface AppContext {
   faceswap: FaceSwapClient | null;
   /** Admin face swap settings + engine availability. */
   faceSwapSettings: FaceSwapSettingsService;
+  /** Image upscaler (GPU primary, CPU faceswap sidecar fallback); null when neither UPSCALE_GPU_URL nor FACESWAP_URL is set. */
+  upscaler: UpscaleClient | null;
   enhancer: PromptEnhancer;
   enhancerInstructions: EnhancerInstructions;
   variator: PromptVariator;
@@ -170,6 +173,15 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
         fetchImpl: o.fetchImpl,
       })
     : null;
+  const upscaler =
+    config.UPSCALE_GPU_URL || config.FACESWAP_URL
+      ? new UpscaleClient({
+          gpu: config.UPSCALE_GPU_URL ? { baseUrl: config.UPSCALE_GPU_URL, apiKey: config.UPSCALE_GPU_API_KEY, timeoutMs: config.UPSCALE_GPU_TIMEOUT_MS } : undefined,
+          cpu: config.FACESWAP_URL ? { baseUrl: config.FACESWAP_URL, apiKey: config.FACESWAP_API_KEY, timeoutMs: config.UPSCALE_CPU_TIMEOUT_MS } : undefined,
+          log: log.child({ mod: 'upscale' }),
+          fetchImpl: o.fetchImpl,
+        })
+      : null;
   const faceSwapSettings = new FaceSwapSettingsService({ db, log: log.child({ mod: 'face_swap' }), client: faceswap });
   await faceSwapSettings.load();
   const media = new MediaService({
@@ -187,6 +199,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     folax,
     faceswap,
     faceSwapSettings,
+    upscaler,
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
@@ -225,6 +238,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     faces,
     faceswap,
     faceSwapSettings,
+    upscaler,
     enhancer,
     enhancerInstructions,
     variator,

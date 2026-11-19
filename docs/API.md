@@ -959,6 +959,51 @@ otherwise, `400 validation_error` if it is not an image).
   configured), `faceswap_failed` (anything else, e.g. an unreadable or too large image); `qoder_misaligned` (`qoder_crop`
   only, see above).
 
+### Upscale
+Enlarges one of the user's images 2x or 4x. **Free, no limits** (no credits, the monthly credit limit is not checked).
+Runs on a GPU box when it is up, otherwise on the CPU sidecar; expect about 30–90 s (longer on CPU with big faces).
+The result is always a JPEG.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/upscale/config` | – | what the upscale dialog offers (see below) |
+| POST | `/images/:fileId/upscale` | `{scale?, mode?, callback_url?}` (send `{}` for the defaults) | **always `202`** with the job (async) |
+
+**`GET /upscale/config`** (any user):
+```json
+{ "available": true, "gpu": true, "max_pixels": 4200000, "scales": [2, 4], "modes": ["natural", "sharp"],
+  "default_scale": 4, "default_mode": "natural" }
+```
+- `available`: an upscale backend is configured. Hide the "Upscale" action when `false`.
+- `gpu`: the fast GPU backend answered its readiness check (cached ~30 s). When `false` jobs still run, on the CPU (slower).
+
+**`POST /images/:fileId/upscale`**: `:fileId` is one of the user's images (an upload or a gallery output).
+
+| field | type | default | notes |
+|---|---|---|---|
+| `scale` | `2` \| `4` | `4` | output = scale × the input's width and height |
+| `mode` | `natural` \| `sharp` | `natural` | `natural`: realistic detail (faces enhanced on the CPU, whole image on the GPU); `sharp` ("Tajam"): crisper, faster |
+| `callback_url` | URL | – | POSTed when the job finishes (§9) |
+
+- The response is a normal image job (same shape as `GET /jobs/:id`); follow it with `/jobs/:id/events`, webhooks or the
+  gallery. Its `request`:
+  ```json
+  { "prompt": "Upscale 4x (Natural)", "enhance": false, "input_file_ids": ["file_…"],
+    "provider": "upscale", "provider_used": "upscale",
+    "upscale": { "source_file_id": "file_…", "scale": 4, "mode": "natural",
+                 "backend": "gpu", "pipeline": "P5", "device": "cuda", "width": 3584, "height": 4800, "faces_enhanced": 0 } }
+  ```
+  `backend` (`gpu` | `cpu`), `pipeline` (`P1` sharp, `P4` natural on CPU, `P5` natural on GPU), `device`, `width`, `height`
+  (of the result) and `faces_enhanced` are filled in when the job completes. Label it e.g. "Upscale 4x · Natural".
+- The only output is `upscale-<scale>x-<source name>.jpg` (`kind: image`). `credits: 0`; usage is recorded as free
+  (`model: "upscale"`).
+- Request errors: `400 image_too_large` (the source has more than 4,200,000 pixels; `details` has `width`, `height`,
+  `max_pixels`), `400 validation_error` (bad `scale`/`mode`/`callback_url`, or the file is not an image),
+  `404 file_not_found`, `503 upscale_unavailable` (no upscale backend configured).
+- Job errors: `image_too_large` / `bad_image` (the upscaler rejected the image), `upscale_unavailable` (GPU and CPU both
+  unavailable), `upscale_failed` (anything else).
+- A job cut off by a server restart is run again from the start.
+
 ---
 
 ## 9. Webhooks
@@ -1260,6 +1305,7 @@ Branch on `code`, not on `message`. `details` appears only on some errors.
 | 429 | `credit_limit_exceeded` | the monthly credit limit has been reached |
 | 429 | `folax_quota_exceeded`, `provider_busy` | Folax only: the shared weekly quota is used up (wait until it resets) / Folax is busy (retry after `details.retry_after`). See §8 "Folax status" |
 | 503 | `provider_unavailable` | an optional provider (Folax) is down or not configured |
+| 400 / 503 | `image_too_large` / `upscale_unavailable` | upscale only: the source has more than 4.2 MP / no upscale backend is configured (§8 "Upscale") |
 | 400 | `unsupported_attachment`, `too_many_images`, `message_too_long` | Folax chat models only: files, GIFs, more than 4 images, or a message over 12,000 characters (§4 "Folax chat models") |
 | 502 / 503 | `upstream_unavailable`, `upstream_auth`, `upstream_*` | a Qoder problem. Retry later |
 | 504 | `turn_timeout` | the turn took more than 45 min |
@@ -1281,6 +1327,7 @@ Treat any `429` or `5xx` as retryable, except `folax_quota_exceeded`, which only
 | Jobs per request (`n`) | 1–10, in parallel (Qoder: 1 image per job, Folax: 2) |
 | Image inputs (edit) | 3 |
 | Saved faces | 50 per user. Face swap `n`: 1–4 |
+| Upscale input | 4,200,000 pixels; scale 2 or 4 |
 | Video `seconds` | 2–30 or -1. Resolution `480P`, `720P` or `1080P`. 7 ratios (§8) |
 | Video references | 1–10, or first frame (+ last frame) |
 | Turn timeout | 45 min |
@@ -1298,6 +1345,7 @@ Latencies observed (model `efficient`):
 | image (Folax) | about 10–15 s per job, also for a batch (jobs run in parallel, up to 8 at once) |
 | prompt enhancer | 2–10 s |
 | video | 3–4 min (up to 30) |
+| upscale | about 30–90 s (GPU faster; CPU slower with faces) |
 
 ---
 

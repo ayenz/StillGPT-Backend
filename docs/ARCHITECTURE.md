@@ -95,6 +95,8 @@ src/
     bus.ts                 in-memory pub/sub for live turn/job events
   providers/
     folax.ts               FolaxClient: folax-adapter sidecar (fast external image generator)
+    faceswap.ts            FaceSwapClient: faceswap sidecar (swap, face crop/paste)
+    upscale.ts             UpscaleClient: /v1/upscale on the GPU box (primary) with the CPU faceswap sidecar as fallback
   routes/
     health.ts
     native/                /api/v1/*  (PWA, Flutter, n8n)
@@ -196,6 +198,13 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   (`kv.enhancer.instructions.variation`). On image jobs a variation failure falls back to the unvaried prompt.
 - Videos are **jobs**: table `media_jobs` (status `queued|in_progress|completed|failed`, qoder session id, last event id, progress, result artifact, error, `callback_url`).
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
+- Upscale (`POST /images/:fileId/upscale`, `providers/upscale.ts`): an image job with `provider_used: upscale` and
+  `request.upscale`, no Qoder turn, free, no credit-limit check, inputs ≤ 4.2 MP. The same sidecar code (`faceswap/`) runs on
+  two machines: the **GPU** box (GTX 1060, upscale-only mode, reached over ZeroTier at `UPSCALE_GPU_URL`) is primary; the
+  **CPU** faceswap sidecar (`FACESWAP_URL`) is the fallback when the GPU is unconfigured, not ready (`/health/ready` →
+  `upscale.ready`, cached 30 s), unreachable, times out (`UPSCALE_GPU_TIMEOUT_MS`, 4 min) or answers non-image errors (5xx/401/404).
+  Image rejections (413 `TOO_LARGE`, 422 `BAD_IMAGE`) do not fall back. One call in flight per backend. Restart recovery
+  re-runs queued/in-progress upscale jobs (no session → back to `queued`).
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).
 - Gallery renditions (`&variant=thumb|preview`, WebP) are rendered in the background on save and cached next to the original as `<file>.<variant>.v1.webp`; files saved before this existed are rendered on first request. Video stills need ffmpeg (`FFMPEG_PATH`, shipped in the Docker image); without it videos have `thumbnail_url: null`.
 
@@ -285,6 +294,8 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`,
+`UPSCALE_GPU_URL` + `UPSCALE_GPU_API_KEY` (optional GPU upscaler; upscale is available when it or `FACESWAP_URL` is set),
+`UPSCALE_GPU_TIMEOUT_MS=240000`, `UPSCALE_CPU_TIMEOUT_MS=600000`,
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),
 `AUTO_TITLE=true` + `AUTO_TITLE_WAIT_MS=5000` (ChatGPT-style chat titles, `core/titler.ts`, model alias `titler`;
 runs on a hidden conversation in parallel with the first native turn; `metadata.title_source` = `auto` | `user`, a user rename pins it).

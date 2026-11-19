@@ -7,6 +7,7 @@ import { WEBHOOK_EVENTS } from '../../core/webhooks.js';
 import { badRequest } from '../../errors.js';
 import type { Env } from '../../http.js';
 import { FOLAX_PROMPT_MAX, FOLAX_RATIOS } from '../../providers/folax.js';
+import { UPSCALE_MAX_PIXELS, UPSCALE_MODES, UPSCALE_SCALES } from '../../providers/upscale.js';
 import { assertUploadSize, body, fileView, formFiles, limitParam, type SseEvent, saveUpload, sse } from './util.js';
 
 /** Media bodies are validated by MediaService; here we only map snake_case → the service request. */
@@ -30,6 +31,12 @@ const imageBody = z.object({
 
 const removePeopleBody = z.object({
   async: z.boolean().optional(),
+  callback_url: z.string().optional(),
+});
+
+const upscaleBody = z.object({
+  scale: z.union(UPSCALE_SCALES.map((n) => z.literal(n))).optional(),
+  mode: z.enum(UPSCALE_MODES).optional(),
   callback_url: z.string().optional(),
 });
 
@@ -126,6 +133,26 @@ export function mediaJobRoutes(ctx: AppContext) {
     const job = await ctx.media.removePeople({ userId: c.get('user').id, fileId: c.req.param('fileId'), callbackUrl: b.callback_url }, { wait: !b.async });
     return c.json(mediaJobJson(job), b.async ? 202 : 200);
   });
+
+  /** Upscale 2x/4x on the upscale sidecar (GPU, CPU fallback; ~30–90 s). Free, no limits. Always async: 202. */
+  app.post('/images/:fileId/upscale', async (c) => {
+    const b = await body(c, upscaleBody);
+    const job = await ctx.media.upscale({ userId: c.get('user').id, fileId: c.req.param('fileId'), scale: b.scale, mode: b.mode, callbackUrl: b.callback_url });
+    return c.json(mediaJobJson(job), 202);
+  });
+
+  /** What the upscale dialog offers; `gpu` = the fast backend answered its (cached) readiness probe. */
+  app.get('/upscale/config', async (c) =>
+    c.json({
+      available: !!ctx.upscaler,
+      gpu: ctx.upscaler ? await ctx.upscaler.gpuReady() : false,
+      max_pixels: UPSCALE_MAX_PIXELS,
+      scales: UPSCALE_SCALES,
+      modes: UPSCALE_MODES,
+      default_scale: 4,
+      default_mode: 'natural',
+    }),
+  );
 
   app.post('/videos', async (c) => {
     const b = await body(c, videoBody);
