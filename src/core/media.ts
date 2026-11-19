@@ -1,4 +1,5 @@
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import sharp from 'sharp';
 import { z } from 'zod';
 import type { DB } from '../db/client.js';
 import { type ContentBlock, conversations, files, mediaJobs } from '../db/schema.js';
@@ -26,6 +27,36 @@ export const IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536', '768x1024', '
 export type ImageSize = (typeof IMAGE_SIZES)[number];
 /** Most images one `POST /images` may ask for (`n`); each is its own Qoder job, run in parallel. */
 export const MAX_IMAGE_BATCH = 10;
+/** Most images one face swap may ask for. */
+export const MAX_FACE_SWAP_BATCH = 4;
+
+/**
+ * Fixed prompt of a face swap job. Image 1 = the target photo, image 2 = the face (portrait or 3x3 angle sheet).
+ */
+export const FACE_SWAP_PROMPT =
+  'Face swap. Image 1 is the target photo; image 2 shows the identity to use: it may be a single portrait or a 3x3 sheet of the same person ' +
+  'seen from different angles (use all views to understand the face). Replace the face of the person in image 1 with the face of the person ' +
+  'in image 2: match facial structure, eyes, eyebrows, nose, mouth, jawline, skin tone and age. Keep everything else from image 1 exactly: ' +
+  'head angle and gaze direction, expression, hair, outfit, body, pose, lighting, colour grading, background, framing and resolution. ' +
+  'Blend the new face naturally into the lighting and skin texture of image 1. Output a single photo, not a grid or collage.';
+
+/** The allowed image size whose aspect ratio is closest to `width`x`height` (log-ratio distance). */
+export function closestImageSize(width: number | undefined, height: number | undefined): ImageSize {
+  if (!width || !height || width <= 0 || height <= 0) return '1024x1024';
+  const target = Math.log(width / height);
+  let best: ImageSize = '1024x1024';
+  let bestDiff = Number.POSITIVE_INFINITY;
+  for (const size of IMAGE_SIZES) {
+    const [w, h] = size.split('x').map(Number) as [number, number];
+    const diff = Math.abs(Math.log(w / h) - target);
+    if (diff < bestDiff - 1e-9) {
+      best = size;
+      bestDiff = diff;
+    }
+  }
+  return best;
+}
+
 export const VIDEO_RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
 export type VideoRatio = (typeof VIDEO_RATIOS)[number];
 export const VIDEO_RESOLUTIONS = ['480P', '720P', '1080P'] as const;
@@ -51,6 +82,18 @@ export interface ImageRequest {
    * details the user asked for; default: `prompt` itself.
    */
   userPrompt?: string;
+  callbackUrl?: string;
+  /** Server-side extras merged into the stored job `request` (e.g. `face_swap`); never set from client input. */
+  extra?: Record<string, unknown>;
+}
+
+/** A face swap: target image (`:fileId`) + a saved face. */
+export interface FaceSwapRequest {
+  userId: string;
+  targetFileId: string;
+  face: { id: string; name: string; fileId: string };
+  /** 1–MAX_FACE_SWAP_BATCH, default 1. */
+  n?: number;
   callbackUrl?: string;
 }
 
@@ -223,6 +266,7 @@ const imageSchema = z.object({
     .optional(),
   userPrompt: z.string().trim().max(PROMPT_MAX).optional(),
   callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
+  extra: z.record(z.string(), z.unknown()).optional(),
 });
 
 const videoSchema = z
@@ -330,6 +374,32 @@ export class MediaService {
     const runs = rows.map((job) => this.run(job));
     if (opts.wait) await Promise.all(runs);
     return this.getBatch(batchId, v.userId);
+  }
+
+  /**
+   * Face swap on `targetFileId` with a saved face: an async Qoder edit batch of `n` (1–4) with the fixed
+   * FACE_SWAP_PROMPT, image 1 = target, image 2 = face. The size follows the target's aspect ratio.
+   * The jobs' `request.face_swap` records the source and face for the gallery.
+   */
+  async createFaceSwapBatch(req: FaceSwapRequest): Promise<ImageBatchView> {
+    const n = req.n ?? 1;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_FACE_SWAP_BATCH)
+      throw badRequest(`n must be an integer between 1 and ${MAX_FACE_SWAP_BATCH}`, 'validation_error', { param: 'n' });
+    const [target] = await this.loadInputs(req.userId, [req.targetFileId]);
+    const { width, height } = await imageSizeOf(this.d.store.pathOf(target!.file));
+    return this.createImageBatch(
+      {
+        userId: req.userId,
+        prompt: FACE_SWAP_PROMPT,
+        size: closestImageSize(width, height),
+        enhance: false,
+        inputFileIds: [req.targetFileId, req.face.fileId],
+        provider: 'qoder',
+        callbackUrl: req.callbackUrl,
+        extra: { face_swap: { source_file_id: req.targetFileId, face_id: req.face.id, face_name: req.face.name } },
+      },
+      n,
+    );
   }
 
   async getBatch(id: string, userId: string): Promise<ImageBatchView> {
@@ -519,6 +589,7 @@ export class MediaService {
       provider,
       provider_used: tooLongForFolax ? 'qoder' : providerUsed,
       ...(tooLongForFolax ? { fallback_reason: 'prompt_too_long_for_folax' } : {}),
+      ...v.extra,
     };
     return { v, request };
   }
@@ -1003,6 +1074,17 @@ function classifyToolError(output: string): { code: string; message: string } {
   if (DRAINING.test(output)) return { code: 'upstream_draining', message: 'Qoder generator instance was restarting (HTTP 423 draining); try again' };
   const detail = output.replace(/^\w+_gen error:\s*/i, '').replace(/request_id[:=]\S+/gi, '').slice(0, 300);
   return { code: 'generation_failed', message: `Generator error: ${detail}` };
+}
+
+/** Displayed pixel size of an image (EXIF orientations 5–8 swap width and height); empty when unreadable. */
+async function imageSizeOf(path: string): Promise<{ width?: number; height?: number }> {
+  try {
+    const m = await sharp(path).metadata();
+    const rotated = (m.orientation ?? 1) >= 5;
+    return m.width && m.height ? (rotated ? { width: m.height, height: m.width } : { width: m.width, height: m.height }) : {};
+  } catch {
+    return {};
+  }
 }
 
 const usesFolax = (job: MediaJob) => job.kind === 'image' && job.request.provider_used === 'folax';

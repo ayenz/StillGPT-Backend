@@ -742,6 +742,50 @@ grace period (default 7 days, set by an admin, see §10). Users cannot list the 
 - An image that a chat message shows (as an attachment) stays visible in that chat while its job is in the trash.
 - `DELETE /v1/videos/:id` (OpenAI) does the same for a video and returns `{id, object: "video.deleted", deleted: true}`.
 
+### Faces and face swap
+A **face** is a saved identity: a name plus one of the user's images (a single portrait, or a 3x3 sheet of the same
+person from different angles). A **face swap** puts a saved face onto a target image with a Qoder image edit.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/faces` | – | `{data: [face]}`, newest first |
+| POST | `/faces` | `{name, file_id}` | `201` face |
+| PATCH | `/faces/:id` | `{name}` | face |
+| DELETE | `/faces/:id` | – | `204`. The file and earlier face-swap results stay |
+| POST | `/images/:fileId/face-swap` | `{face_id, n?, callback_url?}` | **always `202`** with an image batch (async) |
+
+Face:
+```json
+{ "id": "face_…", "name": "Budi", "file_id": "file_…",
+  "file": { "id": "file_…", "filename": "budi.png", "mime_type": "image/png", "size": 123456, "kind": "upload",
+            "url": "…", "thumbnail_url": "…", "preview_url": "…", "created_at": "…" },
+  "created_at": "…" }
+```
+`file` has the same shape as `GET /files/:id`.
+
+- `name`: 1–60 characters (trimmed). `file_id`: one of the user's files, PNG, JPEG or WebP (upload it with `POST /files`
+  first, or use a gallery output). Other types are `400 validation_error`; an unknown or foreign file is `404 file_not_found`.
+- At most **50 faces** per user: one more is `409 face_limit_reached`.
+- An unknown face (or someone else's) is `404 face_not_found` on `PATCH`, `DELETE` and face swap.
+- While a face uses a file, housekeeping does not delete it (even an old, otherwise unused upload), and trashing the job
+  that produced it does not hide it.
+
+**`POST /images/:fileId/face-swap`**: `:fileId` is the target image (one of the user's images; `404 file_not_found`
+otherwise, `400 validation_error` if it is not an image).
+
+| field | type | default | notes |
+|---|---|---|---|
+| `face_id` | string | required | a saved face of the user's |
+| `n` | int 1–4 | `1` | how many takes to make in parallel |
+| `callback_url` | URL | – | POSTed when each job finishes (§9) |
+
+- The response is the same batch as `POST /images` with `n` (follow it with `/images/batches/:id`, its `/events`, or the
+  gallery). It never waits for the images.
+- Each job is a Qoder edit with `input_file_ids: [target, face file]` and a fixed prompt (no enhancer, no variations).
+  The `size` is the allowed size whose aspect ratio is closest to the target image's (e.g. a 3:2 photo → `1536x1024`).
+- The jobs' `request` has **`face_swap: {source_file_id, face_id, face_name}`** so the gallery can show "Face swap: <name>"
+  and link to the original. It stays when the face is later renamed or deleted (`face_name` is the name at the time).
+
 ---
 
 ## 9. Webhooks
@@ -967,9 +1011,9 @@ Branch on `code`, not on `message`. `details` appears only on some errors.
 | 400 | `model_not_supported` / `no_models_available` | a media model was used for chat / no Qoder model is available at all |
 | 401 | `unauthorized` | the credential is missing, invalid or expired. Refresh the token, or log in again |
 | 403 | `forbidden` / `account_disabled` / `invalid_signature` | not an admin / account disabled / the media URL expired or was tampered with |
-| 404 | `not_found`, `file_not_found` | the resource does not exist or belongs to someone else |
+| 404 | `not_found`, `file_not_found`, `face_not_found` | the resource does not exist or belongs to someone else |
 | 409 | `conversation_busy` | a turn is already running. Wait, or call `/interrupt` |
-| 409 | `email_taken`, `job_not_completed` | |
+| 409 | `email_taken`, `job_not_completed`, `face_limit_reached` | |
 | 413 | `file_too_large`, `attachment_too_large` | see the limits in §12 |
 | 429 | `credit_limit_exceeded` | the monthly credit limit has been reached |
 | 502 / 503 | `upstream_unavailable`, `upstream_auth`, `upstream_*` | a Qoder problem. Retry later |
@@ -991,6 +1035,7 @@ Treat any `429` or `5xx` as retryable.
 | Image prompt | 4000 characters (Folax: 1500; under `auto` a longer prompt goes to Qoder with `fallback_reason: "prompt_too_long_for_folax"`). 1 image per job on Qoder, 2 on Folax |
 | Jobs per request (`n`) | 1–10, in parallel (Qoder: 1 image per job, Folax: 2) |
 | Image inputs (edit) | 3 |
+| Saved faces | 50 per user. Face swap `n`: 1–4 |
 | Video `seconds` | 2–30 or -1. Resolution `480P`, `720P` or `1080P`. 7 ratios (§8) |
 | Video references | 1–10, or first frame (+ last frame) |
 | Turn timeout | 45 min |

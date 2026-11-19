@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or, type SQL, sql } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
-import { conversations, files, mediaJobs, messages, users } from '../db/schema.js';
+import { conversations, faces, files, mediaJobs, messages, users } from '../db/schema.js';
 import { AppError, notFound } from '../errors.js';
 import type { Logger } from '../log.js';
 import { isTerminal, type MediaJob, type MediaJobView, type MediaService } from './media.js';
@@ -38,7 +38,7 @@ export interface TrashItem {
 /**
  * The gallery trash. Trashing a job hides it (and its output files: their URLs 404) right away; housekeeping deletes
  * it for good after the grace period, unless restored first. A file is only deleted from disk when nothing live
- * still uses it: another job (as output or input) or a message in a chat that is not archived.
+ * still uses it: another job (as output or input), a message in a chat that is not archived, or a saved face.
  */
 export class MediaTrash {
   constructor(private readonly d: { db: DB; store: MediaStore; media: MediaService; log: Logger }) {}
@@ -235,15 +235,21 @@ export class MediaTrash {
 
   // ── references ────────────────────────────────────────────────────────────
 
-  /** Hide trashed outputs (their URLs 404), except files a live chat message shows. */
+  /** Hide trashed outputs (their URLs 404), except files a live chat message shows or a saved face uses. */
   private async hideFiles(ids: string[], at: Date) {
     const hide: string[] = [];
-    for (const id of new Set(ids)) if (!(await this.inChat(id, 'active'))) hide.push(id);
+    for (const id of new Set(ids)) if (!(await this.inChat(id, 'active')) && !(await this.inFace(id))) hide.push(id);
     if (hide.length) await this.d.db.update(files).set({ deletedAt: at }).where(inArray(files.id, hide));
   }
 
   private async inUse(fileId: string, chats: 'active' | 'all', excludeJobIds: string[]): Promise<boolean> {
-    return (await this.inJob(fileId, excludeJobIds)) || (await this.inChat(fileId, chats));
+    return (await this.inJob(fileId, excludeJobIds)) || (await this.inChat(fileId, chats)) || (await this.inFace(fileId));
+  }
+
+  /** Reference image of a saved face (face swap). */
+  private async inFace(fileId: string): Promise<boolean> {
+    const [row] = await this.d.db.select({ id: faces.id }).from(faces).where(eq(faces.fileId, fileId)).limit(1);
+    return !!row;
   }
 
   /** Output or input (edit image, video frame, reference) of any remaining job, trashed ones included. */

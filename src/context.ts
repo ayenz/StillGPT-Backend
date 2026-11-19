@@ -6,6 +6,7 @@ import { EventBus } from './core/bus.js';
 import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { EnhancerInstructions } from './core/enhancerInstructions.js';
+import { FaceService } from './core/faces.js';
 import { ReferenceReader } from './core/references.js';
 import { PromptVariator } from './core/variations.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
@@ -43,6 +44,8 @@ export interface AppContext {
   auth: AuthService;
   passkeys: PasskeyService;
   media: MediaService;
+  /** Saved faces for face swap. */
+  faces: FaceService;
   enhancer: PromptEnhancer;
   enhancerInstructions: EnhancerInstructions;
   variator: PromptVariator;
@@ -163,6 +166,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     queueRetryDelaysMs: config.MEDIA_QUEUE_RETRY_DELAYS_MS,
     drainingRetryDelaysMs: config.MEDIA_DRAINING_RETRY_DELAYS_MS,
   });
+  const faces = new FaceService({ db, store });
   const trash = new MediaTrash({ db, store, media, log: log.child({ mod: 'trash' }) });
   const mediaHousekeeper = new MediaHousekeeper({ db, trash, log: log.child({ mod: 'media_housekeeping' }) });
 
@@ -186,6 +190,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     auth,
     passkeys,
     media,
+    faces,
     enhancer,
     enhancerInstructions,
     variator,

@@ -236,6 +236,20 @@ export const mediaJobs = pgTable(
   ],
 );
 
+/** Saved identities for face swap: a named reference image (single portrait or a 3x3 angle sheet) of the user's. */
+export const faces = pgTable(
+  'faces',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Kept alive by media housekeeping while a face uses it; a face disappears with its file. */
+    fileId: text('file_id').notNull().references(() => files.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+  },
+  (t) => [index('faces_user_idx').on(t.userId)],
+);
+
 // ── webhooks & usage ────────────────────────────────────────────────────────
 
 export const webhooks = pgTable('webhooks', {

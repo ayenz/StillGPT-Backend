@@ -43,6 +43,13 @@
       "when": 1794999150105,
       "tag": "0005_gallery_paging",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795052596525,
+      "tag": "0006_face_swap",
+      "breakpoints": true
     }
   ]
 }
