@@ -3,6 +3,7 @@ import type { AppContext } from '../../context.js';
 import { FOLAX_IMAGE_MODEL, FOLAX_VIDEO_MODEL, IMAGE_MODEL, type ModelRow, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, anthropicErrorBody } from '../../errors.js';
 import type { Env } from '../../http.js';
+import { FOLAX_CHAT_MODELS, FOLAX_MODEL_PREFIX } from '../../core/folaxChat.js';
 import { publicModelId } from './turn.js';
 
 interface ModelEntry {
@@ -12,6 +13,10 @@ interface ModelEntry {
   extra: {
     display_name: string;
     kind: 'alias' | 'model' | 'image' | 'video';
+    /** Absent = Qoder. */
+    provider?: 'folax';
+    /** Folax chat models: no tools / documents, server-forced "Folax by Infinix" persona. */
+    tools?: boolean;
     resolves_to?: string;
     price_factor?: number | null;
     vision?: boolean;
@@ -42,6 +47,16 @@ function catalog(ctx: AppContext, bootSec: number): ModelEntry[] {
   return [
     ...aliases,
     ...ctx.models.listActive().map(modelEntry),
+    ...(ctx.folax
+      ? FOLAX_CHAT_MODELS.map(
+          (m): ModelEntry => ({
+            id: FOLAX_MODEL_PREFIX + m.id,
+            displayName: `${m.name} (via Folax)`,
+            created: bootSec,
+            extra: { display_name: `${m.name} (via Folax)`, kind: 'model', provider: 'folax', price_factor: 0, vision: true, efforts: null, tools: false },
+          }),
+        )
+      : []),
     media(IMAGE_MODEL, 'image', 'Qoder Image (ImageGen)'),
     ...(ctx.folax ? [media(FOLAX_IMAGE_MODEL, 'image', 'Folax Image (fast, 2 images per call; edits: 1 input image, shared weekly quota)')] : []),
     media(VIDEO_MODEL, 'video', 'Qoder Video (VideoGen)'),
@@ -49,7 +64,7 @@ function catalog(ctx: AppContext, bootSec: number): ModelEntry[] {
   ];
 }
 
-const openaiModel = (m: ModelEntry) => ({ id: m.id, object: 'model', created: m.created, owned_by: 'qoder', stillgpt: m.extra });
+const openaiModel = (m: ModelEntry) => ({ id: m.id, object: 'model', created: m.created, owned_by: m.extra.provider ?? 'qoder', stillgpt: m.extra });
 const anthropicModel = (m: ModelEntry) => ({
   type: 'model',
   id: m.id,

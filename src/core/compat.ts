@@ -39,6 +39,8 @@ export interface CompatTurn {
  * After the turn completes, the fingerprint of (history + last + reply) is stored so the next call hits.
  */
 export async function startCompatTurn(ctx: AppContext, r: CompatTurnRequest): Promise<CompatTurn> {
+  // a Folax model that cannot take this request fails before a conversation is created or switched to it
+  ctx.turns.assertFolaxRequest(r.model, r.last);
   const scope = `${r.source}|${r.profile}|${sha256(r.system ?? '')}`;
   let conversation: ConversationRow | null = null;
   let preamble: string | undefined;

@@ -25,6 +25,30 @@ export const forbidden = (message = 'Not allowed') => new AppError(403, 'forbidd
 export const notFound = (what = 'Resource') => new AppError(404, 'not_found', `${what} not found`);
 export const conflict = (message: string, code = 'conflict') => new AppError(409, code, message);
 
+/**
+ * HTTP status for a failed turn's error code on the compat (OpenAI/Anthropic) endpoints. Every Qoder failure stays 502
+ * as before; only the optional Folax provider's codes keep their meaning: busy → 429, down → 503, too slow → 504.
+ */
+export function turnErrorStatus(code: string | undefined): number {
+  switch (code) {
+    case 'provider_busy':
+      return 429;
+    case 'provider_unavailable':
+      return 503;
+    case 'folax_timeout':
+      return 504;
+    case 'model_not_found':
+    case 'invalid_image':
+      return 400;
+    case 'content_rejected':
+    case 'image_rejected':
+    case 'unsupported_request':
+      return 422;
+    default:
+      return 502;
+  }
+}
+
 export function toAppError(err: unknown): AppError {
   if (err instanceof AppError) return err;
   const message = err instanceof Error ? err.message : String(err);

@@ -1,5 +1,6 @@
 import { AppError } from '../errors.js';
 import type { Logger } from '../log.js';
+import { parseSse } from '../qoder/sse.js';
 
 /** Ratios the Folax adapter accepts (config/service.yaml `allowed_ratios`). */
 export const FOLAX_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16'] as const;
@@ -66,6 +67,12 @@ export interface FolaxEditResult extends FolaxImage {
   height: number | null;
   /** The adapter answered from its idempotency store (a retry of an earlier call). */
   replayed: boolean;
+}
+
+/** OpenAI chat message as the adapter takes it (images only as base64 data URLs in the last message). */
+export interface FolaxChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string | ({ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } })[];
 }
 
 /** An adapter video job (`/v1/videos`). Output: always ~5 s, 720p, no audio, aspect of the input image, vendor watermark. */
@@ -223,8 +230,13 @@ export class FolaxClient {
   async failure(path: string, res: Response): Promise<AppError> {
     const body = await res.json().catch(() => null);
     const err = folaxError(res.status, body, res.headers.get('retry-after'));
+    this.o.log.warn('folax.failed', { path, status: res.status, code: String(err.details?.folax_code) });
+    return this.noteError(err);
+  }
+
+  /** Marks Folax down on `auth_invalid` / `not_configured` (also for errors inside a chat stream). */
+  private noteError(err: AppError): AppError {
     const folaxCode = String(err.details?.folax_code);
-    this.o.log.warn('folax.failed', { path, status: res.status, code: folaxCode });
     if (DOWN_CODES.has(folaxCode)) {
       this.upstreamCache = {
         at: Date.now(),
@@ -292,6 +304,60 @@ export class FolaxClient {
     const res = await this.send(`/v1/videos/${encodeURIComponent(id)}/content`, { timeoutMs: 180_000 });
     if (!res.ok) throw await this.failure('/v1/videos/content', res);
     return Buffer.from(await res.arrayBuffer());
+  }
+
+  /**
+   * `POST /v1/chat/completions` with `stream: true`. Resolves once the adapter accepted the request (so 4xx/429/5xx
+   * throw before any text), then yields text deltas until the `stop` chunk. A mid-stream `{"error":…}` chunk, or a stream
+   * that ends without `stop`, throws. Aborting `signal` cancels the upstream request too.
+   */
+  async chat(o: { model: string; messages: FolaxChatMessage[]; signal?: AbortSignal; timeoutMs?: number }): Promise<AsyncGenerator<string>> {
+    // adapter: up to 15 s for a slot + 120 s upstream
+    const res = await this.send('/v1/chat/completions', {
+      json: { model: o.model, messages: o.messages, stream: true },
+      signal: o.signal,
+      timeoutMs: o.timeoutMs ?? this.o.timeoutMs ?? 180_000,
+    });
+    if (!res.ok) throw await this.failure('/v1/chat/completions', res);
+    if (!res.body) throw new AppError(502, 'folax_failed', 'Folax returned an empty stream', { provider: 'folax' });
+    const body = res.body;
+    const log = this.o.log;
+    const note = (err: AppError) => this.noteError(err);
+    return (async function* () {
+      let stopped = false;
+      try {
+        for await (const msg of parseSse(body, o.signal)) {
+          if (msg.data === '[DONE]') break;
+          let chunk: { error?: unknown; choices?: { delta?: { content?: unknown }; finish_reason?: unknown }[] };
+          try {
+            chunk = JSON.parse(msg.data);
+          } catch {
+            continue;
+          }
+          if (chunk.error) {
+            log.warn('folax.chat_stream_error', { code: (chunk.error as { code?: unknown }).code });
+            throw note(folaxError(502, chunk));
+          }
+          const choice = chunk.choices?.[0];
+          const text = choice?.delta?.content;
+          if (typeof text === 'string' && text) yield text;
+          if (choice?.finish_reason) stopped = true;
+        }
+      } catch (err) {
+        if (err instanceof AppError || o.signal?.aborted) throw err;
+        const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+        throw timedOut
+          ? new AppError(504, 'folax_timeout', 'Folax took too long to answer', { provider: 'folax' })
+          : new AppError(502, 'folax_failed', `Folax stream broke: ${(err as Error).message}`, { provider: 'folax' });
+      } finally {
+        // free the connection however the loop ended (error chunk, early return, consumer stopped)
+        await body.cancel().catch(() => {});
+      }
+      if (!stopped && !o.signal?.aborted) {
+        log.warn('folax.chat_incomplete', {});
+        throw new AppError(502, 'folax_failed', 'Folax ended the answer early', { provider: 'folax' });
+      }
+    })();
   }
 
   /** True only when the last known upstream state is `down` (no probe; cheap pre-check before creating a job). */

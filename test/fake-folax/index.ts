@@ -44,6 +44,10 @@ export async function startFakeFolax() {
     /** GET /v1/videos/{id} answers `processing` this many times, then `succeeded` (or `videoFail`). */
     videoPolls: 2,
     videoFail: null as null | { code: string; message: string },
+    chatReply: null as string | null,
+    chatPieceDelayMs: 0,
+    chatMidError: null as string | null,
+    chatNoStop: false,
   };
   interface FakeVideo {
     id: string;
@@ -170,6 +174,42 @@ export async function startFakeFolax() {
     return [200, reply];
   });
 
+  /** Chat streams that are still open (closed by the client = aborted). */
+  const chatStreams = { open: 0, aborted: 0 };
+
+  /** POST /v1/chat/completions, `stream: true`: role chunk, the reply in pieces, stop, [DONE] (like the adapter). */
+  async function chat(body: unknown, res: ServerResponse) {
+    const b = body as { model?: string; stream?: boolean; messages?: unknown[] };
+    if (!['folax', 'chatgpt', 'gemini', 'metaai', 'grok'].includes(String(b?.model)))
+      return res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: 'model', type: 'invalid_request_error', code: 'model_not_found', param: null } }));
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    const chunk = (delta: unknown, finish: string | null = null) =>
+      `data: ${JSON.stringify({ id: 'chatcmpl-x', object: 'chat.completion.chunk', created: 1, model: b.model, choices: [{ index: 0, delta, logprobs: null, finish_reason: finish }] })}\n\n`;
+    let closed = false;
+    chatStreams.open++;
+    res.on('close', () => {
+      if (!res.writableFinished) chatStreams.aborted++;
+      closed = true;
+      chatStreams.open--;
+    });
+    const reply = state.chatReply ?? `Halo dari ${b.model}, saya Folax by Infinix.`;
+    const pieces = reply.match(/.{1,8}/gs) ?? [];
+    res.write(chunk({ role: 'assistant', content: '' }));
+    for (const [i, p] of pieces.entries()) {
+      if (closed) return;
+      if (state.chatPieceDelayMs) await new Promise((r) => setTimeout(r, state.chatPieceDelayMs));
+      if (closed) return;
+      res.write(chunk({ content: p }));
+      if (i === 0 && state.chatMidError) {
+        res.write(`data: ${JSON.stringify({ error: { message: 'upstream putus', type: 'api_error', code: state.chatMidError, param: null } })}\n\n`);
+        return res.end('data: [DONE]\n\n');
+      }
+    }
+    if (state.chatNoStop) return res.end();
+    res.write(chunk({}, 'stop'));
+    res.end('data: [DONE]\n\n');
+  }
+
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
@@ -190,6 +230,7 @@ export async function startFakeFolax() {
       const scripted = failures.get(key)?.shift();
       if (scripted)
         return reply(scripted.status, { error: { message: scripted.message ?? scripted.code, type: 'api_error', code: scripted.code, param: null } }, scripted.headers);
+      if (key === 'POST /v1/chat/completions') return void chat(body, res);
       let handler = routes.get(key);
       let params: string[] = [];
       if (!handler) {
@@ -233,6 +274,10 @@ export async function startFakeFolax() {
       state.editDelayMs = 0;
       state.videoPolls = 2;
       state.videoFail = null;
+      state.chatReply = null;
+      state.chatPieceDelayMs = 0;
+      state.chatMidError = null;
+      state.chatNoStop = false;
       editReplies.clear();
       videos.clear();
       videoKeys.clear();
@@ -244,6 +289,9 @@ export async function startFakeFolax() {
       videos.clear();
     },
     videoCount: () => videoSeq,
+    chatStreams,
+    /** The `messages` of the last chat request. */
+    lastChat: () => (calls.filter((c) => c.path === '/v1/chat/completions').at(-1)?.body as { model: string; messages: any[]; stream: boolean }) ?? null,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }

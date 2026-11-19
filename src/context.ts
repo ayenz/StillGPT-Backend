@@ -124,7 +124,18 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const turnstileCfg = turnstileConfig(config);
   const turnstile = turnstileCfg ? new TurnstileVerifier(turnstileCfg, log.child({ mod: 'turnstile' }), o.fetchImpl) : null;
   const webhooks = new WebhookService(db, log.child({ mod: 'webhooks' }), o.fetchImpl, { pollIntervalMs: config.WEBHOOK_POLL_INTERVAL_MS });
-  const turns = new TurnRunner({ db, qoder, agents, models, store, usage, conversations, bus, log: log.child({ mod: 'turns' }), sessionBudgetCredits: config.SESSION_BUDGET_CREDITS });
+  const folax =
+    config.FOLAX_URL && config.FOLAX_API_KEY
+      ? new FolaxClient({
+          baseUrl: config.FOLAX_URL,
+          apiKey: config.FOLAX_API_KEY,
+          concurrency: config.FOLAX_CONCURRENCY,
+          log: log.child({ mod: 'folax' }),
+          fetchImpl: o.fetchImpl,
+        })
+      : null;
+  models.folaxEnabled = !!folax;
+  const turns = new TurnRunner({ db, qoder, agents, models, store, usage, conversations, bus, log: log.child({ mod: 'turns' }), sessionBudgetCredits: config.SESSION_BUDGET_CREDITS, folax });
   const housekeeper = new QoderHousekeeper({
     db,
     qoder,
@@ -149,16 +160,6 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions, references });
   const variator = new PromptVariator({ conversations, turns, references, log: log.child({ mod: 'variations' }), instructions: enhancerInstructions });
   const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
-  const folax =
-    config.FOLAX_URL && config.FOLAX_API_KEY
-      ? new FolaxClient({
-          baseUrl: config.FOLAX_URL,
-          apiKey: config.FOLAX_API_KEY,
-          concurrency: config.FOLAX_CONCURRENCY,
-          log: log.child({ mod: 'folax' }),
-          fetchImpl: o.fetchImpl,
-        })
-      : null;
   const faceswap = config.FACESWAP_URL
     ? new FaceSwapClient({
         baseUrl: config.FACESWAP_URL,

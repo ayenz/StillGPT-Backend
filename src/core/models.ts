@@ -1,10 +1,11 @@
 import { eq, inArray } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
 import { models } from '../db/schema.js';
-import { badRequest } from '../errors.js';
+import { AppError, badRequest } from '../errors.js';
 import type { Logger } from '../log.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderModel } from '../qoder/types.js';
+import { FOLAX_MODEL_PREFIX, folaxModelName, isFolaxModelId } from './folaxChat.js';
 
 export type ModelRow = typeof models.$inferSelect;
 
@@ -19,6 +20,8 @@ export interface Resolution {
   requested: string;
   /** Set when we could not honour the request and picked another model. */
   fallbackReason?: string;
+  /** `folax` for `folax/<model>` ids (Folax adapter chat); absent = Qoder. */
+  provider?: 'folax';
 }
 
 /** Virtual model ids for media endpoints (not chat models). */
@@ -41,6 +44,8 @@ export class ModelRegistry {
   private lastSync = 0;
   private syncing?: Promise<ModelChange[]>;
   onChange: (changes: ModelChange[]) => void = () => {};
+  /** Folax chat models (`folax/…`) can be used: the Folax adapter is configured. */
+  folaxEnabled = false;
 
   constructor(
     private readonly db: DB,
@@ -125,6 +130,12 @@ export class ModelRegistry {
    */
   resolve(requested: string | undefined | null): Resolution {
     const raw = (requested ?? '').trim() || 'default';
+    // Folax chat models never fall back to Qoder (or the other way round): an unknown or unconfigured one is an error
+    if (isFolaxModelId(raw)) {
+      const name = folaxModelName(raw);
+      if (!this.folaxEnabled) throw new AppError(400, 'provider_unavailable', 'Folax models are not configured on this server', { param: 'model' });
+      return { model: FOLAX_MODEL_PREFIX + name, requested: raw, provider: 'folax' };
+    }
     const id = raw.replace(/^qoder\//, '');
     if (id === IMAGE_MODEL || id === FOLAX_IMAGE_MODEL || id === VIDEO_MODEL || id === FOLAX_VIDEO_MODEL) throw badRequest(`'${id}' is a media model; use the images/videos endpoints`, 'model_not_supported');
 

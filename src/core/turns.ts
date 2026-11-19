@@ -1,14 +1,16 @@
-import { and, eq, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, lt, or, sql } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
-import { type ArtifactRef, type ContentBlock, conversations } from '../db/schema.js';
+import { type ArtifactRef, type ContentBlock, conversations, messages as messageRows } from '../db/schema.js';
 import { AppError, conflict, toAppError } from '../errors.js';
 import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
+import type { FolaxClient } from '../providers/folax.js';
 import { isModelUnavailable, type QoderClient } from '../qoder/client.js';
 import type { QoderContentBlock, QoderEvent, QoderStreamFrame } from '../qoder/types.js';
 import { AGENT_BASE_MODEL, type AgentPool } from './agentPool.js';
 import { prepareInput, reupload } from './attachments.js';
 import type { EventBus } from './bus.js';
+import { assertFolaxContent, buildFolaxMessages, FOLAX_MODEL_PREFIX, isFolaxModelId } from './folaxChat.js';
 import type { ConversationRow, ConversationService } from './conversations.js';
 import { type Artifact, type Credits, type StopReason, type TurnEvent, zeroCredits } from './events.js';
 import type { ModelRegistry } from './models.js';
@@ -138,6 +140,8 @@ export interface TurnRunnerDeps {
   bus: EventBus;
   log: Logger;
   sessionBudgetCredits?: number;
+  /** Folax adapter for `folax/…` chat models; null/absent when not configured. */
+  folax?: FolaxClient | null;
 }
 
 /**
@@ -146,6 +150,8 @@ export interface TurnRunnerDeps {
  */
 export class TurnRunner {
   private readonly active = new Map<string, TurnHandle>();
+  /** Running Folax turns by conversation id, for `interrupt` (they have no Qoder session to interrupt). */
+  private readonly folaxAborts = new Map<string, AbortController>();
 
   constructor(private readonly d: TurnRunnerDeps) {}
 
@@ -158,6 +164,8 @@ export class TurnRunner {
   async start(req: StartTurn): Promise<TurnHandle> {
     await this.d.usage.assertWithinLimit(req.userId);
     const conv = await this.d.conversations.get(req.conversationId, req.userId);
+    // before anything is stored: what a Folax model cannot do fails here with a clear 4xx/503
+    if (isFolaxModelId(conv.model)) this.assertFolaxTurn(conv, req);
     await this.lock(conv.id);
     try {
       const userMsg = await this.d.conversations.addMessage({ conversationId: conv.id, role: 'user', content: req.content });
@@ -174,6 +182,11 @@ export class TurnRunner {
   /** Ask the agent to stop the running turn (it ends with stopReason `interrupted`). */
   async interrupt(conversationId: string, userId: string) {
     const conv = await this.d.conversations.get(conversationId, userId);
+    const folaxTurn = this.folaxAborts.get(conv.id);
+    if (folaxTurn) {
+      folaxTurn.abort();
+      return true;
+    }
     if (!conv.qoderSessionId || conv.status !== 'busy') return false;
     await this.d.qoder.sendEvents(conv.qoderSessionId, [{ type: 'user.interrupt' }]);
     return true;
@@ -214,32 +227,37 @@ export class TurnRunner {
       modelUnavailable: false,
     };
     let stopReason: StopReason = 'error';
+    const folaxTurn = isFolaxModelId(conv.model);
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), TURN_TIMEOUT_MS);
 
     try {
-      const profileTools = (PROFILES[conv.profile as ProfileName] ?? PROFILES.chat).tools;
-      const input = await prepareInput(req.content, this.d.store, this.d.qoder, req.userId, { mountImages: profileTools.length > 0 });
-      let preamble = req.preamble;
+      if (folaxTurn) {
+        stopReason = await this.runFolax(st, emit, timeout.signal);
+      } else {
+        const profileTools = (PROFILES[conv.profile as ProfileName] ?? PROFILES.chat).tools;
+        const input = await prepareInput(req.content, this.d.store, this.d.qoder, req.userId, { mountImages: profileTools.length > 0 });
+        let preamble = req.preamble;
 
-      for (let attempt = 0; ; attempt++) {
-        const ensured = await this.ensureSession(st, input.hasDocuments, emit);
-        if (ensured.recreated && !preamble) preamble = await this.historyPreamble(conv.id, handle.userMessageId);
-        if (attempt === 0) emit({ type: 'turn.started', conversationId: conv.id, messageId: handle.messageId, model: st.model });
+        for (let attempt = 0; ; attempt++) {
+          const ensured = await this.ensureSession(st, input.hasDocuments, emit);
+          if (ensured.recreated && !preamble) preamble = await this.historyPreamble(conv.id, handle.userMessageId);
+          if (attempt === 0) emit({ type: 'turn.started', conversationId: conv.id, messageId: handle.messageId, model: st.model });
 
-        for (const m of input.mounts) await this.mount(st.sessionId, m, req.userId);
-        const content: QoderContentBlock[] = preamble ? [{ type: 'text', text: preamble }, ...input.content] : input.content;
+          for (const m of input.mounts) await this.mount(st.sessionId, m, req.userId);
+          const content: QoderContentBlock[] = preamble ? [{ type: 'text', text: preamble }, ...input.content] : input.content;
 
-        stopReason = await this.pump(st, content, emit, timeout.signal);
-        await Promise.all(st.pending);
+          stopReason = await this.pump(st, content, emit, timeout.signal);
+          await Promise.all(st.pending);
 
-        if (st.modelUnavailable && attempt < MAX_MODEL_RETRIES) {
-          log.warn('turn.model_unavailable_retry', { model: st.model });
-          await this.d.models.markUnavailable(st.model);
-          Object.assign(st, { texts: [], modelUnavailable: false, error: undefined });
-          continue;
+          if (st.modelUnavailable && attempt < MAX_MODEL_RETRIES) {
+            log.warn('turn.model_unavailable_retry', { model: st.model });
+            await this.d.models.markUnavailable(st.model);
+            Object.assign(st, { texts: [], modelUnavailable: false, error: undefined });
+            continue;
+          }
+          break;
         }
-        break;
       }
     } catch (err) {
       const e = timeout.signal.aborted ? new AppError(504, 'turn_timeout', 'The turn took too long and was stopped') : toAppError(err);
@@ -268,7 +286,8 @@ export class TurnRunner {
     let extra: TurnEvent[] = [];
     try {
       await this.persist(st, result);
-      await this.d.usage.record({ userId: req.userId, kind: req.kind ?? 'chat', model: st.model, conversationId: conv.id, jobId: req.jobId, credits });
+      // Folax turns cost no credits; `free` still counts them in the usage stats
+      await this.d.usage.record({ userId: req.userId, kind: req.kind ?? 'chat', model: st.model, conversationId: conv.id, jobId: req.jobId, credits, ...(folaxTurn ? { free: true } : {}) });
       extra = (await req.beforeComplete?.(result)) ?? [];
     } catch (err) {
       log.error('turn.persist_failed', { err });
@@ -282,6 +301,96 @@ export class TurnRunner {
     emit({ type: 'turn.completed', messageId: handle.messageId, stopReason, text, artifacts: st.artifacts, credits });
     handle.finish(result);
     if (req.oneShot) void this.releaseSession(conv.id);
+  }
+
+  /** Chat-only, configured, not known down, and content a Folax model can take. Throws before anything is stored. */
+  private assertFolaxTurn(conv: ConversationRow, req: StartTurn) {
+    if (req.oneShot || req.kind === 'image' || req.kind === 'video' || conv.metadata?.hidden)
+      throw new AppError(400, 'model_not_supported', 'Folax models are only available for chat', { param: 'model' });
+    this.assertFolaxRequest(conv.model, req.content);
+  }
+
+  /**
+   * The model/content part of the Folax checks, for callers that must fail before creating or updating a conversation
+   * (OpenAI/Anthropic compat). No-op for non-Folax models.
+   */
+  assertFolaxRequest(model: string, content: ContentBlock[]) {
+    if (!isFolaxModelId(model)) return;
+    this.d.models.resolve(model); // unknown folax/… → 400 model_not_found; not configured → 400 provider_unavailable
+    if (!this.d.folax) throw new AppError(400, 'provider_unavailable', 'Folax models are not configured on this server', { param: 'model' });
+    if (this.d.folax.knownDown()) throw new AppError(503, 'provider_unavailable', 'Folax is unavailable right now', { provider: 'folax' });
+    assertFolaxContent(content);
+  }
+
+  /**
+   * One turn on a Folax chat model (`folax/<model>`): stateless, so the context is rebuilt from our DB every time.
+   * `turn.started` is emitted only once the adapter accepted the request, so early failures (busy, down, bad request)
+   * reach compat clients as plain HTTP errors. Interrupt aborts the request and keeps the partial text.
+   */
+  private async runFolax(st: RunState, emit: (e: TurnEvent) => void, signal: AbortSignal): Promise<StopReason> {
+    const { conv, req, handle } = st;
+    const folax = this.d.folax;
+    st.model = conv.model.trim().toLowerCase();
+    const interrupt = new AbortController();
+    this.folaxAborts.set(conv.id, interrupt);
+    let text = '';
+    try {
+      if (!folax) throw new AppError(503, 'provider_unavailable', 'Folax models are not configured on this server');
+      const res = this.d.models.resolve(conv.model);
+      st.model = res.model;
+
+      const profile = PROFILES.chat; // no tools on Folax, whatever the conversation's profile
+      // the newest 200 messages (more never fit the adapter's limits), oldest first
+      const recent = await this.d.db.select().from(messageRows).where(eq(messageRows.conversationId, conv.id)).orderBy(desc(messageRows.createdAt)).limit(201);
+      const history = recent
+        .reverse()
+        .filter((m) => m.id !== handle.userMessageId && (m.role === 'user' || m.role === 'assistant'))
+        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content, artifacts: m.artifacts ?? [] }));
+      const messages = await buildFolaxMessages({
+        system: conv.systemPrompt ? `${profile.system}\n\n${conv.systemPrompt}` : profile.system,
+        history,
+        current: req.content,
+        preamble: req.preamble,
+        store: this.d.store,
+        userId: req.userId,
+      });
+
+      const stream = await folax.chat({ model: res.model.slice(FOLAX_MODEL_PREFIX.length), messages, signal: AbortSignal.any([signal, interrupt.signal]) });
+      // only once Folax accepted the turn: a refused one (busy, down, bad input) leaves the Qoder session as it was
+      await this.detachQoderSession(st);
+      emit({ type: 'turn.started', conversationId: conv.id, messageId: handle.messageId, model: st.model });
+      for await (const delta of stream) {
+        text += delta;
+        emit({ type: 'text.delta', text: delta });
+      }
+      if (signal.aborted) throw new AppError(504, 'turn_timeout', 'The turn took too long and was stopped');
+      return interrupt.signal.aborted ? 'interrupted' : 'end_turn';
+    } catch (err) {
+      if (interrupt.signal.aborted && !signal.aborted) return 'interrupted';
+      throw err;
+    } finally {
+      this.folaxAborts.delete(conv.id);
+      // partial text (interrupt, broken stream) is kept like a Qoder turn's
+      if (text) {
+        st.texts.push(text);
+        emit({ type: 'text.completed', text });
+      }
+    }
+  }
+
+  /**
+   * A conversation switching from a Qoder model to a Folax one: its Qoder session will miss the Folax turns, so it is
+   * archived now. The next Qoder turn then starts a new session with the whole history as a transcript (the
+   * existing "session lost" path). Cumulative-usage bookkeeping of the old session is reset with it.
+   */
+  private async detachQoderSession(st: RunState) {
+    const sid = st.conv.qoderSessionId;
+    if (!sid) return;
+    const { applied: _applied, usage: _usage, ...metadata } = st.conv.metadata ?? {};
+    await this.d.db.update(conversations).set({ qoderSessionId: null, lastEventId: null, metadata }).where(eq(conversations.id, st.conv.id));
+    st.conv = { ...st.conv, qoderSessionId: null, lastEventId: null, metadata };
+    st.lastEventId = null;
+    void this.d.qoder.archiveSession(sid).catch((err) => this.d.log.warn('turn.session_release_failed', { conversationId: st.conv.id, err }));
   }
 
   /**
@@ -583,7 +692,9 @@ export class TurnRunner {
 
   /** Rebuild context from our own DB when the upstream session was lost. */
   private async historyPreamble(conversationId: string, excludeMessageId: string): Promise<string | undefined> {
-    const msgs = (await this.d.conversations.messages(conversationId)).filter((m) => m.id !== excludeMessageId);
+    // the newest 200 messages, oldest first (a model switch Folax → Qoder rebuilds the context through here too)
+    const recent = await this.d.db.select().from(messageRows).where(eq(messageRows.conversationId, conversationId)).orderBy(desc(messageRows.createdAt)).limit(201);
+    const msgs = recent.reverse().filter((m) => m.id !== excludeMessageId);
     if (!msgs.length) return undefined;
     const lines = msgs.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join(' ')}`);
     return `Conversation so far (for context — continue from it):\n\n${lines.join('\n\n')}\n\n---\nNew message from the user:`;

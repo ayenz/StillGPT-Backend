@@ -7,6 +7,7 @@ import type { TurnHandle } from '../../core/turns.js';
 import { type ContentBlock, messages } from '../../db/schema.js';
 import { AppError, notFound } from '../../errors.js';
 import type { Env } from '../../http.js';
+import { FOLAX_CHAT_MODELS, FOLAX_MODEL_PREFIX } from '../../core/folaxChat.js';
 import { imageProviders } from './media.js';
 import { body, conversationView, limitParam, messageView, type SseEvent, sse, turnEventView, wantsStream } from './util.js';
 
@@ -53,7 +54,23 @@ export function conversationRoutes(ctx: AppContext) {
       context_window: m.defaultContextWindow,
       max_input_tokens: m.maxInputTokens,
       is_new: m.isNew,
+      provider: 'qoder' as 'qoder' | 'folax',
     }));
+    // Folax chat models (optional provider): chat only, no tools/documents, persona "Folax by Infinix"; GET /folax/status
+    if (ctx.folax)
+      for (const m of FOLAX_CHAT_MODELS)
+        data.push({
+          id: FOLAX_MODEL_PREFIX + m.id,
+          display_name: `${m.name} (via Folax)`,
+          price_factor: 0,
+          vision: true,
+          efforts: [],
+          default_effort: null,
+          context_window: null,
+          max_input_tokens: null,
+          is_new: false,
+          provider: 'folax',
+        });
     const aliases = ctx.models.aliasList().map((a) => ({ alias: a.alias, resolves_to: a.resolvesTo, chain: a.chain }));
     return c.json({ data, aliases, default_model: 'default', ...imageProviders(ctx) });
   });

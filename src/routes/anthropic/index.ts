@@ -3,8 +3,9 @@ import type { z } from 'zod';
 import type { AppContext } from '../../context.js';
 import { type CompatTurn, compatHeaders, estimateTokens, startCompatTurn } from '../../core/compat.js';
 import type { TurnEvent } from '../../core/events.js';
+import { isFolaxModelId } from '../../core/folaxChat.js';
 import type { ProfileName } from '../../core/profiles.js';
-import { AppError, badRequest } from '../../errors.js';
+import { AppError, badRequest, turnErrorStatus } from '../../errors.js';
 import { type Env, jsonBody, requireUser } from '../../http.js';
 import { artifactMarkdown, assertNoTools, promptText, systemText, toAnthropicStop, toCompatMessage, toContentBlocks } from './convert.js';
 import { countTokensRequest, type MessagesRequest, messagesRequest } from './schema.js';
@@ -76,12 +77,12 @@ async function startTurn(ctx: AppContext, c: Context<Env>, req: MessagesRequest)
   });
 }
 
-const publicModel = (id: string) => `qoder/${id}`;
+const publicModel = (id: string) => (isFolaxModelId(id) ? id : `qoder/${id}`);
 
 async function jsonReply(c: Context<Env>, { conversation, handle }: CompatTurn, inputTokens: number) {
   const result = await handle.done;
   if (result.stopReason === 'error') {
-    throw new AppError(502, result.error?.code ?? 'upstream_error', result.error?.message ?? 'The turn failed upstream');
+    throw new AppError(turnErrorStatus(result.error?.code), result.error?.code ?? 'upstream_error', result.error?.message ?? 'The turn failed upstream');
   }
   const model = publicModel(result.model);
   const text = result.text + result.artifacts.map(artifactMarkdown).join('');
@@ -107,7 +108,7 @@ async function awaitStart(events: AsyncIterator<TurnEvent>): Promise<string> {
     const { value: e, done } = await events.next();
     if (done) throw new AppError(502, 'upstream_error', 'The turn ended before it started');
     if (e.type === 'turn.started') return e.model;
-    if (e.type === 'error') throw new AppError(502, e.code, e.message);
+    if (e.type === 'error') throw new AppError(turnErrorStatus(e.code), e.code, e.message);
     if (e.type === 'turn.completed') throw new AppError(502, 'upstream_error', 'The turn failed before it started');
   }
 }

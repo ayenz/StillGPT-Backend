@@ -135,6 +135,16 @@ async function sendMessage(convId: string, text: string, attachments: string[], 
 - Satu percakapan hanya bisa memproses satu pesan sekaligus → `409 conversation_busy`. Nonaktifkan tombol kirim selama streaming.
 - Daftar percakapan: `GET /conversations?limit=20&before=<next_cursor>` (terbaru dulu). Judul terisi otomatis dari pesan pertama.
 - Ganti model atau system prompt di tengah percakapan: `PATCH /conversations/:id` — konteks tetap tersimpan.
+- **Model Folax (opsional):** `GET /models` → item dengan `provider: "folax"` (`folax/folax`, `folax/chatgpt`,
+  `folax/gemini`, `folax/metaai`, `folax/grok`). Kelompokkan terpisah di picker, misalnya bagian "via Folax".
+  - Semua model Folax mengaku **"Folax by Infinix"**. Ini paksaan dari server Folax.
+  - **Tanpa file/dokumen**: lampiran file → `400 unsupported_attachment`. Nonaktifkan tombol lampir file saat model
+    Folax dipilih.
+  - Maksimal **4 gambar** per pesan (JPEG/PNG/WebP). Gambar di pesan lama tidak dilihat ulang oleh model.
+  - Gratis, cepat (teks pertama ±2–7 detik). Tombol Stop tetap jalan.
+  - Kalau Folax sibuk atau mati, turn gagal dengan `error.code` `provider_busy` atau `provider_unavailable`. Tidak ada
+    pindah otomatis ke Qoder. Kalau `GET /folax/status` → `available: false`, nonaktifkan model Folax di picker.
+  - Pindah model Qoder ↔ Folax di tengah percakapan aman; konteks tetap terbawa.
 
 ---
 

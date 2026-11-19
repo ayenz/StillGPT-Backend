@@ -188,7 +188,10 @@ Returns the same usage object as `/me` (this calendar month, UTC).
   "data": [
     { "id": "efficient", "display_name": "Efficient", "price_factor": 0, "vision": true,
       "efforts": ["low", "high"], "default_effort": "high", "context_window": 200000,
-      "max_input_tokens": 200000, "is_new": false }
+      "max_input_tokens": 200000, "is_new": false, "provider": "qoder" },
+    { "id": "folax/chatgpt", "display_name": "ChatGPT (via Folax)", "price_factor": 0, "vision": true,
+      "efforts": [], "default_effort": null, "context_window": null, "max_input_tokens": null,
+      "is_new": false, "provider": "folax" }
   ],
   "aliases": [
     { "alias": "default", "resolves_to": "auto", "chain": ["auto", "efficient"] },
@@ -218,6 +221,37 @@ Returns the same usage object as `/me` (this calendar month, UTC).
 - `price_factor` is the relative credit cost. `0` means the model is free.
 - `image_providers` lists the image generators (see §8). `folax` is `available: false` when the server has no Folax
   configured; a UI can then hide the provider switch.
+- `provider` tells where a model runs: `qoder` (the default backend) or `folax` (see "Folax chat models" below).
+
+#### Folax chat models
+When the server has Folax configured, `data` also lists five optional chat models: `folax/folax`, `folax/chatgpt`,
+`folax/gemini`, `folax/metaai` and `folax/grok`. Use them like any model id, e.g. `POST /conversations {model:
+"folax/gemini"}`, `PATCH` a conversation's `model`, or `model` on the OpenAI/Anthropic endpoints. Know these limits:
+
+- **Persona:** every Folax model introduces itself as **"Folax by Infinix"**. Folax's server forces this persona, and
+  it cannot be changed. Your `system_prompt` is still used for style and language.
+- **Chat only:** no tools, no sandbox, and no documents.
+  - A conversation with the `assistant` profile behaves like `chat` on a Folax model.
+  - Attaching a file (`file` block / `attachments`) is `400 unsupported_attachment`, and nothing is stored.
+  - Folax models cannot be used for the prompt enhancer, prompt variations or media jobs.
+- **Images:** up to **4** JPEG/PNG/WebP images per message (`400 too_many_images` / `unsupported_attachment`).
+  - Only the images of the **current** message are sent. Earlier images become an `[image]` marker in the context.
+  - With an image attached, Folax answers with one shared vision model, whichever Folax model was picked.
+- **Context:** Folax keeps no state. StillGPT sends the recent history every time, as much as fits (about 18,000
+  characters). Very long conversations lose their oldest part on Folax.
+  - A single message is limited to 12,000 characters (`400 message_too_long`).
+- **Switching:** a conversation can switch between Qoder and Folax models at any time; both sides see the whole
+  conversation. Switching back to Qoder starts a fresh Qoder session that gets the history as a transcript.
+- **Cost and speed:** free (`credits: 0`). The first text arrives after ~1.5–3.5 s (ChatGPT 3–7 s). The text streams in
+  coarser pieces than Qoder. `temperature` and `max_tokens` are ignored, and token counts are estimates.
+- **Stop:** `POST /conversations/:id/interrupt` works, and the partial answer is kept.
+- **Failures** never fall back to Qoder. The turn fails with `provider_busy` (Folax is busy, retry shortly),
+  `provider_unavailable` (Folax is down; check `GET /folax/status`), `folax_timeout` or `folax_failed`.
+  - When Folax is already known to be down, `POST …/messages` is refused up front with `503 provider_unavailable`,
+    and the message is not stored.
+  - On the OpenAI/Anthropic endpoints these codes come with HTTP 429 / 503 / 504 / 502.
+- An unknown `folax/…` id is `400 model_not_found`. On a server without Folax, a `folax/…` id is
+  `400 provider_unavailable` and is never replaced by a Qoder model.
 
 ---
 
@@ -1212,6 +1246,7 @@ Branch on `code`, not on `message`. `details` appears only on some errors.
 | 429 | `credit_limit_exceeded` | the monthly credit limit has been reached |
 | 429 | `folax_quota_exceeded`, `provider_busy` | Folax only: the shared weekly quota is used up (wait until it resets) / Folax is busy (retry after `details.retry_after`). See §8 "Folax status" |
 | 503 | `provider_unavailable` | an optional provider (Folax) is down or not configured |
+| 400 | `unsupported_attachment`, `too_many_images`, `message_too_long` | Folax chat models only: files, GIFs, more than 4 images, or a message over 12,000 characters (§4 "Folax chat models") |
 | 502 / 503 | `upstream_unavailable`, `upstream_auth`, `upstream_*` | a Qoder problem. Retry later |
 | 504 | `turn_timeout` | the turn took more than 45 min |
 | 500 | `internal_error` | a bug. Report it with the `X-Request-Id` |
@@ -1260,7 +1295,7 @@ conversation. Errors use each provider's own envelope.
 
 | Endpoint | Notes |
 |---|---|
-| `GET /v1/models`, `GET /v1/models/:id` | aliases and `qoder/<id>` models, plus `qoder-image`, `qoder-video` and (when configured) `folax-image`, `folax-video` |
+| `GET /v1/models`, `GET /v1/models/:id` | aliases and `qoder/<id>` models, then (when configured) the Folax chat models `folax/<id>` (`owned_by: "folax"`, see §4 "Folax chat models"), plus `qoder-image`, `qoder-video` and (when configured) `folax-image`, `folax-video` |
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
