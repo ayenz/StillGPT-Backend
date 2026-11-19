@@ -22,6 +22,73 @@ export interface FolaxOptions {
   timeoutMs?: number;
   /** Calls in flight at once; later calls wait in FIFO order. Keep ≤ the adapter's `max_concurrency`. Default 8. */
   concurrency?: number;
+  /** How long `/health/upstream` and `/v1/usage` results are reused. Default 60 s (the adapter caches as long). */
+  statusCacheMs?: number;
+}
+
+/** `GET /health/upstream`: does Folax still accept the shared account token? `down` = every Folax feature fails. */
+export interface FolaxUpstream {
+  status: 'ok' | 'degraded' | 'down';
+  checked_at: string;
+  latency_ms: number | null;
+  /** null when the adapter could not be reached at all. */
+  token: { accepted: boolean; jwt_expires_at: string | null; jwt_expired: boolean | null } | null;
+  /** `auth_invalid` / `not_configured` (down), `upstream_timeout` / `upstream_error` (degraded), `unreachable` (adapter down). */
+  error: { code: string; message: string } | null;
+}
+
+/** One weekly quota bucket of `GET /v1/usage`. `remaining` is an upper bound (the account is also used on a phone). */
+export interface FolaxQuota {
+  total: number;
+  remaining: number | null;
+  reset_at: string;
+  cycle: string;
+  observed_at: string | null;
+  /** `observed` this cycle, `reset` (no observation since the reset → full), `unknown` (never observed). */
+  source: 'observed' | 'reset' | 'unknown';
+}
+
+export interface FolaxUsage {
+  video: FolaxQuota;
+  edit: FolaxQuota;
+}
+
+/** Adapter error codes (OpenAI envelope `error.code`, v0.4+) → our AppError. */
+const API_ERRORS: Record<string, { status: number; code: string; message?: string }> = {
+  quota_exceeded: { status: 429, code: 'folax_quota_exceeded', message: 'The weekly Folax quota is used up' },
+  queue_timeout: { status: 429, code: 'provider_busy', message: 'Folax is busy; try again shortly' },
+  too_many_jobs: { status: 429, code: 'provider_busy', message: 'Folax is busy; try again shortly' },
+  auth_invalid: { status: 503, code: 'provider_unavailable', message: 'Folax is unavailable right now' },
+  not_configured: { status: 503, code: 'provider_unavailable', message: 'Folax is unavailable right now' },
+  invalid_image: { status: 400, code: 'invalid_image' },
+  content_rejected: { status: 422, code: 'content_rejected' },
+  image_rejected: { status: 422, code: 'image_rejected' },
+  unsupported_request: { status: 422, code: 'unsupported_request' },
+  model_not_found: { status: 400, code: 'model_not_found' },
+  upstream_timeout: { status: 504, code: 'folax_timeout', message: 'Folax timed out' },
+  not_found: { status: 404, code: 'folax_not_found' },
+  not_ready: { status: 409, code: 'folax_not_ready' },
+};
+
+/** Adapter codes meaning Folax as a whole is down (token rejected / missing). */
+const DOWN_CODES = new Set(['auth_invalid', 'not_configured']);
+
+/**
+ * Maps an adapter error reply (`{error:{message,type,code,param}}`) to an AppError. `details.folax_code` keeps the adapter's
+ * code, `details.retry_after` (seconds) the `Retry-After` header. Unknown codes (upstream_task_failed, upstream_error,
+ * idempotency_key_reused, invalid_request, …) become 502 `folax_failed`.
+ */
+export function folaxError(status: number, body: unknown, retryAfter?: string | null): AppError {
+  const e = (body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+  const folaxCode = typeof e?.code === 'string' ? e.code : status === 401 ? 'unauthorized' : `http_${status}`;
+  const upstreamMessage = typeof e?.message === 'string' && e.message ? e.message : `HTTP ${status}`;
+  const seconds = retryAfter ? Number(retryAfter) : NaN;
+  const details: Record<string, unknown> = { provider: 'folax', folax_code: folaxCode, ...(Number.isFinite(seconds) && seconds >= 0 ? { retry_after: seconds } : {}) };
+  // 401 = the adapter rejected OUR key (misconfiguration), not the Folax token
+  if (status === 401) return new AppError(503, 'provider_unavailable', 'Folax is unavailable right now (adapter rejected the API key)', details);
+  const known = API_ERRORS[folaxCode];
+  if (known) return new AppError(known.status, known.code, known.message ? `${known.message} (${upstreamMessage})` : upstreamMessage, details);
+  return new AppError(502, 'folax_failed', `Folax: ${upstreamMessage}`, details);
 }
 
 /**
@@ -82,13 +149,136 @@ export class FolaxClient {
     return images;
   }
 
-  async ready(): Promise<boolean> {
+  /**
+   * Called (at most once per hour, see MediaService.reportDegraded) when a call shows Folax is down:
+   * the adapter answered `auth_invalid` / `not_configured`.
+   */
+  onDown: ((err: AppError) => void) | null = null;
+  private upstreamCache: { at: number; value: FolaxUpstream } | null = null;
+  private usageCache: { at: number; value: FolaxUsage } | null = null;
+
+  /**
+   * One call to a v0.4+ endpoint (OpenAI-style errors). Throws AppError via `folaxError`; network failure → 503
+   * `provider_unavailable`, our own timeout → 504 `folax_timeout`. `idempotencyKey` → `Idempotency-Key` header.
+   */
+  async api<T>(
+    path: string,
+    o: { method?: 'GET' | 'POST'; json?: unknown; idempotencyKey?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ body: T; status: number; headers: Headers }> {
+    const res = await this.send(path, o);
+    if (!res.ok) throw await this.failure(path, res);
+    return { body: (await res.json()) as T, status: res.status, headers: res.headers };
+  }
+
+  /** Like `api` but hands back the raw Response on success (binary content, SSE streams). */
+  async send(
+    path: string,
+    o: { method?: 'GET' | 'POST'; json?: unknown; idempotencyKey?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<Response> {
+    const headers: Record<string, string> = { 'X-API-Key': this.o.apiKey };
+    if (o.json !== undefined) headers['Content-Type'] = 'application/json';
+    if (o.idempotencyKey) headers['Idempotency-Key'] = o.idempotencyKey;
+    const timeout = AbortSignal.timeout(o.timeoutMs ?? this.o.timeoutMs ?? 150_000);
     try {
-      const res = await this.fetch(`${this.o.baseUrl.replace(/\/$/, '')}/health/ready`, { signal: AbortSignal.timeout(5000) });
-      return res.ok;
-    } catch {
-      return false;
+      return await this.fetch(`${this.base()}${path}`, {
+        method: o.method ?? (o.json === undefined ? 'GET' : 'POST'),
+        headers,
+        ...(o.json !== undefined ? { body: JSON.stringify(o.json) } : {}),
+        signal: o.signal ? AbortSignal.any([o.signal, timeout]) : timeout,
+      });
+    } catch (err) {
+      if (o.signal?.aborted) throw err;
+      if (timeout.aborted) throw new AppError(504, 'folax_timeout', `Folax adapter did not answer within ${Math.round((o.timeoutMs ?? this.o.timeoutMs ?? 150_000) / 1000)} s`, { provider: 'folax' });
+      this.upstreamCache = null;
+      throw new AppError(503, 'provider_unavailable', `Folax adapter unreachable: ${(err as Error).message}`, { provider: 'folax', folax_code: 'unreachable' });
     }
+  }
+
+  /** Turns a non-2xx Response into an AppError; marks Folax down on `auth_invalid` / `not_configured`. */
+  async failure(path: string, res: Response): Promise<AppError> {
+    const body = await res.json().catch(() => null);
+    const err = folaxError(res.status, body, res.headers.get('retry-after'));
+    const folaxCode = String(err.details?.folax_code);
+    this.o.log.warn('folax.failed', { path, status: res.status, code: folaxCode });
+    if (DOWN_CODES.has(folaxCode)) {
+      this.upstreamCache = {
+        at: Date.now(),
+        value: { status: 'down', checked_at: new Date().toISOString(), latency_ms: null, token: null, error: { code: folaxCode, message: err.message } },
+      };
+      this.onDown?.(err);
+    }
+    if (folaxCode === 'quota_exceeded') this.usageCache = null;
+    return err;
+  }
+
+  /** `GET /health/upstream` (a short Folax chat on the adapter side, no quota), cached for `statusCacheMs`. */
+  async upstream(fresh = false): Promise<FolaxUpstream> {
+    if (!fresh && this.upstreamCache && Date.now() - this.upstreamCache.at < this.cacheMs()) return this.upstreamCache.value;
+    const started = Date.now();
+    let value: FolaxUpstream;
+    try {
+      const res = await this.fetch(`${this.base()}/health/upstream${fresh ? '?fresh=1' : ''}`, {
+        headers: { 'X-API-Key': this.o.apiKey },
+        signal: AbortSignal.timeout(20_000),
+      });
+      const b = (await res.json().catch(() => null)) as Partial<FolaxUpstream> | null;
+      if (b && (b.status === 'ok' || b.status === 'degraded' || b.status === 'down')) {
+        value = {
+          status: b.status,
+          checked_at: typeof b.checked_at === 'string' ? b.checked_at : new Date().toISOString(),
+          latency_ms: typeof b.latency_ms === 'number' ? b.latency_ms : null,
+          token: b.token ?? null,
+          error: b.error ? { code: String(b.error.code), message: String(b.error.message ?? b.error.code) } : null,
+        };
+      } else {
+        // 401 (our key) or an adapter older than 0.5.0 (404)
+        const err = folaxError(res.status, b);
+        value = { status: 'down', checked_at: new Date().toISOString(), latency_ms: null, token: null, error: { code: String(err.details?.folax_code), message: err.message } };
+      }
+    } catch (err) {
+      value = {
+        status: 'down',
+        checked_at: new Date().toISOString(),
+        latency_ms: Date.now() - started,
+        token: null,
+        error: { code: 'unreachable', message: `Folax adapter unreachable: ${(err as Error).message}` },
+      };
+    }
+    if (value.status === 'down' && value.error && DOWN_CODES.has(value.error.code)) this.onDown?.(new AppError(503, 'provider_unavailable', value.error.message, { provider: 'folax', folax_code: value.error.code }));
+    this.upstreamCache = { at: Date.now(), value };
+    return value;
+  }
+
+  /** False only when the last upstream check said `down`. */
+  async available(fresh = false): Promise<boolean> {
+    return (await this.upstream(fresh)).status !== 'down';
+  }
+
+  /** `GET /v1/usage` (last quota the adapter saw; no quota used), cached for `statusCacheMs`. null when unreadable. */
+  async usage(fresh = false): Promise<FolaxUsage | null> {
+    if (!fresh && this.usageCache && Date.now() - this.usageCache.at < this.cacheMs()) return this.usageCache.value;
+    try {
+      const { body } = await this.api<FolaxUsage>('/v1/usage', { timeoutMs: 10_000 });
+      if (!body?.video || !body?.edit) return null;
+      this.usageCache = { at: Date.now(), value: { video: body.video, edit: body.edit } };
+      return this.usageCache.value;
+    } catch (err) {
+      this.o.log.warn('folax.usage_failed', { err: (err as Error).message });
+      return null;
+    }
+  }
+
+  /** Forget the cached quota (after a video/edit used some). */
+  invalidateUsage() {
+    this.usageCache = null;
+  }
+
+  private cacheMs() {
+    return this.o.statusCacheMs ?? 60_000;
+  }
+
+  private base() {
+    return this.o.baseUrl.replace(/\/$/, '');
   }
 }
 

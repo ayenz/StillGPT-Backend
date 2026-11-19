@@ -4,6 +4,7 @@ import { type Env, requireAdmin, requireUser } from '../../http.js';
 import { adminRoutes, authRoutes, meRoutes } from './account.js';
 import { conversationRoutes } from './conversations.js';
 import { faceRoutes, faceSwapAdminRoutes } from './faces.js';
+import { folaxAdminRoutes, folaxRoutes } from './folax.js';
 import { galleryAdminRoutes, galleryRoutes } from './gallery.js';
 import { fileRoutes, mediaJobRoutes, promptRoutes, webhookRoutes } from './media.js';
 
@@ -23,11 +24,13 @@ export function nativeRoutes(ctx: AppContext) {
   app.route('/', adminRoutes(ctx));
   app.route('/', galleryAdminRoutes(ctx));
   app.route('/', faceSwapAdminRoutes(ctx));
+  app.route('/', folaxAdminRoutes(ctx));
   app.route('/', conversationRoutes(ctx));
   app.route('/', fileRoutes(ctx));
   app.route('/', galleryRoutes(ctx));
   app.route('/', mediaJobRoutes(ctx));
   app.route('/', faceRoutes(ctx));
+  app.route('/', folaxRoutes(ctx));
   app.route('/', promptRoutes(ctx));
   app.route('/', webhookRoutes(ctx));
   return app;

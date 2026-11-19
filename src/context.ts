@@ -27,6 +27,7 @@ import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
 import { createLogger, type Logger } from './log.js';
 import { FaceSwapClient } from './providers/faceswap.js';
+import { AppError } from './errors.js';
 import { FolaxClient } from './providers/folax.js';
 import { QoderClient } from './qoder/client.js';
 import { patTokenProvider, serviceAccountTokenProvider } from './qoder/tokens.js';
@@ -191,6 +192,9 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     queueRetryDelaysMs: config.MEDIA_QUEUE_RETRY_DELAYS_MS,
     drainingRetryDelaysMs: config.MEDIA_DRAINING_RETRY_DELAYS_MS,
   });
+  // a Folax call that shows the shared token is rejected → admin webhook provider.degraded (throttled with generate-all's)
+  // (webhook code folax_auth_invalid / folax_not_configured, same shape as generate-all's)
+  if (folax) folax.onDown = (err) => media.reportDegraded('folax', new AppError(err.status, `folax_${String(err.details?.folax_code)}`, err.message));
   const faces = new FaceService({ db, store });
   const trash = new MediaTrash({ db, store, media, log: log.child({ mod: 'trash' }) });
   const mediaHousekeeper = new MediaHousekeeper({ db, trash, log: log.child({ mod: 'media_housekeeping' }) });

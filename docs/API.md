@@ -660,6 +660,47 @@ Response (`200` when synchronous, `202` with `async: true`):
 - The job's `request` records the choice: `provider` (what was asked or defaulted), `provider_used` (what generated
   the outputs) and, after a fallback, `fallback_reason` (e.g. `folax_auth_invalid`).
 
+#### Folax status and the shared quota
+Folax is an optional, nice-to-have provider. Qoder stays the default everywhere. The Folax-only features (Folax chat
+models, Folax image-to-video, Folax edit and remove people) are added in stages. When Folax is down they fail;
+they never fall back to Qoder.
+
+```
+GET /folax/status
+→ 200 {"configured": true, "available": true, "status": "ok", "checked_at": "2026-11-19T11:30:00Z", "error": null,
+       "usage": {"video": {"total": 20, "remaining": 12, "reset_at": "2026-11-23T00:00:00Z", "cycle": "weekly",
+                           "observed_at": "2026-11-19T10:05:12Z", "source": "observed"},
+                 "edit":  {"total": 20, "remaining": null, "reset_at": "2026-11-23T00:00:00Z", "cycle": "weekly",
+                           "observed_at": null, "source": "unknown"}}}
+```
+- `status`:
+  - `ok`: Folax answers.
+  - `degraded`: Folax is slow or has a temporary error, but stays usable.
+  - `down`: unusable. `available` is then `false`, so disable the Folax options. `error.code` is `auth_invalid` (the
+    shared Folax login was rejected), `not_configured`, or `unreachable` (the adapter does not answer).
+- The result is cached for about 60 s. A server without Folax returns `configured: false, available: false` and `usage: null`.
+- **The quota is shared by all users.** It is one Folax account, with 20 videos and 20 prompt edits per week; remove
+  people does not count.
+  - The quota resets **Monday 00:00 UTC** (07:00 WIB). There is no per-user limit: first come, first served.
+  - `remaining` is the last value Folax reported. Treat it as an upper bound, because the same account is also used
+    outside StillGPT.
+  - `source` tells where the number comes from:
+    - `observed`: seen this week.
+    - `reset`: no use since the reset, so the quota is full.
+    - `unknown`: never seen; `remaining` is `null`.
+  - `usage` is `null` when the adapter cannot be read.
+- Folax error codes on Folax features:
+
+  | HTTP | code | meaning |
+  |---|---|---|
+  | 429 | `folax_quota_exceeded` | the weekly quota is used up. Do not retry before `reset_at` (`details.retry_after` holds the seconds until then) |
+  | 429 | `provider_busy` | Folax is busy. Retry after `details.retry_after` seconds |
+  | 503 | `provider_unavailable` | Folax is down (`details.folax_code`: `auth_invalid`, `not_configured`, `unreachable`) |
+  | 400 | `invalid_image` | Folax could not read the input image |
+  | 422 | `content_rejected`, `image_rejected`, `unsupported_request` | Folax refused the request. Do not retry |
+  | 504 | `folax_timeout` | Folax took too long |
+  | 502 | `folax_failed` | any other Folax failure |
+
 ### POST /videos (always async, returns 202)
 | field | type | default | notes |
 |---|---|---|---|
@@ -864,8 +905,9 @@ X-StillGPT-Signature: sha256=<hex HMAC-SHA256(secret, raw body)>
 ```
 - Model events have `data: {model: {id, display_name}, previous?}`.
 - `provider.degraded` has `data: {provider: "folax", code: "folax_auth_invalid", message}`. It is sent when Folax
-  rejects its credentials (the sidecar's login needs renewing), at most once per hour. Image requests keep working
-  through the Qoder fallback meanwhile.
+  rejects its credentials (the sidecar's login needs renewing), at most once per hour. A Folax status check or a Folax
+  call that finds the adapter without a token sends `code: "folax_not_configured"`. Text-to-image under `auto` keeps
+  working through the Qoder fallback meanwhile. The Folax-only features fail until the login is fixed.
 - Reply with any `2xx` within **10 s**.
 - Failed deliveries are retried after 1 min, 5 min and 30 min, then marked failed.
 - Deliveries can arrive more than once, so de-duplicate on `X-StillGPT-Delivery`.
@@ -1044,6 +1086,19 @@ fields an admin never changed.
   `400 test_engine_unsupported`; sidecar errors are `400 no_face_in_target`/`no_face_in_source`/`faceswap_failed` or
   `503 faceswap_unavailable`.
 
+### Folax status
+```
+GET /admin/folax/status
+→ 200 {…same fields as GET /folax/status…, "latency_ms": 2140,
+       "token": {"accepted": true, "jwt_expires_at": "2026-11-09T02:59:33Z", "jwt_expired": true}}
+```
+- Checks Folax now instead of using the cached result. It sends a short chat through the adapter, which uses no quota;
+  the adapter allows one fresh check per 10 s.
+- `token.accepted: true` together with `jwt_expired: true` is the current normal state: the token has expired but
+  Folax still accepts it.
+- `token.accepted: false` means Folax rejected the token. Every Folax feature is down until the adapter gets a new
+  token; this also sends the `provider.degraded` webhook.
+
 ### Qoder credits
 
 Remaining credits and per-request credit history of the Qoder account. Qoder exposes these only on its web dashboard API, which
@@ -1103,11 +1158,13 @@ Branch on `code`, not on `message`. `details` appears only on some errors.
 | 409 | `email_taken`, `job_not_completed`, `face_limit_reached` | |
 | 413 | `file_too_large`, `attachment_too_large` | see the limits in §12 |
 | 429 | `credit_limit_exceeded` | the monthly credit limit has been reached |
+| 429 | `folax_quota_exceeded`, `provider_busy` | Folax only: the shared weekly quota is used up (wait until it resets) / Folax is busy (retry after `details.retry_after`). See §8 "Folax status" |
+| 503 | `provider_unavailable` | an optional provider (Folax) is down or not configured |
 | 502 / 503 | `upstream_unavailable`, `upstream_auth`, `upstream_*` | a Qoder problem. Retry later |
 | 504 | `turn_timeout` | the turn took more than 45 min |
 | 500 | `internal_error` | a bug. Report it with the `X-Request-Id` |
 
-Treat any `429` or `5xx` as retryable.
+Treat any `429` or `5xx` as retryable, except `folax_quota_exceeded`, which only clears after the weekly reset.
 
 ---
 

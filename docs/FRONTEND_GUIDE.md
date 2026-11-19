@@ -199,6 +199,23 @@ POST /videos {prompt, seconds?: 5, resolution?: "1080P", ratio?: "16:9", audio?:
 - **Lama: biasanya 3–8 menit, bisa sampai 30 menit.** Tidak bisa dibatalkan. Server memproses satu video sekaligus;
   jika antrean Qoder penuh, server otomatis mencoba lagi (job tetap `in_progress`).
 
+### 5.3a Status Folax & kuota bersama
+Folax adalah provider tambahan (nice-to-have). Default tetap Qoder. Fitur khusus Folax (model chat Folax, video Folax,
+edit Folax, hapus orang) menyusul bertahap; kalau Folax mati, fitur itu gagal dan **tidak** pindah ke Qoder.
+```
+GET /folax/status
+→ {configured, available, status: "ok" | "degraded" | "down", checked_at, error, usage: {video: {...}, edit: {...}} | null}
+```
+- **Status:**
+  - `available: false` → sembunyikan atau nonaktifkan pilihan Folax. Contoh pesan: "Folax sedang tidak tersedia".
+  - `degraded` → Folax tetap bisa dipakai, tapi mungkin lambat.
+- **Kuota dipakai bersama semua user:** 20 video dan 20 edit per minggu. Hapus orang tidak memotong kuota.
+  - Reset **Senin 07:00 WIB** (`reset_at`).
+  - Tampilkan `usage.video.remaining` / `usage.edit.remaining` sebagai perkiraan, misalnya "± 12 video tersisa minggu ini".
+  - `remaining: null` (`source: "unknown"`) → "sisa kuota belum diketahui".
+  - Kalau `remaining` 0, nonaktifkan tombolnya.
+- Hasil dicache server ±60 detik, jadi aman dipanggil saat membuka dialog.
+
 ### 5.4 Mengikuti job (gambar async & video)
 - `GET /jobs/:id/events` (SSE): event `progress {status, progress}`, lalu `completed` / `failed` berisi job lengkap.
 - Atau polling `GET /jobs/:id` tiap 5–10 detik.
@@ -305,6 +322,9 @@ Format: `{"error": {"code": "...", "message": "..."}}`. Kode yang perlu ditangan
 | 409 | `conversation_busy` | "Masih menjawab…", jangan kirim ulang |
 | 413 | `file_too_large`, `attachment_too_large` | tampilkan batas ukuran |
 | 429 | `credit_limit_exceeded` | "Kuota bulan ini habis" |
+| 429 | `folax_quota_exceeded` | "Kuota Folax minggu ini habis, reset Senin 07:00 WIB" (jangan diulang) |
+| 429 | `provider_busy` | "Folax sedang sibuk, coba lagi sebentar" (tunggu `details.retry_after` detik) |
+| 503 | `provider_unavailable` | "Folax sedang tidak tersedia" |
 | 400 | `validation_error` | tampilkan `message` dekat field terkait |
 | 502/503 | `upstream_*` | "Layanan AI sedang bermasalah, coba lagi" + tombol ulangi |
 

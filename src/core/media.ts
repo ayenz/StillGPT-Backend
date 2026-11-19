@@ -1036,7 +1036,7 @@ export class MediaService {
     return row ?? { ...job, request };
   }
 
-  private reportDegraded(provider: string, err: AppError) {
+  reportDegraded(provider: string, err: AppError) {
     const last = this.degradedAt.get(provider);
     if (last !== undefined && Date.now() - last < DEGRADED_THROTTLE_MS) return;
     this.degradedAt.set(provider, Date.now());
