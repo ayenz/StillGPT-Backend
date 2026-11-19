@@ -22,7 +22,8 @@ export function authRoutes(ctx: AppContext) {
   const app = new Hono<Env>();
 
   app.post('/auth/login', async (c) => {
-    const b = await body(c, z.object({ email: z.string().min(1), password: z.string().min(1) }));
+    const b = await body(c, z.object({ email: z.string().min(1), password: z.string().min(1), turnstile_token: z.string().max(2048).optional() }));
+    if (ctx.turnstile) await ctx.turnstile.verify(b.turnstile_token, { action: 'login', remoteIp: c.req.header('cf-connecting-ip') });
     const { user, tokens } = await ctx.auth.login(b.email, b.password);
     return c.json({ user: userView(user), ...tokens });
   });

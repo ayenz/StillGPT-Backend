@@ -128,6 +128,10 @@ const schema = z
         .transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean))
         .pipe(z.array(z.string().regex(/^[A-Z0-9]{10}\.[\w.-]+$/, 'each iOS app id must be TEAMID.bundle.id'))),
     ),
+    /** Cloudflare Turnstile secret; when set, password sign-in (POST /auth/login) needs a `turnstile_token`. */
+    TURNSTILE_SECRET_KEY: optionalString(z.string().min(1)),
+    /** Hostnames the widget may be solved on (comma-separated). Default: the hosts of CORS_ORIGINS. Keep localhost out of prod. */
+    TURNSTILE_HOSTNAMES: optionalString(z.string().transform((v) => v.split(',').map((s) => s.trim()).filter(Boolean))),
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   })
   .refine((c) => !c.PASSKEY_ANDROID_PACKAGE === !c.PASSKEY_ANDROID_CERT_SHA256?.length, {

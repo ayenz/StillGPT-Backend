@@ -1,5 +1,6 @@
 import { AuthService } from './auth/auth.js';
 import { PasskeyService, passkeyConfig } from './auth/passkeys.js';
+import { TurnstileVerifier, turnstileConfig } from './auth/turnstile.js';
 import type { Config } from './config.js';
 import { AgentPool } from './core/agentPool.js';
 import { EventBus } from './core/bus.js';
@@ -45,6 +46,8 @@ export interface AppContext {
   bus: EventBus;
   auth: AuthService;
   passkeys: PasskeyService;
+  /** null when TURNSTILE_SECRET_KEY is unset (password sign-in then needs no human check). */
+  turnstile: TurnstileVerifier | null;
   media: MediaService;
   /** Saved faces for face swap. */
   faces: FaceService;
@@ -117,6 +120,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const conversations = new ConversationService(db);
   const auth = new AuthService(db, config.JWT_SECRET);
   const passkeys = new PasskeyService({ db, auth, log: log.child({ mod: 'passkeys' }), config: passkeyConfig(config) });
+  const turnstileCfg = turnstileConfig(config);
+  const turnstile = turnstileCfg ? new TurnstileVerifier(turnstileCfg, log.child({ mod: 'turnstile' }), o.fetchImpl) : null;
   const webhooks = new WebhookService(db, log.child({ mod: 'webhooks' }), o.fetchImpl, { pollIntervalMs: config.WEBHOOK_POLL_INTERVAL_MS });
   const turns = new TurnRunner({ db, qoder, agents, models, store, usage, conversations, bus, log: log.child({ mod: 'turns' }), sessionBudgetCredits: config.SESSION_BUDGET_CREDITS });
   const housekeeper = new QoderHousekeeper({
@@ -209,6 +214,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     bus,
     auth,
     passkeys,
+    turnstile,
     media,
     faces,
     faceswap,

@@ -65,6 +65,12 @@ There are two kinds of credentials:
 ```
 A wrong email or password returns `401 unauthorized`. A disabled account gets the same response.
 
+**Cloudflare Turnstile.** When the server has `TURNSTILE_SECRET_KEY` set, the body must also carry
+`"turnstile_token": "<token from the Turnstile widget>"`, solved with `action: "login"` on a hostname in
+`TURNSTILE_HOSTNAMES` (default: the hosts of `CORS_ORIGINS`). A missing, invalid, reused or expired token returns
+`403 turnstile_failed` (checked before the password). Tokens are single use: reset the widget after every attempt.
+Passkey sign-in (`/auth/passkey/*`) needs no token.
+
 ### POST /auth/refresh
 ```json
 { "refresh_token": "rt_…" }
