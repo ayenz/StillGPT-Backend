@@ -12,8 +12,10 @@ import type { FaceSwapClient, SwapperOptions } from '../providers/faceswap.js';
  * - `qoder`: a Qoder image edit of the whole photo (image 1 = target, image 2 = face).
  * - `qoder_crop`: the sidecar cuts a square around the target's face, Qoder edits that close-up at 1024x1024,
  *   the sidecar blends it back into the original photo.
+ * - `swapper_polish`: `swapper` first (kept as an internal file), then the `qoder_crop` flow on the swapped photo with
+ *   `polish_prompt` (Qoder retouches the close-up for realism, the sidecar pastes it back onto the swapped photo).
  */
-export const FACE_SWAP_ENGINES = ['swapper', 'qoder', 'qoder_crop'] as const;
+export const FACE_SWAP_ENGINES = ['swapper_polish', 'swapper', 'qoder', 'qoder_crop'] as const;
 export type FaceSwapEngine = (typeof FACE_SWAP_ENGINES)[number];
 
 const KEEP_FROM_TARGET =
@@ -31,29 +33,40 @@ export const FACE_SWAP_PROMPT =
   'Blend the new face seamlessly into the lighting, skin texture and grain of image 1. Output a single photo with the same framing as image 1, ' +
   'not a grid or collage.';
 
-/** Default prompt of the `qoder_crop` engine: image 1 is a square close-up of the target's face that gets pasted back. */
+/**
+ * Default prompt of the `qoder_crop` engine: image 1 is a square close-up of the target's face that gets pasted back
+ * (landmark-aligned by the sidecar, so the framing must stay put).
+ */
 export const FACE_SWAP_CROP_PROMPT =
-  'Face swap on a close-up. Image 1 is a square close-up crop around a face, cut from a larger photo; it will be pasted back into that ' +
-  'photo, so keep its framing pixel-aligned: the same head position, size and angle, and leave the borders of the image unchanged. ' +
-  'Image 2 shows the identity to use: a single portrait or a 3x3 sheet of the same person seen from different angles (use all views to ' +
-  'understand the face). Replace only the facial identity of the person in image 1 with the person in image 2. Take ONLY these identity ' +
-  `features from image 2: face shape, eyes, eyebrows, nose, lips, jawline, chin and skin tone. ${KEEP_FROM_TARGET} ` +
-  'Do not zoom, crop, rotate or reframe. Match the lighting, skin texture, sharpness and grain of image 1. Output a single square photo, ' +
-  'not a grid or collage.';
+  'Make the person in image 1 look exactly like the person in image 2. Image 2 is a reference sheet of their face from many angles. ' +
+  'Replace the face in image 1 with their face, so that anyone who knows them would recognise them, while keeping image 1\'s smile, ' +
+  'head pose, hairstyle, hair accessories, clothing, lighting and background, and the exact same framing and crop. ' +
+  'Do not add, remove or restyle bangs/fringe; keep the hairline and every hair strand of image 1 exactly. ' +
+  'Photorealistic. Output a single square photo.';
+
+/** Default prompt of the `swapper_polish` engine: image 1 is a close-up of the swapper's result, image 2 the face. */
+export const FACE_SWAP_POLISH_PROMPT =
+  'Photo retouch of a close-up crop. Image 1 is the photo to retouch; image 2 is a reference sheet of the same person from different ' +
+  'angles. Make the face in image 1 look like a real, sharp, natural photograph of the person in image 2: refine the eyes, eyelids, ' +
+  'nose, lips and skin so the likeness to image 2 is as strong as possible, with natural skin pores and fine detail. Keep the ' +
+  'expression, head pose, hair strands, hair ornaments, clothing, lighting, colours, background and the exact framing of image 1. ' +
+  'Output one square photo.';
 
 export interface FaceSwapSettings {
   default_engine: FaceSwapEngine;
   qoder_prompt: string;
   qoder_crop_prompt: string;
+  polish_prompt: string;
   /** Crop side = crop_expand × the face's larger side. */
   crop_expand: number;
   swapper: SwapperOptions;
 }
 
 export const DEFAULT_FACE_SWAP_SETTINGS: FaceSwapSettings = {
-  default_engine: 'swapper',
+  default_engine: 'swapper_polish',
   qoder_prompt: FACE_SWAP_PROMPT,
   qoder_crop_prompt: FACE_SWAP_CROP_PROMPT,
+  polish_prompt: FACE_SWAP_POLISH_PROMPT,
   crop_expand: 2.2,
   swapper: { target_faces: 'largest', identity_mode: 'average', det_thresh: 0.5, restorer: 'codeformer', restore_blend: 0.8, codeformer_fidelity: 0.7 },
 };
@@ -74,6 +87,7 @@ const settingsFields = {
   default_engine: z.enum(FACE_SWAP_ENGINES),
   qoder_prompt: prompt,
   qoder_crop_prompt: prompt,
+  polish_prompt: prompt,
   crop_expand: z.number().min(1.2).max(4),
 };
 
@@ -110,7 +124,7 @@ export interface FaceSwapSidecarStatus {
 
 /**
  * Admin-editable face swap settings (`kv` key `face_swap.settings`), cached in memory, plus engine availability.
- * `swapper` and `qoder_crop` need the faceswap sidecar (configured and ready); `qoder` is always available.
+ * `swapper`, `swapper_polish` and `qoder_crop` need the faceswap sidecar (configured and ready); `qoder` is always available.
  */
 export class FaceSwapSettingsService {
   private overrides: Overrides = {};
@@ -181,6 +195,6 @@ export class FaceSwapSettingsService {
 
   async engines(): Promise<Record<FaceSwapEngine, { available: boolean }>> {
     const sidecar = await this.available('swapper');
-    return { swapper: { available: sidecar }, qoder: { available: true }, qoder_crop: { available: sidecar } };
+    return { swapper_polish: { available: sidecar }, swapper: { available: sidecar }, qoder: { available: true }, qoder_crop: { available: sidecar } };
   }
 }

@@ -66,6 +66,51 @@ def umeyama(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     return M.astype(np.float32)
 
 
+@dataclass
+class Alignment:
+    """Similarity transform patch -> reference crop estimated from the 5 landmarks."""
+
+    M: np.ndarray  # 2x3
+    scale: float  # > 1: the patch face is smaller than the reference face
+    rotation_deg: float
+    shift: float  # distance between the two face centres / crop side
+    residual: float  # RMS landmark error after the transform / face size
+
+    def as_dict(self) -> dict:
+        return {
+            "scale": round(self.scale, 4),
+            "rotation_deg": round(self.rotation_deg, 2),
+            "shift": round(self.shift, 4),
+            "residual": round(self.residual, 4),
+        }
+
+
+def estimate_alignment(src_kps: np.ndarray, dst_kps: np.ndarray, side: float) -> Alignment:
+    """umeyama src -> dst plus the human-readable deviation from the identity transform."""
+    M = umeyama(src_kps, dst_kps)
+    a, b = float(M[0, 0]), float(M[1, 0])
+    scale = float(np.hypot(a, b))
+    rotation = float(np.degrees(np.arctan2(b, a)))
+    shift = float(np.linalg.norm(src_kps.mean(0) - dst_kps.mean(0)) / max(1.0, side))
+    mapped = src_kps @ M[:, :2].T + M[:, 2]
+    rms = float(np.sqrt(((mapped - dst_kps) ** 2).sum(1).mean()))
+    face_size = float(np.linalg.norm(dst_kps[0] - dst_kps[1]) + np.linalg.norm(dst_kps[:2].mean(0) - dst_kps[3:].mean(0)))
+    return Alignment(M=M, scale=scale, rotation_deg=rotation, shift=shift, residual=rms / max(1.0, face_size))
+
+
+def pick_face(faces: list["Face"], w: int, h: int) -> "Face | None":
+    """The main face of a close-up: large and near the centre."""
+    if not faces:
+        return None
+    cx, cy = w / 2.0, h / 2.0
+
+    def key(f: "Face") -> float:
+        fx, fy = (f.box[0] + f.box[2]) / 2.0, (f.box[1] + f.box[3]) / 2.0
+        return f.area / (1.0 + np.hypot(fx - cx, fy - cy) / max(w, h))
+
+    return max(faces, key=key)
+
+
 def nms(dets: np.ndarray, thresh: float) -> list[int]:
     x1, y1, x2, y2, scores = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3], dets[:, 4]
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)

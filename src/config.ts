@@ -83,7 +83,7 @@ const schema = z
     FOLAX_API_KEY: optionalString(z.string().min(1)),
     /** Folax calls in flight at once (a batch of n runs n calls). Keep ≤ the adapter's `max_concurrency`. */
     FOLAX_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
-    /** faceswap sidecar (InsightFace swapper + face crop/paste), e.g. http://faceswap:8080; face swap engines swapper/qoder_crop are off when unset. */
+    /** faceswap sidecar (InsightFace swapper + face crop/paste), e.g. http://faceswap:8080; face swap engines swapper/swapper_polish/qoder_crop are off when unset. */
     FACESWAP_URL: optionalString(z.string().url()),
     /** Sent as X-API-Key; leave empty when the sidecar runs without auth. */
     FACESWAP_API_KEY: optionalString(z.string().min(1)),

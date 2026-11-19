@@ -182,37 +182,45 @@ def box_mask(size: int, pad: float = 0.1, blur: float = 0.08) -> np.ndarray:
     return np.clip(m, 0.0, 1.0)
 
 
-def ellipse_mask(h: int, w: int, center: tuple[float, float], axes: tuple[float, float], sigma: float) -> np.ndarray:
-    m = np.zeros((h, w), np.float32)
-    cv2.ellipse(
-        m,
-        (int(round(center[0])), int(round(center[1]))),
-        (max(1, int(round(axes[0]))), max(1, int(round(axes[1])))),
-        0,
-        0,
-        360,
-        1.0,
-        -1,
-        cv2.LINE_AA,
-    )
-    return np.clip(feather(m, sigma), 0.0, 1.0)
+def face_hull_points(box: np.ndarray, kps: np.ndarray | None, forehead: float = 0.22, n: int = 48) -> np.ndarray:
+    """Outline points of a face: an ellipse a bit larger than the detector box, raised to include the forehead
+    (the SCRFD box ends around the brows), plus the 5 landmarks."""
+    x1, y1, x2, y2 = (float(v) for v in box[:4])
+    fw, fh = x2 - x1, y2 - y1
+    top = y1 - forehead * fh
+    cx, cy = (x1 + x2) / 2.0, (top + y2) / 2.0
+    ax, ay = 0.56 * fw, 0.52 * (y2 - top)
+    t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    pts = np.stack([cx + ax * np.cos(t), cy + ay * np.sin(t)], 1)
+    if kps is not None:
+        pts = np.vstack([pts, np.asarray(kps, np.float64).reshape(-1, 2)])
+    return pts.astype(np.float32)
 
 
-def face_region_mask(h: int, w: int, face_box: np.ndarray | None, feather_frac: float) -> np.ndarray:
-    """Mask covering the face (forehead to chin) on a patch. face_box [x1,y1,x2,y2] from the detector, or None
-    for a centred fallback ellipse. The ellipse is shrunk by the feather radius so the soft edge stays
-    around the face, not outside it."""
-    if face_box is not None:
-        x1, y1, x2, y2 = (float(v) for v in face_box[:4])
-        fw, fh = x2 - x1, y2 - y1
-        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0 - 0.04 * fh
-        ax, ay = fw * 0.62, fh * 0.66
-    else:
-        cx, cy = w / 2.0, h / 2.0
-        ax, ay = w * 0.28, h * 0.32
-    sigma = max(1.0, feather_frac * max(ax, ay))
-    # keep the 50% contour near the requested ellipse: dilate the hard ellipse by ~0.5 sigma
-    return ellipse_mask(h, w, (cx, cy), (ax + 0.5 * sigma, ay + 0.5 * sigma), sigma)
+def hull_mask(h: int, w: int, points: np.ndarray, dilate: float, sigma: float) -> np.ndarray:
+    """Filled convex hull of points, dilated by `dilate` px and feathered with a gaussian of `sigma` px.
+    The hard edge is pushed out by ~sigma so the mask is ~0.85 on the hull itself (the face stays opaque)."""
+    m = np.zeros((h, w), np.uint8)
+    hull = cv2.convexHull(np.round(points).astype(np.int32))
+    cv2.fillConvexPoly(m, hull, 255, cv2.LINE_AA)
+    r = int(round(dilate + sigma))
+    if r > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        m = cv2.dilate(m, k)
+    return np.clip(feather(m.astype(np.float32) / 255.0, sigma), 0.0, 1.0)
+
+
+def harmonize_edges(patch: np.ndarray, ref: np.ndarray, mask: np.ndarray, sigma: float) -> np.ndarray:
+    """Gives the patch the low frequencies (colour, shading) of ref in the mask's transition band, so the soft
+    edge only mixes fine detail and cannot leave a lighter/darker ring. Inside the opaque core the patch is
+    unchanged. patch/ref: BGR uint8 same size; mask float 0..1."""
+    if sigma < 1:
+        return patch
+    p = patch.astype(np.float32)
+    lo_ref = cv2.GaussianBlur(ref.astype(np.float32), (0, 0), sigma)
+    lo_p = cv2.GaussianBlur(p, (0, 0), sigma)
+    band = np.clip(2.0 * (1.0 - mask), 0.0, 1.0)[..., None]
+    return np.clip(p + (lo_ref - lo_p) * band + 0.5, 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------- colour

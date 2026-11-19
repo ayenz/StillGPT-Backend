@@ -34,6 +34,17 @@ export interface CropResult {
   faces: number;
 }
 
+/** How the sidecar aligned a pasted patch onto the base crop (landmark similarity transform). */
+export interface PasteAlignment {
+  scale: number;
+  rotation_deg: number;
+  shift: number;
+}
+
+export interface PasteResult extends FaceSwapImage {
+  alignment?: PasteAlignment;
+}
+
 export interface FaceSwapReadiness {
   ready: boolean;
   models?: Record<string, unknown>;
@@ -55,12 +66,17 @@ export interface FaceSwapOptions {
   readyCacheMs?: number;
 }
 
+/** AppError code of a `/v1/face-paste` rejection because the patch's face does not line up with the base. */
+export const PATCH_MISALIGNED = 'patch_misaligned';
+
 /** Sidecar `{detail}` codes → our job/API error codes. */
 const CODES: Record<string, { status: number; code: string; message: string }> = {
   NO_FACE_IN_TARGET: { status: 400, code: 'no_face_in_target', message: 'No face found in the target image' },
   NO_FACE_IN_SOURCE: { status: 400, code: 'no_face_in_source', message: 'No face found in the face image' },
   BAD_IMAGE: { status: 400, code: 'faceswap_failed', message: 'Face swap could not read an image' },
   TOO_LARGE: { status: 400, code: 'faceswap_failed', message: 'Image is too large for face swap (max 25 MB / 40 MP)' },
+  // face-paste: the edited close-up does not line up with the base (different framing); callers may retry the edit
+  PATCH_MISALIGNED: { status: 422, code: PATCH_MISALIGNED, message: 'The edited close-up does not line up with the photo' },
   AUTH_INVALID: { status: 503, code: 'faceswap_unavailable', message: 'Face swap service rejected the API key' },
 };
 
@@ -107,9 +123,20 @@ export class FaceSwapClient {
     return { crop: Buffer.from(r.crop, 'base64'), box: r.box.map(Number) as FaceBox, faces: r.faces };
   }
 
-  async paste(base: Buffer, patch: Buffer, box: FaceBox): Promise<FaceSwapImage> {
-    const r = await this.call<{ image: string; mime_type: string; width: number; height: number }>('/v1/face-paste', { base: b64(base), patch: b64(patch), box });
-    return { bytes: Buffer.from(r.image, 'base64'), mimeType: r.mime_type, width: r.width, height: r.height };
+  /** Throws AppError code `patch_misaligned` (PATCH_MISALIGNED) when the patch's face does not line up with the base crop. */
+  async paste(base: Buffer, patch: Buffer, box: FaceBox): Promise<PasteResult> {
+    const r = await this.call<{ image: string; mime_type: string; width: number; height: number; alignment?: PasteAlignment }>('/v1/face-paste', {
+      base: b64(base),
+      patch: b64(patch),
+      box,
+    });
+    return {
+      bytes: Buffer.from(r.image, 'base64'),
+      mimeType: r.mime_type,
+      width: r.width,
+      height: r.height,
+      ...(r.alignment && typeof r.alignment === 'object' ? { alignment: r.alignment } : {}),
+    };
   }
 
   /** `GET /health/ready`, cached for `readyCacheMs` (pass `fresh` to probe now). */

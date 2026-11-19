@@ -1,10 +1,10 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_FACE_SWAP_SETTINGS, FACE_SWAP_CROP_PROMPT, FACE_SWAP_PROMPT } from '../../src/core/faceSwap.js';
+import { DEFAULT_FACE_SWAP_SETTINGS, FACE_SWAP_CROP_PROMPT, FACE_SWAP_POLISH_PROMPT, FACE_SWAP_PROMPT } from '../../src/core/faceSwap.js';
 import { largestImageSize } from '../../src/core/media.js';
-import { kv, mediaJobs, usageEvents } from '../../src/db/schema.js';
+import { conversations, kv, mediaJobs, usageEvents } from '../../src/db/schema.js';
 import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 import { readSse } from './native-sse.js';
@@ -21,7 +21,10 @@ interface Call {
   body: any;
 }
 
-/** Fake faceswap sidecar: /health/ready, /v1/swap, /v1/face-crop, /v1/face-paste; `failNext` scripts error replies. */
+/**
+ * Fake faceswap sidecar: /health/ready, /v1/swap, /v1/face-crop, /v1/face-paste; `failNext` scripts error replies,
+ * `misalignNext(n)` makes the next n pastes 422 PATCH_MISALIGNED.
+ */
 async function startFakeSidecar() {
   const calls: Call[] = [];
   const failures: { path: string; status: number; detail: string }[] = [];
@@ -46,7 +49,8 @@ async function startFakeSidecar() {
       if (path === '/v1/swap')
         return reply(200, { image: SWAPPED.toString('base64'), mime_type: 'image/png', width: 5, height: 5, target_faces: 1, source_faces: 1, timings_ms: { swap: 12 } });
       if (path === '/v1/face-crop') return reply(200, { crop: CROP.toString('base64'), box: BOX, faces: 1 });
-      if (path === '/v1/face-paste') return reply(200, { image: PASTED.toString('base64'), mime_type: 'image/png', width: 6, height: 6 });
+      if (path === '/v1/face-paste')
+        return reply(200, { image: PASTED.toString('base64'), mime_type: 'image/png', width: 6, height: 6, alignment: { scale: 1.01, rotation_deg: 0.5, shift: 0.01 } });
       reply(404, { detail: 'Not Found' });
     });
   });
@@ -56,6 +60,9 @@ async function startFakeSidecar() {
     calls,
     setReady: (v: boolean) => (ready = v),
     failNext: (path: string, status: number, detail: string) => failures.push({ path, status, detail }),
+    misalignNext(n: number) {
+      for (let i = 0; i < n; i++) failures.push({ path: '/v1/face-paste', status: 422, detail: 'PATCH_MISALIGNED' });
+    },
     reset() {
       calls.length = 0;
       failures.length = 0;
@@ -123,8 +130,8 @@ describe('GET /face-swap/config', () => {
     const r = await json(await h.api('/api/v1/face-swap/config'));
     expect(r.status).toBe(200);
     expect(r.body).toEqual({
-      default_engine: 'swapper',
-      engines: { swapper: { available: true }, qoder: { available: true }, qoder_crop: { available: true } },
+      default_engine: 'swapper_polish',
+      engines: { swapper_polish: { available: true }, swapper: { available: true }, qoder: { available: true }, qoder_crop: { available: true } },
       max_n: 4,
     });
   });
@@ -133,16 +140,17 @@ describe('GET /face-swap/config', () => {
     sidecar.setReady(false);
     await h.ctx.faceswap!.readiness(true);
     const r = await json(await h.api('/api/v1/face-swap/config'));
-    expect(r.body.engines).toEqual({ swapper: { available: false }, qoder: { available: true }, qoder_crop: { available: false } });
+    expect(r.body.engines).toEqual({ swapper_polish: { available: false }, swapper: { available: false }, qoder: { available: true }, qoder_crop: { available: false } });
 
     const { target, face } = await setup();
-    // no engine given: the unavailable default (swapper) falls back to whole-image qoder
+    // no engine given: the unavailable default (swapper_polish) falls back to whole-image qoder
     const def = await json(await swap(target.id, { face_id: face.id }));
     expect(def.status).toBe(202);
     expect(def.body.jobs[0].request.face_swap.engine).toBe('qoder');
     await finished(def.body.id);
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'swapper' }))).body.error.code).toBe('engine_unavailable');
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'qoder_crop' }))).body.error.code).toBe('engine_unavailable');
+    expect((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.error.code).toBe('engine_unavailable');
     const q = await json(await swap(target.id, { face_id: face.id, engine: 'qoder' }));
     expect(q.status).toBe(202);
     await finished(q.body.id);
@@ -151,9 +159,9 @@ describe('GET /face-swap/config', () => {
 });
 
 describe('face swap engines', () => {
-  it('swapper (default): one free job, n forced to 1, output saved from the sidecar', async () => {
+  it('swapper: one free job, n forced to 1, output saved from the sidecar', async () => {
     const { target, faceFile, face, targetBytes, faceBytes } = await setup();
-    const r = await json(await swap(target.id, { face_id: face.id, n: 3 }));
+    const r = await json(await swap(target.id, { face_id: face.id, engine: 'swapper', n: 3 }));
     expect(r.status).toBe(202);
     expect(r.body.n).toBe(1);
     expect(r.body.jobs[0].request).toMatchObject({
@@ -192,11 +200,11 @@ describe('face swap engines', () => {
     expect(a.jobs[0].error.code).toBe('no_face_in_target');
 
     sidecar.failNext('/v1/swap', 422, 'NO_FACE_IN_SOURCE');
-    const b = await finished((await json(await swap(target.id, { face_id: face.id }))).body.id);
+    const b = await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper' }))).body.id);
     expect(b.jobs[0].error.code).toBe('no_face_in_source');
 
     sidecar.failNext('/v1/swap', 500, 'boom');
-    const c = await finished((await json(await swap(target.id, { face_id: face.id }))).body.id);
+    const c = await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper' }))).body.id);
     expect(c.jobs[0].error.code).toBe('faceswap_failed');
   });
 
@@ -234,7 +242,8 @@ describe('face swap engines', () => {
     expect(paste!.body.box).toEqual(BOX);
 
     const fs = job.request.face_swap;
-    expect(fs).toMatchObject({ crop_box: BOX, source_file_id: target.id });
+    expect(fs).toMatchObject({ crop_box: BOX, source_file_id: target.id, attempts: 1 });
+    expect(fs.swapped_file_id).toBeUndefined();
     expect(job.request.input_file_ids).toEqual([fs.crop_file_id, faceFile.id]);
     expect(job.outputs).toHaveLength(1);
     expect(job.outputs[0].id).not.toBe(fs.qoder_output_file_id);
@@ -290,6 +299,193 @@ describe('face swap engines', () => {
   });
 });
 
+const hiddenTurns = async (jobId: string) =>
+  (await h.ctx.database.db.select().from(conversations).where(sql`${conversations.metadata}->>'job_id' = ${jobId}`)).length;
+const usageOf = (jobId: string) => h.ctx.database.db.select().from(usageEvents).where(eq(usageEvents.jobId, jobId));
+const qoderCredits = async (jobId: string) =>
+  (await usageOf(jobId)).filter((u) => u.model !== 'faceswap').reduce((sum, u) => sum + u.creditsTotal, 0);
+
+describe('swapper_polish and misaligned close-ups', () => {
+  it('swapper_polish (default): swapper → crop of the swapped photo → Qoder polish → pasted onto the swapped photo', async () => {
+    const { target, faceFile, face, targetBytes, faceBytes } = await setup();
+    const r = await json(await swap(target.id, { face_id: face.id, n: 2 }));
+    expect(r.status).toBe(202);
+    expect(r.body.n).toBe(2);
+    expect(r.body.jobs[0].request).toMatchObject({
+      prompt: FACE_SWAP_POLISH_PROMPT,
+      size: '1024x1024',
+      provider_used: 'qoder',
+      face_swap: { engine: 'swapper_polish', crop_expand: 2.2, options: DEFAULT_FACE_SWAP_SETTINGS.swapper, face_file_id: faceFile.id },
+    });
+    const b = await finished(r.body.id);
+    expect(b.status).toBe('completed');
+    // each job does its own swapper step
+    expect(sidecar.calls.filter((c) => c.path === '/v1/swap')).toHaveLength(2);
+
+    const job = b.jobs[0];
+    const calls = sidecar.calls.filter((c) => [c.body?.target, c.body?.image, c.body?.base].some(Boolean));
+    const swapCall = calls.find((c) => c.path === '/v1/swap')!;
+    expect(Buffer.from(swapCall.body.target, 'base64').equals(targetBytes)).toBe(true);
+    expect(Buffer.from(swapCall.body.sources[0], 'base64').equals(faceBytes)).toBe(true);
+    for (const c of sidecar.calls.filter((x) => x.path === '/v1/face-crop')) {
+      expect(Buffer.from(c.body.image, 'base64').equals(SWAPPED)).toBe(true);
+      expect(c.body).toMatchObject({ expand: 2.2, det_thresh: 0.5, size: 1024 });
+    }
+    for (const c of sidecar.calls.filter((x) => x.path === '/v1/face-paste')) {
+      expect(Buffer.from(c.body.base, 'base64').equals(SWAPPED)).toBe(true);
+      expect(c.body.box).toEqual(BOX);
+    }
+
+    const fs = job.request.face_swap;
+    expect(fs).toMatchObject({ attempts: 1, crop_box: BOX, alignment: { scale: 1.01, rotation_deg: 0.5, shift: 0.01 } });
+    expect(fs.polish_failed).toBeUndefined();
+    expect(fs.misaligned_file_ids).toBeUndefined();
+    expect(job.request.input_file_ids).toEqual([fs.crop_file_id, faceFile.id]);
+    expect(job.outputs).toHaveLength(1);
+    const out = job.outputs[0].id;
+    expect([fs.swapped_file_id, fs.crop_file_id, fs.qoder_output_file_id]).not.toContain(out);
+    expect((await download(job.outputs[0].url)).equals(PASTED)).toBe(true);
+    const swapped = await h.ctx.store.get(fs.swapped_file_id);
+    expect(swapped).toMatchObject({ kind: 'upload', filename: 'face-swapped.png', jobId: job.id });
+    expect((await h.ctx.store.read(swapped)).equals(SWAPPED)).toBe(true);
+    expect((await h.ctx.store.read(await h.ctx.store.get(fs.crop_file_id))).equals(CROP)).toBe(true);
+
+    // credits are the Qoder edit's; the swapper step is free usage
+    expect(job.credits).toBeGreaterThan(0);
+    expect(job.credits).toBeCloseTo(await qoderCredits(job.id), 6);
+    expect((await usageOf(job.id)).filter((u) => u.model === 'faceswap')).toHaveLength(1);
+    expect(await hiddenTurns(job.id)).toBe(1);
+    const [row] = await h.ctx.database.db.select().from(mediaJobs).where(eq(mediaJobs.id, job.id));
+    const s = h.qoder.state.sessions.get(row!.qoderSessionId!)!;
+    expect(s.resources.map((x) => x.mount_path)).toEqual(['/data/attachments/face-crop.png', '/data/attachments/face.png']);
+  });
+
+  it('swapper_polish: no face in the target fails in the swapper step before any Qoder turn', async () => {
+    const { target, face } = await setup();
+    sidecar.failNext('/v1/swap', 422, 'NO_FACE_IN_TARGET');
+    const a = await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.id);
+    expect(a.status).toBe('failed');
+    expect(a.jobs[0].error.code).toBe('no_face_in_target');
+    expect(sidecar.calls.map((c) => c.path)).toEqual(['/v1/swap']);
+    expect(await hiddenTurns(a.jobs[0].id)).toBe(0);
+  });
+
+  for (const engine of ['swapper_polish', 'qoder_crop'] as const) {
+    it(`${engine}: a misaligned edit is redone in a new Qoder turn; credits add up`, async () => {
+      const { target, face } = await setup();
+      sidecar.misalignNext(1);
+      const b = await finished((await json(await swap(target.id, { face_id: face.id, engine }))).body.id);
+      expect(b.status).toBe('completed');
+      const job = b.jobs[0];
+      const fs = job.request.face_swap;
+      expect(fs.attempts).toBe(2);
+      expect(fs.misaligned_file_ids).toHaveLength(1);
+      expect(fs.misaligned_file_ids[0]).not.toBe(fs.qoder_output_file_id);
+      expect(fs.polish_failed).toBeUndefined();
+      expect(sidecar.calls.filter((c) => c.path === '/v1/face-paste')).toHaveLength(2);
+      expect(sidecar.calls.filter((c) => c.path === '/v1/face-crop')).toHaveLength(1);
+      expect(await hiddenTurns(job.id)).toBe(2);
+      expect(job.outputs).toHaveLength(1);
+      expect((await download(job.outputs[0].url)).equals(PASTED)).toBe(true);
+      const usage = (await usageOf(job.id)).filter((u) => u.model !== 'faceswap');
+      expect(usage).toHaveLength(2);
+      expect(job.credits).toBeCloseTo(await qoderCredits(job.id), 6);
+      expect(job.credits).toBeCloseTo(usage[0]!.creditsTotal * 2, 6);
+    });
+  }
+
+  it('swapper_polish: misaligned 3 times → completes with the plain swapper result and polish_failed', async () => {
+    const { target, face } = await setup();
+    sidecar.misalignNext(3);
+    const b = await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.id);
+    expect(b.status).toBe('completed');
+    const job = b.jobs[0];
+    const fs = job.request.face_swap;
+    expect(fs).toMatchObject({ attempts: 3, polish_failed: 'misaligned' });
+    expect(fs.misaligned_file_ids).toHaveLength(3);
+    expect(fs.qoder_output_file_id).toBeUndefined();
+    expect(await hiddenTurns(job.id)).toBe(3);
+    expect(job.outputs).toHaveLength(1);
+    expect(job.outputs[0].id).not.toBe(fs.swapped_file_id);
+    expect((await download(job.outputs[0].url)).equals(SWAPPED)).toBe(true);
+    expect(job.credits).toBeGreaterThan(0);
+    expect(job.credits).toBeCloseTo(await qoderCredits(job.id), 6);
+    expect((await usageOf(job.id)).filter((u) => u.model !== 'faceswap')).toHaveLength(3);
+  });
+
+  it('qoder_crop: misaligned 3 times → fails with qoder_misaligned, credits kept', async () => {
+    const { target, face } = await setup();
+    sidecar.misalignNext(3);
+    const b = await finished((await json(await swap(target.id, { face_id: face.id, engine: 'qoder_crop' }))).body.id);
+    expect(b.status).toBe('failed');
+    const job = b.jobs[0];
+    expect(job.error.code).toBe('qoder_misaligned');
+    expect(job.outputs).toEqual([]);
+    expect(job.request.face_swap).toMatchObject({ attempts: 3 });
+    expect(job.request.face_swap.misaligned_file_ids).toHaveLength(3);
+    expect(await hiddenTurns(job.id)).toBe(3);
+    expect(job.credits).toBeGreaterThan(0);
+    expect(job.credits).toBeCloseTo(await qoderCredits(job.id), 6);
+  });
+
+  it('swapper_polish: a job picked up again after a restart reuses the swapped photo and crop', async () => {
+    const { target, face } = await setup();
+    const first = (await finished((await json(await swap(target.id, { face_id: face.id }))).body.id)).jobs[0];
+    const fs = { ...first.request.face_swap };
+    delete fs.qoder_output_file_id;
+    delete fs.alignment;
+    const [copy] = await h.ctx.database.db
+      .insert(mediaJobs)
+      .values({ id: `img_resume${Date.now()}`, userId: h.userId, kind: 'image', request: { ...first.request, face_swap: fs }, batchId: `batch_resume${Date.now()}` })
+      .returning();
+    sidecar.reset();
+    await (h.ctx.media as unknown as { resumeAll(): Promise<void> }).resumeAll();
+    const done = await finished(copy!.batchId!);
+    expect(done.status).toBe('completed');
+    expect(sidecar.calls.map((c) => c.path)).toEqual(['/v1/face-paste']);
+    expect(Buffer.from(sidecar.calls[0]!.body.base, 'base64').equals(SWAPPED)).toBe(true);
+    expect(done.jobs[0].request.face_swap).toMatchObject({ swapped_file_id: fs.swapped_file_id, crop_file_id: fs.crop_file_id, attempts: 1 });
+    expect((await download(done.jobs[0].outputs[0].url)).equals(PASTED)).toBe(true);
+  });
+
+  it('a restart between misaligned retries keeps the attempt count and the credits already spent', async () => {
+    const { target, face } = await setup();
+    sidecar.misalignNext(1);
+    const first = (await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.id)).jobs[0];
+    // the state right after attempt 1 was rejected: attempt 2 announced, attempt 1's credits banked, no session yet
+    const banked = first.credits / 2;
+    const fs = { ...first.request.face_swap, attempts: 2 };
+    delete fs.qoder_output_file_id;
+    delete fs.alignment;
+    const [copy] = await h.ctx.database.db
+      .insert(mediaJobs)
+      .values({
+        id: `img_retry${Date.now()}`,
+        userId: h.userId,
+        kind: 'image',
+        status: 'in_progress',
+        startedAt: new Date(),
+        credits: banked,
+        request: { ...first.request, face_swap: fs },
+        batchId: `batch_retry${Date.now()}`,
+      })
+      .returning();
+    sidecar.reset();
+    sidecar.misalignNext(1);
+    await (h.ctx.media as unknown as { resumeAll(): Promise<void> }).resumeAll();
+    const done = await finished(copy!.batchId!);
+    expect(done.status).toBe('completed');
+    const job = done.jobs[0];
+    // no new swap or crop; attempt 2 (re-started, the turn never ran) misaligned → attempt 3 pasted
+    expect(sidecar.calls.map((c) => c.path)).toEqual(['/v1/face-paste', '/v1/face-paste']);
+    expect(job.request.face_swap).toMatchObject({ attempts: 3, swapped_file_id: fs.swapped_file_id, crop_file_id: fs.crop_file_id });
+    expect(job.request.face_swap.misaligned_file_ids).toHaveLength(2);
+    expect(await hiddenTurns(job.id)).toBe(2);
+    expect(job.credits).toBeCloseTo(banked + (await qoderCredits(job.id)), 6);
+    expect((await download(job.outputs[0].url)).equals(PASTED)).toBe(true);
+  });
+});
+
 describe('admin face swap settings', () => {
   it('is admin-only', async () => {
     expect((await h.api('/api/v1/admin/face-swap/settings')).status).toBe(403);
@@ -338,6 +534,7 @@ describe('admin face swap settings', () => {
       { swapper: { det_thresh: 2 } },
       { swapper: { restorer: 'x' } },
       { qoder_prompt: 'short' },
+      { polish_prompt: 'short' },
       { unknown: 1 },
       { swapper: { nope: 1 } },
     ]) {
@@ -351,6 +548,43 @@ describe('admin face swap settings', () => {
     const reset2 = await json(await admin('/settings', { method: 'PUT', json: { default_engine: null, crop_expand: null, swapper: null } }));
     expect(reset2.body.settings).toEqual(DEFAULT_FACE_SWAP_SETTINGS);
     expect(await h.ctx.database.db.select().from(kv).where(eq(kv.key, 'face_swap.settings'))).toEqual([]);
+  });
+});
+
+describe('face swap settings: stored overrides from before swapper_polish', () => {
+  it('keep working; new fields and defaults fill in', async () => {
+    const old = { default_engine: 'swapper', qoder_crop_prompt: 'An older custom close-up prompt, long enough.', swapper: { det_thresh: 0.4 } };
+    await h.ctx.database.db.insert(kv).values({ key: 'face_swap.settings', value: old }).onConflictDoUpdate({ target: kv.key, set: { value: old } });
+    try {
+      await h.ctx.faceSwapSettings.load();
+      const s = h.ctx.faceSwapSettings.get();
+      expect(s).toEqual({
+        ...DEFAULT_FACE_SWAP_SETTINGS,
+        default_engine: 'swapper',
+        qoder_crop_prompt: old.qoder_crop_prompt,
+        swapper: { ...DEFAULT_FACE_SWAP_SETTINGS.swapper, det_thresh: 0.4 },
+      });
+      expect(s.polish_prompt).toBe(FACE_SWAP_POLISH_PROMPT);
+      const put = await json(await admin('/settings', { method: 'PUT', json: { polish_prompt: 'A custom polish prompt that is long enough.', default_engine: 'swapper_polish' } }));
+      expect(put.status).toBe(200);
+      expect(put.body.settings).toMatchObject({ polish_prompt: 'A custom polish prompt that is long enough.', default_engine: 'swapper_polish', qoder_crop_prompt: old.qoder_crop_prompt });
+      const { target, face } = await setup();
+      const r = await json(await swap(target.id, { face_id: face.id }));
+      expect(r.body.jobs[0].request).toMatchObject({ prompt: 'A custom polish prompt that is long enough.', face_swap: { engine: 'swapper_polish' } });
+      await finished(r.body.id);
+    } finally {
+      await h.ctx.database.db.delete(kv).where(eq(kv.key, 'face_swap.settings'));
+      await h.ctx.faceSwapSettings.load();
+    }
+  });
+
+  it('defaults: swapper_polish engine, neutral close-up prompt without bangs changes, the polish prompt', () => {
+    expect(DEFAULT_FACE_SWAP_SETTINGS.default_engine).toBe('swapper_polish');
+    expect(DEFAULT_FACE_SWAP_SETTINGS.polish_prompt).toBe(FACE_SWAP_POLISH_PROMPT);
+    expect(FACE_SWAP_CROP_PROMPT).toMatch(/^Make the person in image 1 look exactly like the person in image 2\./);
+    expect(FACE_SWAP_CROP_PROMPT).toContain('Do not add, remove or restyle bangs/fringe; keep the hairline and every hair strand of image 1 exactly.');
+    expect(FACE_SWAP_CROP_PROMPT).not.toMatch(/\bwoman\b/);
+    expect(FACE_SWAP_POLISH_PROMPT).toMatch(/^Photo retouch of a close-up crop\./);
   });
 });
 
@@ -372,9 +606,11 @@ describe('POST /admin/face-swap/test', () => {
 
   it('refuses qoder engines and reports sidecar errors', async () => {
     const { target, face } = await setup({ key: h.admin.apiKey });
-    const q = await json(await admin('/test', { method: 'POST', json: { target_file_id: target.id, face_id: face.id, engine: 'qoder' } }));
-    expect(q.status).toBe(400);
-    expect(q.body.error.code).toBe('test_engine_unsupported');
+    for (const engine of ['qoder', 'qoder_crop', 'swapper_polish']) {
+      const q = await json(await admin('/test', { method: 'POST', json: { target_file_id: target.id, face_id: face.id, engine } }));
+      expect(q.status, engine).toBe(400);
+      expect(q.body.error.code).toBe('test_engine_unsupported');
+    }
     sidecar.failNext('/v1/swap', 422, 'NO_FACE_IN_SOURCE');
     const e = await json(await admin('/test', { method: 'POST', json: { target_file_id: target.id, face_id: face.id } }));
     expect(e.status).toBe(400);

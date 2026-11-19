@@ -20,9 +20,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import imaging
+from .engine import estimate_alignment, pick_face
 from .logs import setup_logging
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 log = logging.getLogger("faceswap")
 
 
@@ -86,6 +87,20 @@ async def _image_error(_: Request, exc: imaging.ImageError):
     return JSONResponse({"detail": exc.code}, status_code=exc.status)
 
 
+class PatchMisaligned(Exception):
+    """The edited patch does not line up with the face in the base crop (422 PATCH_MISALIGNED)."""
+
+    def __init__(self, reason: str, alignment: dict | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.alignment = alignment
+
+
+@app.exception_handler(PatchMisaligned)
+async def _patch_misaligned(_: Request, exc: PatchMisaligned):
+    return JSONResponse({"detail": "PATCH_MISALIGNED", "reason": exc.reason, "alignment": exc.alignment}, status_code=422)
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_error(_: Request, exc: RequestValidationError):
     errors = [{"loc": list(e.get("loc", [])), "msg": e.get("msg", "")} for e in exc.errors()]
@@ -145,6 +160,10 @@ class PasteRequest(BaseModel):
     box: list[int] = Field(min_length=4, max_length=4)
     feather: float = Field(0.15, ge=0.0, le=1.0)
     color_match: bool = True
+    mask: Literal["face", "box"] = "face"
+    max_scale_dev: float = Field(0.18, ge=0.0, le=1.0)
+    max_rotation_deg: float = Field(12.0, ge=0.0, le=180.0)
+    max_shift: float = Field(0.12, ge=0.0, le=1.0)
     output_format: Literal["png", "jpeg"] = "jpeg"
     jpeg_quality: int = Field(95, ge=50, le=100)
 
@@ -220,7 +239,20 @@ def do_crop(eng, req: CropRequest) -> dict:
     return {"crop": b64, "box": box, "faces": len(faces), "width": int(img.bgr.shape[1]), "height": int(img.bgr.shape[0])}
 
 
+PASTE_DET_THRESH = 0.5
+
+
+def _detect_main(eng, img: np.ndarray, fallback_thresh: float | None = None):
+    h, w = img.shape[:2]
+    face = pick_face(eng.detector.detect(img, PASTE_DET_THRESH), w, h)
+    if face is None and fallback_thresh is not None:  # the base crop came from a detection: be lenient there
+        face = pick_face(eng.detector.detect(img, fallback_thresh), w, h)
+    return face
+
+
 def do_paste(eng, req: PasteRequest) -> dict:
+    """Landmark-aligned paste: the patch face is matched to the face in the base crop with a similarity transform
+    (rejected when it is too far off), warped onto it and blended with a feathered face-hull mask."""
     t0 = time.perf_counter()
     base = imaging.decode_image(req.base)
     patch = imaging.decode_image(req.patch)
@@ -232,26 +264,71 @@ def do_paste(eng, req: PasteRequest) -> dict:
     if ix2 <= ix1 or iy2 <= iy1:
         raise HTTPException(status_code=422, detail="BAD_BOX")
 
-    p = imaging.resize_to(patch.bgr, w, h)
-    # face mask on the patch: detect on the patch itself (it is a close-up)
-    faces = eng.detector.detect(p, 0.4)
-    face_box = None
-    if faces:
-        cx, cy = w / 2.0, h / 2.0
-        # the face nearest to the patch centre, weighted by size
-        face = max(faces, key=lambda f: f.area / (1.0 + np.hypot((f.box[0] + f.box[2]) / 2 - cx, (f.box[1] + f.box[3]) / 2 - cy) / max(w, h)))
-        face_box = face.box
-    mask = imaging.face_region_mask(h, w, face_box, req.feather)
+    # 1. the original crop and the patch at a working resolution (the output only needs box resolution);
+    #    the patch face is detected on the full patch for precise landmarks
+    P = patch.bgr
+    ph, pw = P.shape[:2]
+    f = min(1.0, max(256.0, float(max(w, h))) / float(max(pw, ph)))
+    ww, wh = max(8, int(round(pw * f))), max(8, int(round(ph * f)))
+    side = float(max(ww, wh))
+    ref = imaging.resize_to(imaging.crop_padded(base.bgr, req.box), ww, wh)
+    f_ref = _detect_main(eng, ref, 0.2)
+    if f_ref is None:
+        raise imaging.ImageError("NO_FACE_IN_TARGET")
+    f_p = _detect_main(eng, P)
+    if f_p is None:
+        raise PatchMisaligned("no_face_in_patch")
+    p_kps, p_box = f_p.kps * f, f_p.box[:4] * f
 
-    ref = imaging.crop_padded(base.bgr, req.box)
+    # 2. similarity transform patch -> original crop, with limits
+    al = estimate_alignment(p_kps, f_ref.kps, side)
+    info = al.as_dict()
+    lo, hi = 1.0 / (1.0 + req.max_scale_dev), 1.0 + req.max_scale_dev
+    if not lo <= al.scale <= hi:
+        reason = "scale"
+    elif abs(al.rotation_deg) > req.max_rotation_deg:
+        reason = "rotation"
+    elif al.shift > req.max_shift:
+        reason = "shift"
+    else:
+        reason = None
+    if reason:
+        log.info("face-paste misaligned", extra={"reason": reason, "alignment": info, "box": req.box})
+        raise PatchMisaligned(reason, info)
+
+    # 3. warp the patch onto the original face (downscale first, then a near-identity warp)
+    warped = cv2.warpAffine(
+        imaging.resize_to(P, ww, wh), al.M, (ww, wh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101
+    )
+    kps_t = p_kps @ al.M[:, :2].T + al.M[:, 2]
+    bx1, by1, bx2, by2 = (float(v) for v in p_box)
+    corners = np.array([[bx1, by1], [bx2, by1], [bx1, by2], [bx2, by2]], np.float32) @ al.M[:, :2].T + al.M[:, 2]
+    box_t = np.array([corners[:, 0].min(), corners[:, 1].min(), corners[:, 0].max(), corners[:, 1].max()], np.float32)
+
+    rx1, ry1, rx2, ry2 = (float(v) for v in f_ref.box[:4])
+    face_size = max(rx2 - rx1, ry2 - ry1)
+    sigma = max(1.0, req.feather * 0.66 * face_size)
+    # faces of both images (they now overlap): the new features fully in, the old ones fully covered
+    pts = np.vstack([imaging.face_hull_points(f_ref.box, f_ref.kps), imaging.face_hull_points(box_t, kps_t)])
+    core = imaging.hull_mask(wh, ww, imaging.face_hull_points(f_ref.box, f_ref.kps, forehead=0.0), 0.0, 0.0)
+    if req.mask == "face":
+        mask = imaging.hull_mask(wh, ww, pts, 0.04 * face_size, sigma)
+    else:
+        mask = imaging.resize_to(imaging.box_mask(int(side), pad=0.06, blur=max(0.01, req.feather * 0.3)), ww, wh)
+
     if req.color_match:
-        p = imaging.color_match_lab(p, ref, mask)
+        warped = imaging.color_match_lab(warped, ref, core)
+    warped = imaging.harmonize_edges(warped, ref, mask, 0.5 * sigma)
+
+    # 4. back to the box at base resolution; base pixels outside the mask stay untouched
+    top = imaging.resize_to(warped, w, h)
+    m = np.clip(cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA if w < ww else cv2.INTER_LINEAR), 0.0, 1.0)
     out = base.bgr.copy()
     sl = (slice(oy, oy + (iy2 - iy1)), slice(ox, ox + (ix2 - ix1)))
-    out[iy1:iy2, ix1:ix2] = imaging.blend(out[iy1:iy2, ix1:ix2], p[sl], mask[sl])
+    out[iy1:iy2, ix1:ix2] = imaging.blend(out[iy1:iy2, ix1:ix2], top[sl], m[sl])
     b64, mime = imaging.encode_image(out, req.output_format, req.jpeg_quality, base.alpha)
-    log.info("face-paste", extra={"face_found": face_box is not None, "box": req.box, "ms": _ms(t0)})
-    return {"image": b64, "mime_type": mime, "width": W, "height": H}
+    log.info("face-paste", extra={"alignment": info, "mask": req.mask, "box": req.box, "ms": _ms(t0)})
+    return {"image": b64, "mime_type": mime, "width": W, "height": H, "alignment": info}
 
 
 # ---------------------------------------------------------------- routes

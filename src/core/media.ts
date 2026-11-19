@@ -7,7 +7,7 @@ import type { ImageProvider } from '../config.js';
 import { AppError, badRequest, notFound, toAppError } from '../errors.js';
 import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
-import type { FaceBox, FaceSwapClient, SwapperOptions } from '../providers/faceswap.js';
+import { type FaceBox, type FaceSwapClient, PATCH_MISALIGNED, type PasteAlignment, type SwapperOptions } from '../providers/faceswap.js';
 import { FOLAX_PROMPT_MAX, type FolaxClient, toFolaxRatio } from '../providers/folax.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
@@ -32,7 +32,9 @@ export const MAX_IMAGE_BATCH = 10;
 /** Most images one face swap may ask for. */
 export const MAX_FACE_SWAP_BATCH = 4;
 
-export { FACE_SWAP_PROMPT, FACE_SWAP_CROP_PROMPT } from './faceSwap.js';
+export { FACE_SWAP_PROMPT, FACE_SWAP_CROP_PROMPT, FACE_SWAP_POLISH_PROMPT } from './faceSwap.js';
+/** Qoder turns a close-up engine (`qoder_crop`, `swapper_polish`) may use when the sidecar rejects the edit as misaligned. */
+export const MAX_FACE_CROP_ATTEMPTS = 3;
 
 /** The allowed image size whose aspect ratio is closest to `width`x`height` (log-ratio distance). */
 export function closestImageSize(width: number | undefined, height: number | undefined): ImageSize {
@@ -123,15 +125,25 @@ export interface FaceSwapJobInfo {
   engine?: FaceSwapEngine;
   /** The face's reference image (identity source). */
   face_file_id?: string;
-  /** Snapshot of the swapper options at creation (`swapper`, and det_thresh for `qoder_crop`). */
+  /** Snapshot of the swapper options at creation (`swapper`, `swapper_polish`, and det_thresh for `qoder_crop`). */
   options?: SwapperOptions;
-  /** `qoder_crop`: crop factor at creation. */
+  /** Close-up engines (`qoder_crop`, `swapper_polish`): crop factor at creation. */
   crop_expand?: number;
-  /** `qoder_crop`: the close-up Qoder edited (internal upload) and where it sits in the target. */
+  /** `swapper_polish`: the swapper's result (internal upload, not an output); the close-up is cut from it and pasted back onto it. */
+  swapped_file_id?: string;
+  /** Close-up engines: the close-up Qoder edited (internal upload) and where it sits in the base photo. */
   crop_file_id?: string;
   crop_box?: FaceBox;
-  /** `qoder_crop`: the raw Qoder output (the edited crop, not a gallery output). */
+  /** Close-up engines: the raw Qoder output that got pasted (the edited crop, not a gallery output). */
   qoder_output_file_id?: string;
+  /** Close-up engines: Qoder turns started so far (1 + retries after misaligned edits, at most MAX_FACE_CROP_ATTEMPTS). */
+  attempts?: number;
+  /** Close-up engines: raw Qoder outputs the sidecar rejected as misaligned (internal, not outputs). */
+  misaligned_file_ids?: string[];
+  /** Close-up engines: how the sidecar aligned the pasted edit. */
+  alignment?: PasteAlignment;
+  /** `swapper_polish`: set when every polish attempt was misaligned; the output is then the plain swapper result. */
+  polish_failed?: 'misaligned';
 }
 
 export interface VideoRequest {
@@ -424,6 +436,9 @@ export class MediaService {
    *   at the largest allowed size of the target's aspect ratio.
    * - `qoder_crop`: n jobs; each crops the target's face (sidecar), lets Qoder edit the 1024x1024 close-up with
    *   `qoder_crop_prompt`, then pastes it back into the original photo (sidecar).
+   * - `swapper_polish`: n jobs; each runs the swapper (sidecar), then the `qoder_crop` flow on the swapped photo with
+   *   `polish_prompt`. Every job does its own (cheap, deterministic) swapper step, so each job is self-contained.
+   * Close-up engines retry the Qoder edit (new turn) when the sidecar rejects it as misaligned.
    * The engine defaults to the admin setting (falling back to `qoder` when that default is unavailable); an explicitly
    * requested engine that is not available is a 400 `engine_unavailable`.
    * The jobs' `request.face_swap` records source, face and engine for the gallery.
@@ -449,7 +464,7 @@ export class MediaService {
       engine,
       face_file_id: req.face.fileId,
       ...(engine !== 'qoder' ? { options: settings.swapper } : {}),
-      ...(engine === 'qoder_crop' ? { crop_expand: settings.crop_expand } : {}),
+      ...(isCloseUpEngine(engine) ? { crop_expand: settings.crop_expand } : {}),
     };
     const base = {
       userId: req.userId,
@@ -462,8 +477,10 @@ export class MediaService {
         { ...base, prompt: `Face swap: ${req.face.name}`, size: '1024x1024', provider: 'qoder', extra: { face_swap: info, provider: 'faceswap', provider_used: 'faceswap' } },
         1,
       );
-    if (engine === 'qoder_crop')
-      return this.createImageBatch({ ...base, prompt: settings.qoder_crop_prompt, size: '1024x1024', provider: 'qoder', extra: { face_swap: info } }, n);
+    if (isCloseUpEngine(engine)) {
+      const prompt = engine === 'swapper_polish' ? settings.polish_prompt : settings.qoder_crop_prompt;
+      return this.createImageBatch({ ...base, prompt, size: '1024x1024', provider: 'qoder', extra: { face_swap: info } }, n);
+    }
     const { width, height } = await imageSizeOf(this.d.store.pathOf(target!.file));
     return this.createImageBatch({ ...base, prompt: settings.qoder_prompt, size: largestImageSize(width, height), provider: 'qoder', extra: { face_swap: info } }, n);
   }
@@ -744,7 +761,7 @@ export class MediaService {
       let current = job;
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
-      if (engine === 'qoder_crop') current = await this.prepareFaceCrop(job);
+      if (isCloseUpEngine(engine)) current = await this.prepareFaceCrop(job);
       if (usesFolax(job)) {
         try {
           return await this.finish(job.id, await this.runFolax(job));
@@ -753,7 +770,7 @@ export class MediaService {
         }
       }
       const outcome = await this.runQoderWithRetry(current);
-      await this.finish(job.id, engine === 'qoder_crop' ? await this.pasteFaceCrop(current, outcome) : outcome);
+      await this.finish(job.id, isCloseUpEngine(engine) ? await this.completeFaceCrop(current, outcome) : outcome);
     } catch (err) {
       const e = toAppError(err);
       log.error('media.job_failed', { code: e.code, err: e.message });
@@ -827,59 +844,168 @@ export class MediaService {
 
   /** `swapper`: the sidecar swaps the face into the target at its original resolution. One output, free. */
   private async runSwapper(job: MediaJob): Promise<Outcome> {
-    if (!this.d.faceswap) throw new AppError(503, 'faceswap_unavailable', 'The face swap service is not configured');
-    const fs = job.request.face_swap as FaceSwapJobInfo;
-    const [target, face] = await this.loadInputs(job.userId, [fs.source_file_id, faceFileIdOf(job)]);
-    const r = await this.d.faceswap.swap(await this.d.store.read(target!.file), [await this.d.store.read(face!.file)], fs.options);
+    const { r, target } = await this.swapFace(job);
     const file = await this.d.store.save({
       userId: job.userId,
       kind: 'artifact',
-      filename: `faceswap-${baseName(target!.file.filename)}.${extOf(r.mimeType)}`,
+      filename: `faceswap-${baseName(target.filename)}.${extOf(r.mimeType)}`,
       mimeType: r.mimeType,
       bytes: r.bytes,
       jobId: job.id,
     });
-    await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'faceswap', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
     return { fileIds: [file.id], credits: 0, error: null };
   }
 
-  /**
-   * `qoder_crop`, step 1: the sidecar cuts a square around the target's face; the crop becomes the job's first input
-   * image (an internal upload) in place of the target. Idempotent: a re-run (e.g. after a restart) reuses the crop.
-   */
-  private async prepareFaceCrop(job: MediaJob): Promise<MediaJob> {
-    const fs = job.request.face_swap as FaceSwapJobInfo;
-    if (fs.crop_file_id && fs.crop_box) return job;
+  /** Sidecar swap of the job's face into its target photo, recorded as free usage (`model: "faceswap"`). */
+  private async swapFace(job: MediaJob) {
     if (!this.d.faceswap) throw new AppError(503, 'faceswap_unavailable', 'The face swap service is not configured');
-    const [target] = await this.loadInputs(job.userId, [fs.source_file_id]);
-    const r = await this.d.faceswap.crop(await this.d.store.read(target!.file), { expand: fs.crop_expand, detThresh: fs.options?.det_thresh, size: 1024 });
-    const crop = await this.d.store.save({ userId: job.userId, kind: 'upload', filename: 'face-crop.png', mimeType: 'image/png', bytes: r.crop, jobId: job.id });
-    const request = {
-      ...job.request,
-      input_file_ids: [crop.id, faceFileIdOf(job)],
-      face_swap: { ...fs, crop_file_id: crop.id, crop_box: r.box } satisfies FaceSwapJobInfo,
-    };
-    const [row] = await this.d.db.update(mediaJobs).set({ request }).where(eq(mediaJobs.id, job.id)).returning();
-    return row ?? { ...job, request };
+    const fs = job.request.face_swap as FaceSwapJobInfo;
+    const [target, face] = await this.loadInputs(job.userId, [fs.source_file_id, faceFileIdOf(job)]);
+    const r = await this.d.faceswap.swap(await this.d.store.read(target!.file), [await this.d.store.read(face!.file)], fs.options);
+    await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'faceswap', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
+    return { r, target: target!.file };
+  }
+
+  /** Store a new `request.face_swap` on the job; returns the updated row. */
+  private async saveFaceSwap(job: MediaJob, fs: FaceSwapJobInfo, set: Partial<Pick<MediaJob, 'credits' | 'qoderSessionId' | 'lastEventId'>> = {}, extra: Record<string, unknown> = {}): Promise<MediaJob> {
+    const request = { ...job.request, ...extra, face_swap: fs };
+    const [row] = await this.d.db
+      .update(mediaJobs)
+      .set({ request, ...set })
+      .where(eq(mediaJobs.id, job.id))
+      .returning();
+    return row ?? { ...job, ...set, request };
   }
 
   /**
-   * `qoder_crop`, step 3: blend Qoder's edited crop back into the ORIGINAL target. The pasted photo is the job's only
-   * output; the raw crop output stays out of the gallery (its id is kept in `face_swap.qoder_output_file_id`).
-   * Qoder's credits stay on the job.
+   * Close-up engines, step 1 (each sub-step is stored on the job, so a re-run after a restart skips what is done):
+   * - `swapper_polish` only: the swapper result is saved as an internal upload (`face_swap.swapped_file_id`);
+   * - the sidecar cuts a square around the face of the base photo (the swapped photo for `swapper_polish`, else the
+   *   target); the crop becomes the job's first input image in place of the target;
+   * - `face_swap.attempts` is at least 1 (the Qoder turn about to start; a job re-queued because its turn never reached
+   *   Qoder reuses that attempt).
    */
-  private async pasteFaceCrop(job: MediaJob, outcome: Outcome): Promise<Outcome> {
-    if (outcome.error || !outcome.fileIds.length) return outcome;
+  private async prepareFaceCrop(job: MediaJob): Promise<MediaJob> {
+    let current = job;
+    let fs = job.request.face_swap as FaceSwapJobInfo;
+    if (fs.engine === 'swapper_polish' && !fs.swapped_file_id) {
+      const { r } = await this.swapFace(current);
+      const swapped = await this.d.store.save({
+        userId: job.userId,
+        kind: 'upload',
+        filename: `face-swapped.${extOf(r.mimeType)}`,
+        mimeType: r.mimeType,
+        bytes: r.bytes,
+        jobId: job.id,
+      });
+      fs = { ...fs, swapped_file_id: swapped.id };
+      current = await this.saveFaceSwap(current, fs);
+    }
+    if (!fs.crop_file_id || !fs.crop_box) {
+      if (!this.d.faceswap) throw new AppError(503, 'faceswap_unavailable', 'The face swap service is not configured');
+      const [base] = await this.loadInputs(job.userId, [fs.swapped_file_id ?? fs.source_file_id]);
+      const r = await this.d.faceswap.crop(await this.d.store.read(base!.file), { expand: fs.crop_expand, detThresh: fs.options?.det_thresh, size: 1024 });
+      const crop = await this.d.store.save({ userId: job.userId, kind: 'upload', filename: 'face-crop.png', mimeType: 'image/png', bytes: r.crop, jobId: job.id });
+      fs = { ...fs, crop_file_id: crop.id, crop_box: r.box };
+      current = await this.saveFaceSwap(current, { ...fs, attempts: Math.max(fs.attempts ?? 0, 1) }, {}, { input_file_ids: [crop.id, faceFileIdOf(job)] });
+    } else if (!fs.attempts) {
+      current = await this.saveFaceSwap(current, { ...fs, attempts: 1 });
+    }
+    return current;
+  }
+
+  /**
+   * Close-up engines, step 3: paste Qoder's edit back, and when the sidecar rejects it as misaligned (Qoder changed
+   * the framing), run a new Qoder turn, up to MAX_FACE_CROP_ATTEMPTS turns in all. Credits of all turns add up on the
+   * job: before each retry, the credits so far are stored in the job's `credits` (with `face_swap.attempts` + 1, the
+   * rejected output in `face_swap.misaligned_file_ids` and the old session cleared), so a restart resumes the new turn
+   * and never pays again for an attempt already made.
+   * Still misaligned after the last attempt: `swapper_polish` completes with the plain swapper result
+   * (`face_swap.polish_failed: "misaligned"`), `qoder_crop` fails with `qoder_misaligned`.
+   */
+  private async completeFaceCrop(job: MediaJob, first: Outcome): Promise<Outcome> {
+    let current = job;
+    let outcome = first;
+    for (;;) {
+      // credits of earlier (misaligned) attempts of this job
+      const banked = current.credits ?? 0;
+      const total = (c: number | null) => (c === null && !banked ? null : banked + (c ?? 0));
+      const fs = current.request.face_swap as FaceSwapJobInfo;
+      const r = await this.pasteFaceCrop(current, outcome);
+      if (!('misaligned' in r)) {
+        if (r.fs) await this.saveFaceSwap(current, r.fs);
+        return { ...r.outcome, credits: total(r.outcome.credits) };
+      }
+      const attempts = fs.attempts ?? 1;
+      const next: FaceSwapJobInfo = { ...fs, attempts, misaligned_file_ids: [...(fs.misaligned_file_ids ?? []), r.misaligned] };
+      if (attempts >= MAX_FACE_CROP_ATTEMPTS) return this.giveUpFaceCrop(current, next, total(outcome.credits));
+      this.d.log.warn('media.face_crop_misaligned_retry', { jobId: job.id, attempt: attempts + 1 });
+      current = await this.saveFaceSwap(current, { ...next, attempts: attempts + 1 }, { credits: total(outcome.credits), qoderSessionId: null, lastEventId: null });
+      try {
+        outcome = await this.runQoderWithRetry(current);
+      } catch (err) {
+        const e = toAppError(err);
+        return { fileIds: [], credits: total(null), error: { code: e.code, message: e.message } };
+      }
+    }
+  }
+
+  /** Every Qoder edit was misaligned: `swapper_polish` falls back to the swapper result, `qoder_crop` fails. */
+  private async giveUpFaceCrop(job: MediaJob, fs: FaceSwapJobInfo, credits: number | null): Promise<Outcome> {
+    this.d.log.warn('media.face_crop_misaligned', { jobId: job.id, engine: fs.engine, attempts: fs.attempts });
+    if (fs.engine === 'swapper_polish' && fs.swapped_file_id) {
+      try {
+        const [swapped, target] = await Promise.all([this.d.store.get(fs.swapped_file_id, job.userId), this.d.store.get(fs.source_file_id, job.userId)]);
+        // a copy, so the output and the internal intermediate stay separate files (trash, gallery)
+        const file = await this.d.store.save({
+          userId: job.userId,
+          kind: 'artifact',
+          filename: `faceswap-${baseName(target.filename)}.${extOf(swapped.mimeType)}`,
+          mimeType: swapped.mimeType,
+          bytes: await this.d.store.read(swapped),
+          jobId: job.id,
+        });
+        await this.saveFaceSwap(job, { ...fs, polish_failed: 'misaligned' });
+        return { fileIds: [file.id], credits, error: null };
+      } catch (err) {
+        const e = toAppError(err);
+        await this.saveFaceSwap(job, fs).catch(() => {});
+        return { fileIds: [], credits, error: { code: e.code, message: e.message } };
+      }
+    }
+    await this.saveFaceSwap(job, fs);
+    return {
+      fileIds: [],
+      credits,
+      error: { code: 'qoder_misaligned', message: `Qoder's edited close-up did not line up with the photo (${fs.attempts ?? MAX_FACE_CROP_ATTEMPTS} attempts)` },
+    };
+  }
+
+  /**
+   * Blend Qoder's edited crop back into the base photo (the ORIGINAL target, or the swapped photo for `swapper_polish`).
+   * The pasted photo is the job's only output; the raw crop output stays out of the gallery (its id goes to
+   * `face_swap.qoder_output_file_id` in the returned `fs`, stored by the caller). A sidecar `patch_misaligned` returns
+   * the rejected raw output's id instead.
+   */
+  private async pasteFaceCrop(job: MediaJob, outcome: Outcome): Promise<{ outcome: Outcome; fs?: FaceSwapJobInfo } | { misaligned: string }> {
+    if (outcome.error || !outcome.fileIds.length) return { outcome };
+    let rawId: string | undefined;
     try {
       if (!this.d.faceswap) throw new AppError(503, 'faceswap_unavailable', 'The face swap service is not configured');
       const fs = job.request.face_swap as FaceSwapJobInfo;
       if (!fs.crop_box) throw new AppError(500, 'faceswap_failed', 'The face crop box is missing');
-      // outputs of the Qoder turn carry a qoder file id; a paste saved before a restart does not
+      // outputs of the Qoder turn carry a qoder file id; a paste saved before a restart does not, and edits of earlier
+      // misaligned attempts (a resumed job lists all of the job's files) are skipped
+      const rejected = new Set(fs.misaligned_file_ids ?? []);
       const outputs = await this.d.db.select().from(files).where(inArray(files.id, outcome.fileIds));
-      const raw = outcome.fileIds.map((id) => outputs.find((f) => f.id === id)).find((f) => f && f.qoderFileId && f.mimeType.startsWith('image/'));
-      if (!raw) return { ...outcome, fileIds: [], error: { code: 'no_output', message: 'Qoder did not deliver an edited crop' } };
+      const raw = outcome.fileIds
+        .map((id) => outputs.find((f) => f.id === id))
+        .find((f) => f && f.qoderFileId && f.mimeType.startsWith('image/') && !rejected.has(f.id));
+      if (!raw) return { outcome: { ...outcome, fileIds: [], error: { code: 'no_output', message: 'Qoder did not deliver an edited crop' } } };
+      rawId = raw.id;
       const [target] = await this.loadInputs(job.userId, [fs.source_file_id]);
-      const r = await this.d.faceswap.paste(await this.d.store.read(target!.file), await this.d.store.read(raw), fs.crop_box);
+      const [base] = fs.swapped_file_id ? await this.loadInputs(job.userId, [fs.swapped_file_id]) : [target];
+      const r = await this.d.faceswap.paste(await this.d.store.read(base!.file), await this.d.store.read(raw), fs.crop_box);
       const file = await this.d.store.save({
         userId: job.userId,
         kind: 'artifact',
@@ -888,13 +1014,15 @@ export class MediaService {
         bytes: r.bytes,
         jobId: job.id,
       });
-      const request = { ...job.request, face_swap: { ...fs, qoder_output_file_id: raw.id } satisfies FaceSwapJobInfo };
-      await this.d.db.update(mediaJobs).set({ request }).where(eq(mediaJobs.id, job.id));
-      return { ...outcome, fileIds: [file.id] };
+      return {
+        outcome: { ...outcome, fileIds: [file.id] },
+        fs: { ...fs, qoder_output_file_id: raw.id, ...(r.alignment ? { alignment: r.alignment } : {}) },
+      };
     } catch (err) {
       const e = toAppError(err);
+      if (e.code === PATCH_MISALIGNED && rawId) return { misaligned: rawId };
       this.d.log.error('media.face_paste_failed', { jobId: job.id, code: e.code, err: e.message });
-      return { fileIds: [], credits: outcome.credits, error: { code: e.code, message: e.message } };
+      return { outcome: { fileIds: [], credits: outcome.credits, error: { code: e.code, message: e.message } } };
     }
   }
 
@@ -1049,8 +1177,8 @@ export class MediaService {
       if (this.stopped) return null;
       if (state.credits) await this.d.usage.record({ userId: job.userId, kind: job.kind, conversationId: conv?.id, jobId: job.id, credits: state.credits });
       const outcome: Outcome = { fileIds: state.fileIds, credits: state.credits?.total ?? null, error: state.error };
-      // a qoder_crop job cut off during its Qoder turn still needs the paste-back step
-      await this.finish(job.id, faceSwapEngineOf(job) === 'qoder_crop' ? await this.pasteFaceCrop(job, outcome) : outcome);
+      // a close-up face swap cut off during its Qoder turn still needs the paste-back step (and maybe retries)
+      await this.finish(job.id, isCloseUpEngine(faceSwapEngineOf(job)) ? await this.completeFaceCrop(job, outcome) : outcome);
       await this.releaseSession(sessionId, conv?.id ?? null);
       return null;
     } finally {
@@ -1258,6 +1386,9 @@ function faceSwapEngineOf(job: MediaJob): FaceSwapEngine | null {
   const fs = job.request.face_swap as FaceSwapJobInfo | undefined;
   return fs ? (fs.engine ?? 'qoder') : null;
 }
+
+/** Engines that let Qoder edit a close-up of the face and paste it back (sidecar crop → Qoder → sidecar paste). */
+const isCloseUpEngine = (engine: FaceSwapEngine | null): engine is 'qoder_crop' | 'swapper_polish' => engine === 'qoder_crop' || engine === 'swapper_polish';
 
 /** The face's image: recorded since phase 2, else the second input of a phase-1 job. */
 function faceFileIdOf(job: MediaJob): string {

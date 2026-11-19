@@ -54,12 +54,22 @@ target's (oriented) pixel size. PNG alpha of the target is preserved for PNG out
   normalized ArcFace embeddings of every face in every source (a 3×3 sheet yields 9), cached by source hash.
 - `POST /v1/face-crop` `{image, det_thresh?, expand? (2.2), size? (1024)}` → `{crop (png), box: [x,y,side,side], faces, width, height}`.
   Box is centred on the largest face, may extend past the image (edge-reflect padding).
-- `POST /v1/face-paste` `{base, patch, box, feather? (0.15), color_match? (true), output_format?, jpeg_quality?}` →
-  `{image, mime_type, width, height}`. Patch is resized to the box, LAB mean/std colour-matched to the base inside the
-  face mask (face detected on the patch, ellipse fallback), feathered and blended.
+- `POST /v1/face-paste` `{base, patch, box, feather? (0.15), color_match? (true), mask? ("face"|"box", default "face"),
+  max_scale_dev? (0.18), max_rotation_deg? (12), max_shift? (0.12), output_format?, jpeg_quality?}` →
+  `{image, mime_type, width, height, alignment: {scale, rotation_deg, shift, residual}}`. Landmark-aligned:
+  `base` is re-cropped at `box` (edge-reflect padding) at a working size of max(box side, 256) px (≤ patch size);
+  the main face + 5 landmarks are detected in that crop (det 0.5, fallback 0.2) and in the full patch (det 0.5).
+  A similarity transform patch → crop is estimated (umeyama); `scale` > 1 means the patch face is smaller,
+  `shift` = distance of the two face centres / crop side, `residual` = landmark RMS error / face size (info only).
+  It is rejected with 422 `{detail: "PATCH_MISALIGNED", reason: "no_face_in_patch"|"scale"|"rotation"|"shift",
+  alignment: {...}|null}` when scale ∉ [1/(1+max_scale_dev), 1+max_scale_dev], |rotation| > max_rotation_deg or
+  shift > max_shift. Otherwise the patch is warped onto the original face, LAB-colour-matched inside the face, its
+  low frequencies are replaced by the base's in the mask's transition band (no light/dark ring), and it is blended
+  with a feathered convex hull of both faces (landmarks + detector box raised for the forehead; `mask: "box"` = the
+  whole box, softly). Everything outside the mask stays from `base`. No face in the base crop → 422 `NO_FACE_IN_TARGET`.
 
 Error codes: 401 `AUTH_INVALID`, 413 `TOO_LARGE`, 422 `BAD_IMAGE` / `NO_FACE_IN_TARGET` / `NO_FACE_IN_SOURCE` /
-`BAD_BOX` / `INVALID_REQUEST` (schema, with `errors`), 503 `MODELS_LOADING` / `MODELS_FAILED`.
+`BAD_BOX` / `PATCH_MISALIGNED` / `INVALID_REQUEST` (schema, with `errors`), 503 `MODELS_LOADING` / `MODELS_FAILED`.
 
 ## Run locally
 

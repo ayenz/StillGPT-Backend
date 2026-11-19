@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 from app import imaging
-from app.engine import arcface_template, frontalness, nms, umeyama
+from app.engine import Face, arcface_template, estimate_alignment, frontalness, nms, pick_face, umeyama
 
 
 def _png_b64(arr: np.ndarray) -> str:
@@ -66,13 +66,35 @@ def test_color_match_identity_and_shift():
     assert abs(matched.mean() - brighter.mean()) < 3
 
 
-def test_face_region_mask_soft_and_centred():
-    m = imaging.face_region_mask(200, 200, np.array([70, 60, 130, 140]), 0.15)
-    assert m.shape == (200, 200)
-    assert m[100, 100] > 0.99
-    assert m[0, 0] < 0.01 and m[199, 199] < 0.01
-    fallback = imaging.face_region_mask(200, 200, None, 0.15)
-    assert fallback[100, 100] > 0.99
+def test_face_hull_points_include_forehead_and_landmarks():
+    kps = np.array([[45, 60], [75, 60], [60, 75], [48, 90], [72, 90]], np.float32)
+    pts = imaging.face_hull_points(np.array([40, 50, 80, 100]), kps)
+    assert pts.shape == (48 + 5, 2)
+    assert pts[:, 1].min() < 50 - 0.15 * 50  # raised above the detector box
+    assert pts[:, 1].max() <= 100 + 0.05 * 60 and abs(pts[:48, 0].mean() - 60) < 0.5
+
+
+def test_hull_mask_opaque_inside_soft_outside():
+    pts = imaging.face_hull_points(np.array([70, 70, 130, 140]), None)
+    m = imaging.hull_mask(200, 200, pts, 4, 8)
+    assert m.dtype == np.float32 and m.shape == (200, 200)
+    assert m[105, 100] > 0.99
+    assert m[2, 2] < 0.01 and m[197, 100] < 0.01
+    row = m[105, 100:]
+    assert np.all(np.diff(row) <= 1e-6)  # monotonic fade to the outside
+
+
+def test_harmonize_edges_takes_base_low_freq_on_the_edge_only():
+    rng = np.random.default_rng(2)
+    detail = rng.integers(-10, 10, (100, 100, 1))
+    patch = np.clip(150 + detail, 0, 255).astype(np.uint8).repeat(3, 2)
+    ref = np.full((100, 100, 3), 100, np.uint8)
+    mask = np.zeros((100, 100), np.float32)
+    mask[30:70, 30:70] = 1.0
+    out = imaging.harmonize_edges(patch, ref, mask, 3.0).astype(int)
+    assert abs(out[5:15, 5:15].mean() - 100) < 3  # band: base colour, patch detail kept
+    assert out[5:15, 5:15].std() > 3
+    assert np.array_equal(out[45:55, 45:55], patch[45:55, 45:55])  # opaque core untouched
 
 
 def test_blend_extremes():
@@ -147,3 +169,30 @@ def test_frontalness():
 def test_nms():
     dets = np.array([[0, 0, 10, 10, 0.9], [1, 1, 10, 10, 0.8], [50, 50, 60, 60, 0.7]], np.float32)
     assert nms(dets, 0.4) == [0, 2]
+
+
+def test_estimate_alignment_reports_deviation():
+    kps = np.array([[400, 450], [620, 450], [510, 560], [420, 680], [600, 680]], np.float32)
+    al = estimate_alignment(kps, kps, 1024)
+    assert al.scale == pytest.approx(1.0) and al.rotation_deg == pytest.approx(0.0, abs=1e-4)
+    assert al.shift == pytest.approx(0.0) and al.residual < 1e-4
+    # patch face drawn at 0.7x around (512, 430): the transform patch -> base must scale it back up by 1/0.7
+    small = (kps - [512, 430]) * 0.7 + [512, 430]
+    al = estimate_alignment(small, kps, 1024)
+    assert al.scale == pytest.approx(1 / 0.7, rel=1e-3)
+    assert al.shift == pytest.approx(np.linalg.norm(small.mean(0) - kps.mean(0)) / 1024, rel=1e-4)
+    a = np.deg2rad(10)
+    R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    al = estimate_alignment(kps, kps @ R.T, 1024)
+    assert al.rotation_deg == pytest.approx(10.0, abs=1e-3)
+    assert set(al.as_dict()) == {"scale", "rotation_deg", "shift", "residual"}
+
+
+def test_pick_face_prefers_large_and_central():
+    k = np.zeros((5, 2), np.float32)
+    corner = Face(box=np.array([0, 0, 40, 40], np.float32), score=0.9, kps=k)
+    centre = Face(box=np.array([80, 80, 120, 120], np.float32), score=0.9, kps=k)
+    assert pick_face([corner, centre], 200, 200) is centre
+    big = Face(box=np.array([20, 20, 180, 180], np.float32), score=0.9, kps=k)
+    assert pick_face([centre, big], 200, 200) is big
+    assert pick_face([], 200, 200) is None
