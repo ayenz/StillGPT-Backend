@@ -94,6 +94,18 @@ interface ImageCall {
   inputFileIds: string[];
 }
 
+/** HTTP status for a failed job's error code when it is not a plain upstream failure (default 502). */
+const JOB_ERROR_STATUS: Record<string, number> = {
+  folax_quota_exceeded: 429,
+  provider_busy: 429,
+  provider_unavailable: 503,
+  folax_timeout: 504,
+  invalid_image: 400,
+  content_rejected: 422,
+  image_rejected: 422,
+  unsupported_request: 422,
+};
+
 /**
  * `qoder-image` → Qoder ImageGen, `folax-image` → Folax; OpenAI model names (or none) use the default provider,
  * so stock clients work unchanged.
@@ -117,10 +129,12 @@ async function generateImages(ctx: AppContext, c: Context<Env>, call: ImageCall)
   const req = { userId, prompt: call.prompt as string, size, inputFileIds: call.inputFileIds, provider };
 
   let jobs: MediaJobView[];
-  // edits always run on Qoder; otherwise Qoder when asked for or when the default provider cannot be Folax
-  const onQoder = provider === 'qoder' || call.inputFileIds.length > 0 || (provider === undefined && (ctx.config.IMAGE_PROVIDER_DEFAULT === 'qoder' || !ctx.folax));
+  // edits run on Qoder unless `folax-image` is asked for (Folax edit: one image in, one out, one weekly-quota edit per call)
+  const folaxEdit = provider === 'folax' && call.inputFileIds.length > 0;
+  if (folaxEdit && n > 1) throw badRequest('folax-image edits make one image per request; use n=1', 'invalid_n', { param: 'n' });
+  const onQoder = !folaxEdit && (provider === 'qoder' || call.inputFileIds.length > 0 || (provider === undefined && (ctx.config.IMAGE_PROVIDER_DEFAULT === 'qoder' || !ctx.folax)));
   // Qoder: one image per job; Folax: two per job, so ceil(n/2) jobs (all in parallel) and the extra image is dropped
-  const calls = onQoder ? n : Math.ceil(n / 2);
+  const calls = folaxEdit ? 1 : onQoder ? n : Math.ceil(n / 2);
   if (calls > 1) {
     jobs = (await ctx.media.createImageBatch(onQoder ? { ...req, provider: 'qoder' } : req, calls, { wait: true })).jobs;
   } else {
@@ -130,7 +144,10 @@ async function generateImages(ctx: AppContext, c: Context<Env>, call: ImageCall)
   const outputs = jobs.flatMap((j) => (j.status === 'completed' ? j.outputs : [])).slice(0, n);
   const failed = jobs.find((j) => j.status !== 'completed' || !j.outputs.length);
   // partial results are still useful (OpenAI clients just get fewer items); only fail when nothing was made
-  if (!outputs.length) throw new AppError(502, failed?.error?.code ?? 'generation_failed', failed?.error?.message ?? 'Image generation failed');
+  if (!outputs.length) {
+    const code = failed?.error?.code ?? 'generation_failed';
+    throw new AppError(JOB_ERROR_STATUS[code] ?? 502, code, failed?.error?.message ?? 'Image generation failed');
+  }
   const data: ({ url: string } | { b64_json: string })[] = [];
   for (const out of outputs) {
     if (format === 'url') data.push({ url: out.url });

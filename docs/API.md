@@ -200,7 +200,7 @@ Returns the same usage object as `/me` (this calendar month, UTC).
   "default_model": "default",
   "image_providers": [
     { "id": "qoder", "available": true, "edits": true, "images_per_call": 1, "max_n": 10, "sizes": ["1024x1024", "…"] },
-    { "id": "folax", "available": true, "edits": false, "images_per_call": 2, "max_n": 10,
+    { "id": "folax", "available": true, "edits": true, "max_edit_inputs": 1, "images_per_call": 2, "max_n": 10,
       "ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"], "prompt_max": 1500 }
   ],
   "default_image_provider": "auto"
@@ -589,7 +589,7 @@ For several different images at once, send `variations` on `POST /images` instea
 | `prompt` | string | required | up to 4000 characters (Folax uses the first 1500). Used **verbatim** unless `enhance` is true |
 | `size` | enum | `1024x1024` | `1024x1024`, `1536x1024`, `1024x1536`, `768x1024`, `1024x768`, `1024x1280`, `1280x1024`, `1024x1792`, `1792x1024`, `2560x1080` |
 | `enhance` | bool | `false` | run the prompt enhancer first (as `POST /prompts/enhance`). Its prompt is used, and its size too when `size` was not given |
-| `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine (always Qoder) |
+| `input_file_ids` | string[] | `[]` | up to 3 uploaded images to edit or combine. Qoder, unless `provider: "folax"`, which edits exactly 1 image (see "Folax edits") |
 | `provider` | `auto` \| `qoder` \| `folax` | server default (`IMAGE_PROVIDER_DEFAULT`, `auto`) | image generator, see below |
 | `n` | int 1–10 | – | how many images of this prompt to make in parallel. **When present, the response is a batch** (see below), not a job |
 | `user_prompt` | string | – | with `variations`: what the user typed when `prompt` was already enhanced client-side (✨ then Generate). The variator keeps the details from this text. Default: `prompt`. Stored as `request.user_prompt` |
@@ -648,17 +648,41 @@ Response (`200` when synchronous, `202` with `async: true`):
 | provider | speed | outputs per job | sizes | edits | credits |
 |---|---|---|---|---|---|
 | `qoder` | ~30 s | 1 | all 10 sizes | yes | ~0.06 |
-| `folax` | ~10 s | 2 | mapped to the nearest of `1:1`, `4:3`, `3:4`, `16:9`, `9:16` (e.g. `1792x1024` → `16:9`, `1024x1280` → `3:4`) | no | 0 |
+| `folax` | ~10 s | 2 | mapped to the nearest of `1:1`, `4:3`, `3:4`, `16:9`, `9:16` (e.g. `1792x1024` → `16:9`, `1024x1280` → `3:4`) | only with explicit `provider: "folax"`, 1 input image (see below) | 0 |
 
 - `auto` uses Folax for text-to-image when the server has it configured, and Qoder otherwise. If Folax fails, the job
   continues on Qoder without the caller noticing.
-- Requests with `input_file_ids` always go to Qoder. `provider: "folax"` together with input images is
+- Under `auto`, requests with `input_file_ids` go to Qoder. `provider: "folax"` with 2 or more input images is
   `400 validation_error`; `provider: "folax"` on a server without Folax is `400 provider_unavailable`.
 - An explicit `provider: "folax"` never falls back: a Folax failure fails the job (`folax_failed`, `folax_timeout`,
   `folax_auth_invalid`, `folax_unavailable`).
 - Folax runs up to 8 requests at once (server setting `FOLAX_CONCURRENCY`); further requests wait in line.
 - The job's `request` records the choice: `provider` (what was asked or defaulted), `provider_used` (what generated
   the outputs) and, after a fallback, `fallback_reason` (e.g. `folax_auth_invalid`).
+
+#### Folax edits
+Folax can edit one image in two ways. Both are always explicit and never fall back to Qoder.
+
+- **Prompt edit:** `POST /images` with `provider: "folax"`, exactly **1** `input_file_ids` and a `prompt` that
+  describes the change. Folax uses the first 1500 characters. It takes ~10–25 s and returns **one** image.
+  - Each edit uses one of the **shared weekly edits** (§8 "Folax status").
+  - `n` above 1 is `400 validation_error`.
+  - `size` is ignored: Folax decides the size of the result.
+- **Remove people:**
+  ```
+  POST /images/:fileId/remove-people   {"async"?: false, "callback_url"?: "…"}
+  → 200 job (202 with async: true)
+  ```
+  It takes no prompt, ~5 s, and uses **no** weekly quota. `:fileId` is one of your files or outputs; another user's
+  file is `404`.
+- Both create a normal image job with `credits: 0`, `request.provider_used: "folax"` and `request.folax_edit.mode`
+  (`instruction` or `remove_people`). The job shows up in the gallery as usual. The results have no watermark.
+- **Failures** fail the job with a Folax error code (see the table in "Folax status" below), e.g.
+  `folax_quota_exceeded`, `content_rejected` or `provider_unavailable`.
+  - A synchronous call still answers `200` with `status: "failed"`.
+  - When Folax is already known to be down, the request itself is refused with `503 provider_unavailable`.
+- A retry never uses quota twice. StillGPT sends the job id as an idempotency key, so the adapter returns the stored
+  result for a re-run, for example after a server restart.
 
 #### Folax status and the shared quota
 Folax is an optional, nice-to-have provider. Qoder stays the default everywhere. The Folax-only features (Folax chat
@@ -1213,7 +1237,7 @@ conversation. Errors use each provider's own envelope.
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
 | `POST /v1/images/generations` | `{prompt, model?, n? (1–10), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images, so StillGPT makes ceil(n/2) Folax calls in parallel (~10–15 s for all). If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |
-| `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Always Qoder (`folax-image` → `400`) |
+| `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Qoder by default. `model: "folax-image"` → Folax prompt edit (exactly 1 `image`, `n` 1, weekly quota; see §8 "Folax edits"). Folax failures keep their status: `429 folax_quota_exceeded` / `provider_busy`, `503 provider_unavailable`, `422 content_rejected`, … |
 | `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url` |
 | `GET /v1/videos`, `GET /v1/videos/:id` | video object `{id, object: "video", model, status, progress, created_at, completed_at, seconds, size, error}` (unix seconds) |
 | `GET /v1/videos/:id/content` | the MP4 bytes, with `Range` support. Returns `409 job_not_completed` until the video is ready |

@@ -53,6 +53,21 @@ export interface FolaxUsage {
   edit: FolaxQuota;
 }
 
+/** Edit modes StillGPT uses (the adapter's `style`/`portrait`/`expand`/`instruction_ids` are not part of the product). */
+export const FOLAX_EDIT_MODES = ['instruction', 'remove_people'] as const;
+export type FolaxEditMode = (typeof FOLAX_EDIT_MODES)[number];
+
+interface FolaxEditResponse {
+  images?: { file_name?: string; mime_type?: string; width?: number; height?: number; data?: string }[];
+}
+
+export interface FolaxEditResult extends FolaxImage {
+  width: number | null;
+  height: number | null;
+  /** The adapter answered from its idempotency store (a retry of an earlier call). */
+  replayed: boolean;
+}
+
 /** Adapter error codes (OpenAI envelope `error.code`, v0.4+) → our AppError. */
 const API_ERRORS: Record<string, { status: number; code: string; message?: string }> = {
   quota_exceeded: { status: 429, code: 'folax_quota_exceeded', message: 'The weekly Folax quota is used up' },
@@ -209,6 +224,44 @@ export class FolaxClient {
     }
     if (folaxCode === 'quota_exceeded') this.usageCache = null;
     return err;
+  }
+
+  /**
+   * `POST /v1/images/edits`, synchronous (~5–25 s): `instruction` = free-prompt edit (weekly quota), `remove_people`
+   * (no prompt, no quota). One image in, one out, no watermark. `idempotencyKey` makes a retry return the same result
+   * without using quota again; a timeout on our side (504 without `folax_code`) is retried once with the same key.
+   */
+  async edit(o: { mode: FolaxEditMode; image: Buffer; prompt?: string; idempotencyKey: string; signal?: AbortSignal }): Promise<FolaxEditResult> {
+    const json = { mode: o.mode, image: o.image.toString('base64'), ...(o.mode === 'instruction' ? { prompt: (o.prompt ?? '').trim().slice(0, FOLAX_PROMPT_MAX) } : {}) };
+    // adapter: up to 30 s waiting for a slot + 120 s upstream
+    const call = () => this.api<FolaxEditResponse>('/v1/images/edits', { json, idempotencyKey: o.idempotencyKey, timeoutMs: this.o.timeoutMs ?? 170_000, signal: o.signal });
+    let r: Awaited<ReturnType<typeof call>>;
+    try {
+      r = await call();
+    } catch (err) {
+      const ours = err instanceof AppError && err.code === 'folax_timeout' && err.details?.folax_code === undefined;
+      if (!ours) throw err;
+      this.o.log.warn('folax.edit_retry', { key: o.idempotencyKey });
+      r = await call();
+    } finally {
+      if (o.mode === 'instruction') this.invalidateUsage();
+    }
+    const img = r.body.images?.[0];
+    if (!img?.data) throw new AppError(502, 'folax_failed', 'Folax returned no image', { provider: 'folax' });
+    return {
+      filename: img.file_name || `folax-edit.${(img.mime_type ?? 'image/jpeg').split('/')[1]}`,
+      mimeType: img.mime_type ?? 'image/jpeg',
+      bytes: Buffer.from(img.data, 'base64'),
+      width: img.width ?? null,
+      height: img.height ?? null,
+      replayed: r.headers.get('idempotent-replayed') === 'true',
+    };
+  }
+
+  /** True only when the last known upstream state is `down` (no probe; cheap pre-check before creating a job). */
+  knownDown(): boolean {
+    const c = this.upstreamCache;
+    return !!c && c.value.status === 'down' && Date.now() - c.at < this.cacheMs();
   }
 
   /** `GET /health/upstream` (a short Folax chat on the adapter side, no quota), cached for `statusCacheMs`. */

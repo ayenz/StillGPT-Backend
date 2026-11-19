@@ -43,7 +43,7 @@ function catalog(ctx: AppContext, bootSec: number): ModelEntry[] {
     ...aliases,
     ...ctx.models.listActive().map(modelEntry),
     media(IMAGE_MODEL, 'image', 'Qoder Image (ImageGen)'),
-    ...(ctx.folax ? [media(FOLAX_IMAGE_MODEL, 'image', 'Folax Image (fast, 2 images per call, no edits)')] : []),
+    ...(ctx.folax ? [media(FOLAX_IMAGE_MODEL, 'image', 'Folax Image (fast, 2 images per call; edits: 1 input image, shared weekly quota)')] : []),
     media(VIDEO_MODEL, 'video', 'Qoder Video (VideoGen)'),
   ];
 }

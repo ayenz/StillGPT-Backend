@@ -2,6 +2,8 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import type { AddressInfo } from 'node:net';
 
 export const FAKE_FOLAX_KEY = 'folax-test-key';
+/** Smallest thing that starts like a JPEG; the store does not decode images. */
+export const FAKE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0xff, 0xd9]);
 
 export interface FakeFolaxCall {
   method: string;
@@ -36,6 +38,8 @@ export async function startFakeFolax() {
   const state = {
     upstream: { status: 'ok' as 'ok' | 'degraded' | 'down', errorCode: null as string | null },
     usage: { video: quota(12, 'observed'), edit: quota(null, 'unknown') } as Record<string, unknown>,
+    editsDone: 0,
+    editDelayMs: 0,
   };
   type Handler = (req: IncomingMessage, body: unknown, url: URL) => Promise<[number, unknown, Record<string, string>?]> | [number, unknown, Record<string, string>?];
   const routes = new Map<string, Handler>();
@@ -56,6 +60,31 @@ export async function startFakeFolax() {
     ];
   });
   routes.set('GET /v1/usage', () => [200, { object: 'usage', ...state.usage }]);
+
+  /** POST /v1/images/edits (JSON): echoes a small JPEG; replays by Idempotency-Key like the adapter. */
+  const editReplies = new Map<string, unknown>();
+  routes.set('POST /v1/images/edits', async (req, body) => {
+    const b = body as { mode?: string; prompt?: string; image?: string };
+    const key = req.headers['idempotency-key'] as string | undefined;
+    if (key && editReplies.has(key)) return [200, editReplies.get(key), { 'Idempotent-Replayed': 'true' }];
+    // one-shot delay (to make the client time out once)
+    const delay = state.editDelayMs;
+    state.editDelayMs = 0;
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    if (!b?.image || !Buffer.from(b.image, 'base64').length) return [400, { error: { message: 'gambar tidak valid', type: 'invalid_request_error', code: 'invalid_image', param: 'image' } }];
+    if (b.mode !== 'instruction' && b.mode !== 'remove_people') return [422, { error: { message: 'mode', type: 'invalid_request_error', code: 'unsupported_request', param: 'mode' } }];
+    state.editsDone++;
+    const reply = {
+      request_id: `req_${state.editsDone}`,
+      mode: b.mode,
+      images: [{ file_name: `folax-edit-${state.editsDone}.jpg`, mime_type: 'image/jpeg', width: 640, height: 480, data: FAKE_JPEG.toString('base64') }],
+      usage: b.mode === 'instruction' ? { used: state.editsDone, total: 20, remaining: 20 - state.editsDone, reset_at: '2026-11-23T00:00:00Z', cycle: 'weekly' } : null,
+      reply: 'Image processing complete~',
+      elapsed_seconds: 1,
+    };
+    if (key) editReplies.set(key, reply);
+    return [200, reply];
+  });
 
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -104,6 +133,9 @@ export async function startFakeFolax() {
       failures.clear();
       state.upstream = { status: 'ok', errorCode: null };
       state.usage = { video: quota(12, 'observed'), edit: quota(null, 'unknown') };
+      state.editsDone = 0;
+      state.editDelayMs = 0;
+      editReplies.clear();
     },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };

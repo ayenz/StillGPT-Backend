@@ -180,7 +180,20 @@ POST /images {prompt, size?: "1024x1024", provider?: "auto" | "qoder" | "folax",
 ```
 - Menunggu sampai selesai (Folax ~10 detik, Qoder ~20–30 detik). Untuk tidak menunggu: `async: true` → `202`, lalu ikuti job (5.4).
 - `provider: "auto"` (default): pakai **Folax** (cepat, 2 gambar per permintaan); jika gagal otomatis pindah ke **Qoder**.
-- **Edit/gabung foto** (`input_file_ids`, maks 3) selalu memakai Qoder.
+- **Edit/gabung foto** (`input_file_ids`, maks 3) memakai Qoder secara default.
+- **Edit Folax (opsional):**
+  - Kirim `provider: "folax"` + tepat **1** `input_file_ids` + `prompt` → satu hasil dalam ~10–25 detik.
+    Satu edit memotong **kuota edit mingguan bersama** (lihat 5.3a).
+  - `n` harus 1.
+  - Kalau gagal, job berstatus `failed` dengan `error.code`, misalnya `folax_quota_exceeded` atau `content_rejected`.
+    Tidak ada fallback ke Qoder.
+- **Hapus orang (Folax):**
+  ```
+  POST /images/:fileId/remove-people {async?: false}
+  → 200 job (atau 202 kalau async)
+  ```
+  Selesai ~5 detik, tanpa prompt, **tidak** memotong kuota. Tombolnya cocok ditaruh di detail gambar galeri.
+  Sembunyikan tombol kalau `GET /folax/status` → `available: false`.
 - Ukuran Qoder: `1024x1024, 1536x1024, 1024x1536, 768x1024, 1024x768, 1024x1280, 1280x1024, 1024x1792, 1792x1024, 2560x1080`.
   Folax hanya 1:1, 4:3, 3:4, 16:9, 9:16 (ukuran lain dibulatkan ke rasio terdekat).
 - Status `failed` tetap HTTP 200 — selalu cek `status` dan `error.message`.

@@ -8,7 +8,7 @@ import { AppError, badRequest, notFound, toAppError } from '../errors.js';
 import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
 import { type FaceBox, type FaceSwapClient, PATCH_MISALIGNED, type PasteAlignment, type SwapperOptions } from '../providers/faceswap.js';
-import { FOLAX_PROMPT_MAX, type FolaxClient, toFolaxRatio } from '../providers/folax.js';
+import { FOLAX_PROMPT_MAX, type FolaxClient, type FolaxEditMode, toFolaxRatio } from '../providers/folax.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
@@ -102,6 +102,13 @@ export interface ImageRequest {
   callbackUrl?: string;
   /** Server-side extras merged into the stored job `request` (e.g. `face_swap`); never set from client input. */
   extra?: Record<string, unknown>;
+}
+
+/** Folax "remove people" on one of the user's images (no prompt, no quota). */
+export interface RemovePeopleRequest {
+  userId: string;
+  fileId: string;
+  callbackUrl?: string;
 }
 
 /** A face swap: target image (`:fileId`) + a saved face. */
@@ -285,7 +292,7 @@ const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
-const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, faceswap: 15_000 } as const;
+const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, faceswap: 15_000 } as const;
 const MAX_RECOVERY_MS = 45 * 60_000;
 /** At most one `provider.degraded` webhook per provider per hour. */
 const DEGRADED_THROTTLE_MS = 3600_000;
@@ -409,6 +416,8 @@ export class MediaService {
   async createImageBatch(req: ImageRequest, n: number, opts: { wait?: boolean } = {}): Promise<ImageBatchView> {
     if (!Number.isInteger(n) || n < 1 || n > MAX_IMAGE_BATCH) throw badRequest(`n must be an integer between 1 and ${MAX_IMAGE_BATCH}`, 'validation_error', { param: 'n' });
     const { v, request } = await this.prepareImage(req);
+    // every Folax edit uses one of the shared weekly edits: one per request, no batches
+    if (request.folax_edit && n > 1) throw badRequest('Folax edits make one image per request; send n: 1 (or omit n)', 'validation_error', { param: 'n' });
     const variants = await this.variantsFor(v, request, n);
     const batchId = newId('batch');
     const rows = await this.d.db
@@ -427,6 +436,35 @@ export class MediaService {
     const runs = rows.map((job) => this.run(job));
     if (opts.wait) await Promise.all(runs);
     return this.getBatch(batchId, v.userId);
+  }
+
+  /**
+   * Folax "remove people" on one image: an image job with `provider_used: folax` and `request.folax_edit.mode =
+   * remove_people`. Free, uses no weekly quota, ~5 s. Never falls back to Qoder. `wait` resolves when it finished.
+   */
+  async removePeople(req: RemovePeopleRequest, opts: { wait?: boolean } = {}): Promise<MediaJobView> {
+    this.assertFolaxUsable();
+    const { v, request } = await this.prepareImage({
+      userId: req.userId,
+      prompt: 'Remove people',
+      inputFileIds: [req.fileId],
+      provider: 'folax',
+      callbackUrl: req.callbackUrl,
+      extra: { folax_edit: { mode: 'remove_people' } },
+    });
+    const job = await this.insertJob(v.userId, 'image', request, v.callbackUrl);
+    if (!opts.wait) {
+      void this.run(job);
+      return this.view(job);
+    }
+    await this.run(job);
+    return this.getJob(job.id, v.userId);
+  }
+
+  /** Folax is configured and not known to be down (cached state; no probe). */
+  private assertFolaxUsable() {
+    if (!this.d.folax) throw badRequest('The folax provider is not configured', 'provider_unavailable', { param: 'provider' });
+    if (this.d.folax.knownDown()) throw new AppError(503, 'provider_unavailable', 'Folax is unavailable right now', { provider: 'folax' });
   }
 
   /**
@@ -676,7 +714,9 @@ export class MediaService {
     await this.d.usage.assertWithinLimit(v.userId);
     await this.loadInputs(v.userId, v.inputFileIds);
     const provider = v.provider ?? this.d.defaultImageProvider;
-    const providerUsed = this.imageProviderFor(v.provider, provider, v.inputFileIds.length > 0);
+    const providerUsed = this.imageProviderFor(v.provider, provider, v.inputFileIds.length);
+    const folaxEdit = providerUsed === 'folax' && v.inputFileIds.length > 0;
+    if (folaxEdit) this.assertFolaxUsable();
     const e = v.enhance ? await this.d.enhancer.enhance({ userId: v.userId, prompt: v.prompt, kind: 'image', inputFileIds: v.inputFileIds }) : null;
     const prompt = e?.prompt ?? v.prompt;
     // Folax cuts prompts at FOLAX_PROMPT_MAX; under `auto` a longer (e.g. enhanced) prompt goes to Qoder instead of losing its end
@@ -691,16 +731,22 @@ export class MediaService {
       provider,
       provider_used: tooLongForFolax ? 'qoder' : providerUsed,
       ...(tooLongForFolax ? { fallback_reason: 'prompt_too_long_for_folax' } : {}),
+      ...(folaxEdit ? { folax_edit: { mode: 'instruction' } } : {}),
       ...v.extra,
     };
     return { v, request };
   }
 
-  /** Folax only does text-to-image and only when configured; edits always go to Qoder ImageGen. */
-  private imageProviderFor(explicit: ImageProvider | undefined, provider: ImageProvider, hasInputs: boolean): 'qoder' | 'folax' {
+  /**
+   * Folax does text-to-image under `auto`/`folax`; it edits (one input image → one result, weekly quota) only when asked
+   * for explicitly. Edits under `auto` go to Qoder ImageGen.
+   */
+  private imageProviderFor(explicit: ImageProvider | undefined, provider: ImageProvider, inputs: number): 'qoder' | 'folax' {
     if (explicit === 'folax' && !this.d.folax) throw badRequest('The folax image provider is not configured', 'provider_unavailable', { param: 'provider' });
-    if (explicit === 'folax' && hasInputs) throw badRequest('provider folax cannot edit images; use qoder (or auto) with input images', 'validation_error', { param: 'provider' });
-    return provider !== 'qoder' && !hasInputs && this.d.folax ? 'folax' : 'qoder';
+    if (explicit === 'folax' && inputs > 1)
+      throw badRequest('provider folax edits exactly one input image; use qoder (or auto) to combine images', 'validation_error', { param: 'input_file_ids' });
+    if (explicit === 'folax') return 'folax';
+    return provider !== 'qoder' && !inputs && this.d.folax ? 'folax' : 'qoder';
   }
 
   private async insertJob(userId: string, kind: 'image' | 'video', request: Record<string, unknown>, callbackUrl?: string) {
@@ -762,6 +808,8 @@ export class MediaService {
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
       if (isCloseUpEngine(engine)) current = await this.prepareFaceCrop(job);
+      // Folax edits never fall back: Folax is optional and the user picked it
+      if (folaxEditOf(job)) return await this.finish(job.id, await this.runFolaxEdit(job));
       if (usesFolax(job)) {
         try {
           return await this.finish(job.id, await this.runFolax(job));
@@ -838,6 +886,20 @@ export class MediaService {
     }
     await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'folax', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
     return { fileIds, credits: 0, error: null };
+  }
+
+  /**
+   * Folax edit (`instruction` with the job's prompt, or `remove_people`) of the job's one input image. The job id is the
+   * Idempotency-Key, so a re-run after a restart gets the adapter's stored result without using quota again. Free.
+   */
+  private async runFolaxEdit(job: MediaJob): Promise<Outcome> {
+    if (!this.d.folax) throw new AppError(503, 'provider_unavailable', 'The folax provider is not configured');
+    const mode = folaxEditOf(job)!;
+    const [input] = await this.loadInputs(job.userId, inputIds(job));
+    const r = await this.d.folax.edit({ mode, image: await this.d.store.read(input!.file), prompt: String(job.request.prompt), idempotencyKey: job.id });
+    const file = await this.d.store.save({ userId: job.userId, kind: 'artifact', filename: r.filename, mimeType: r.mimeType, bytes: r.bytes, jobId: job.id });
+    await this.d.usage.record({ userId: job.userId, kind: 'image', model: `folax-${mode}`, jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
+    return { fileIds: [file.id], credits: 0, error: null };
   }
 
   // ── face swap engines ───────────────────────────────────────────────────
@@ -1057,7 +1119,8 @@ export class MediaService {
 
   /** Time-based progress estimate (upstream reports none), capped at 95 until the job is done. */
   private trackProgress(job: MediaJob, startedAt: Date): () => void {
-    const base = usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : EXPECTED_MS[job.kind];
+    const edit = folaxEditOf(job);
+    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : EXPECTED_MS[job.kind];
     const expected = base * (job.kind === 'video' ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
     let last = 0;
     const timer = setInterval(() => {
@@ -1400,6 +1463,11 @@ const baseName = (filename: string) => filename.replace(/\.[^.]+$/, '').slice(0,
 const extOf = (mime: string) => (mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg');
 
 const usesFolax = (job: MediaJob) => job.kind === 'image' && job.request.provider_used === 'folax';
+/** The Folax edit mode of an image job, or null for any other job. */
+function folaxEditOf(job: MediaJob): FolaxEditMode | null {
+  const mode = usesFolax(job) ? (job.request.folax_edit as { mode?: unknown } | undefined)?.mode : undefined;
+  return mode === 'instruction' || mode === 'remove_people' ? mode : null;
+}
 
 function inputIds(job: MediaJob): string[] {
   const r = job.request;

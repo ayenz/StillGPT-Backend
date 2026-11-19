@@ -238,13 +238,15 @@ describe('folax provider (native)', () => {
     expect(r.body).toMatchObject({ status: 'failed', error: { code: 'folax_timeout' }, outputs: [], request: { provider_used: 'folax' } });
   });
 
-  it('edits always use Qoder; explicit folax with input images is rejected', async () => {
+  it('edits under auto use Qoder; explicit folax edits take exactly one input image', async () => {
     const png = await upload(makePng());
     const r = await createImage({ prompt: 'tambah topi', input_file_ids: [png.id] });
     expect(r.body).toMatchObject({ status: 'completed', request: { provider: 'auto', provider_used: 'qoder' } });
     expect(folax.calls).toHaveLength(0);
 
-    const bad = await createImage({ prompt: 'tambah topi', input_file_ids: [png.id], provider: 'folax' });
+    // (Folax edits themselves are covered in folax-edit.test.ts)
+    const png2 = await upload(makePng());
+    const bad = await createImage({ prompt: 'gabung', input_file_ids: [png.id, png2.id], provider: 'folax' });
     expect(bad.status).toBe(400);
     expect(bad.body.error.code).toBe('validation_error');
     expect((await createImage({ prompt: 'x', provider: 'dalle' })).status).toBe(400);
@@ -261,7 +263,7 @@ describe('folax provider (native)', () => {
     expect(models.body.default_image_provider).toBe('auto');
     expect(models.body.image_providers).toEqual([
       expect.objectContaining({ id: 'qoder', available: true, edits: true }),
-      expect.objectContaining({ id: 'folax', available: true, edits: false, images_per_call: 2, ratios: ['1:1', '4:3', '3:4', '16:9', '9:16'] }),
+      expect.objectContaining({ id: 'folax', available: true, edits: true, max_edit_inputs: 1, images_per_call: 2, ratios: ['1:1', '4:3', '3:4', '16:9', '9:16'] }),
     ]);
   });
 });

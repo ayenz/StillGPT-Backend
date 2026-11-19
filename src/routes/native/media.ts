@@ -28,6 +28,11 @@ const imageBody = z.object({
   callback_url: z.unknown().optional(),
 });
 
+const removePeopleBody = z.object({
+  async: z.boolean().optional(),
+  callback_url: z.string().optional(),
+});
+
 const videoBody = z.object({
   prompt: z.unknown(),
   seconds: z.unknown().optional(),
@@ -112,6 +117,13 @@ export function mediaJobRoutes(ctx: AppContext) {
     }
     if (b.async) return c.json(mediaJobJson(await ctx.media.createImageJob(req)), 202);
     return c.json(mediaJobJson(await ctx.media.generateImage(req)));
+  });
+
+  /** Folax "remove people" on one image (~5 s, free, no weekly quota). Sync by default; `async: true` → 202. */
+  app.post('/images/:fileId/remove-people', async (c) => {
+    const b = await body(c, removePeopleBody);
+    const job = await ctx.media.removePeople({ userId: c.get('user').id, fileId: c.req.param('fileId'), callbackUrl: b.callback_url }, { wait: !b.async });
+    return c.json(mediaJobJson(job), b.async ? 202 : 200);
   });
 
   app.post('/videos', async (c) => {
@@ -254,7 +266,17 @@ export function imageProviders(ctx: AppContext) {
   return {
     image_providers: [
       { id: 'qoder', available: true, edits: true, images_per_call: 1, max_n: MAX_IMAGE_BATCH, sizes: IMAGE_SIZES },
-      { id: 'folax', available: !!ctx.folax, edits: false, images_per_call: 2, max_n: MAX_IMAGE_BATCH, ratios: FOLAX_RATIOS, prompt_max: FOLAX_PROMPT_MAX },
+      {
+        id: 'folax',
+        available: !!ctx.folax,
+        // edits: explicit provider "folax", exactly 1 input image, n = 1, shared weekly quota (GET /folax/status)
+        edits: !!ctx.folax,
+        max_edit_inputs: 1,
+        images_per_call: 2,
+        max_n: MAX_IMAGE_BATCH,
+        ratios: FOLAX_RATIOS,
+        prompt_max: FOLAX_PROMPT_MAX,
+      },
     ],
     default_image_provider: ctx.config.IMAGE_PROVIDER_DEFAULT,
   };
