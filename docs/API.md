@@ -744,7 +744,7 @@ grace period (default 7 days, set by an admin, see §10). Users cannot list the 
 
 ### Faces and face swap
 A **face** is a saved identity: a name plus one of the user's images (a single portrait, or a 3x3 sheet of the same
-person from different angles). A **face swap** puts a saved face onto a target image with a Qoder image edit.
+person from different angles). A **face swap** puts a saved face onto a target image with one of three engines.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -752,7 +752,8 @@ person from different angles). A **face swap** puts a saved face onto a target i
 | POST | `/faces` | `{name, file_id}` | `201` face |
 | PATCH | `/faces/:id` | `{name}` | face |
 | DELETE | `/faces/:id` | – | `204`. The file and earlier face-swap results stay |
-| POST | `/images/:fileId/face-swap` | `{face_id, n?, callback_url?}` | **always `202`** with an image batch (async) |
+| GET | `/face-swap/config` | – | `{default_engine, engines, max_n}` (see below) |
+| POST | `/images/:fileId/face-swap` | `{face_id, engine?, n?, callback_url?}` | **always `202`** with an image batch (async) |
 
 Face:
 ```json
@@ -770,21 +771,47 @@ Face:
 - While a face uses a file, housekeeping does not delete it (even an old, otherwise unused upload), and trashing the job
   that produced it does not hide it.
 
+**Engines**
+
+| engine | how | results | credits | output size |
+|---|---|---|---|---|
+| `swapper` | faceswap sidecar: face detection + identity embedding + inswapper + face restoration | always 1 (deterministic) | 0 (free) | the target's original resolution |
+| `qoder` | Qoder edit of the whole photo: image 1 = target, image 2 = face | `n` (1–4) | the Qoder edit's | the largest allowed size with the target's aspect ratio (3:4 → `1024x1280`) |
+| `qoder_crop` | the sidecar cuts a square around the target's largest face → Qoder edits that close-up at `1024x1024` (image 1 = crop, image 2 = face) → the sidecar blends it back into the original photo | `n` (1–4) | the Qoder edit's | the target's original resolution |
+
+`swapper` and `qoder_crop` need the faceswap sidecar (`FACESWAP_URL`) to be configured and ready.
+
+**`GET /face-swap/config`** (any user):
+```json
+{ "default_engine": "swapper",
+  "engines": { "swapper": { "available": true }, "qoder": { "available": true }, "qoder_crop": { "available": true } },
+  "max_n": 4 }
+```
+`available` = the sidecar is configured and answered its readiness check (cached ~30 s). `qoder` is always available.
+
 **`POST /images/:fileId/face-swap`**: `:fileId` is the target image (one of the user's images; `404 file_not_found`
 otherwise, `400 validation_error` if it is not an image).
 
 | field | type | default | notes |
 |---|---|---|---|
 | `face_id` | string | required | a saved face of the user's |
-| `n` | int 1–4 | `1` | how many takes to make in parallel |
+| `engine` | `swapper` \| `qoder` \| `qoder_crop` | admin setting `default_engine` | an explicitly requested engine that is not available is `400 engine_unavailable`; without `engine`, an unavailable default falls back to `qoder` |
+| `n` | int 1–4 | `1` | how many takes to make in parallel; **always 1 for `swapper`** |
 | `callback_url` | URL | – | POSTed when each job finishes (§9) |
 
 - The response is the same batch as `POST /images` with `n` (follow it with `/images/batches/:id`, its `/events`, or the
-  gallery). It never waits for the images.
-- Each job is a Qoder edit with `input_file_ids: [target, face file]` and a fixed prompt (no enhancer, no variations).
-  The `size` is the allowed size whose aspect ratio is closest to the target image's (e.g. a 3:2 photo → `1536x1024`).
-- The jobs' `request` has **`face_swap: {source_file_id, face_id, face_name}`** so the gallery can show "Face swap: <name>"
-  and link to the original. It stays when the face is later renamed or deleted (`face_name` is the name at the time).
+  gallery). It never waits for the images. Jobs show progress, SSE events, webhooks and gallery entries like any image job.
+- `qoder`/`qoder_crop` jobs are Qoder edits with the admin's prompt (`qoder_prompt` / `qoder_crop_prompt`; no enhancer,
+  no variations). `swapper` jobs have `provider` and `provider_used` `"faceswap"` and are recorded as free usage
+  (`model: "faceswap"`).
+- The jobs' `request` has **`face_swap: {source_file_id, face_id, face_name, engine, face_file_id, …}`** so the gallery can
+  show "Face swap: <name>" and link to the original. It stays when the face is later renamed or deleted (`face_name` is the
+  name at the time). Jobs from before engines existed have no `engine` (they were `qoder`). Engine-specific extras:
+  `options` (swapper options used; `swapper` and `qoder_crop`), `crop_expand`, `crop_file_id` + `crop_box` (`[x, y, side, side]`
+  in target pixels) and `qoder_output_file_id` (the raw edited crop) for `qoder_crop`. A `qoder_crop` job's
+  `input_file_ids` become `[crop, face file]` once the crop is made; its only output is the pasted full photo.
+- Job errors from the sidecar: `no_face_in_target`, `no_face_in_source`, `faceswap_unavailable` (sidecar down or not
+  configured), `faceswap_failed` (anything else, e.g. an unreadable or too large image).
 
 ---
 
@@ -956,6 +983,46 @@ server, so a bad edit cannot break the response format.
 - `/admin/enhancer/test` runs a real enhance (credits are charged to the admin) without saving anything. With `instructions` it
   tries that draft (`instructions_source: "draft"`); without it, the saved ones. Use it to compare results before a PUT.
 - End users cannot send instructions: `POST /prompts/enhance` ignores unknown fields.
+
+### Face swap settings
+Engine default, the Qoder prompts and the swapper options, stored in the database (`kv` key `face_swap.settings`); a
+change applies to the next face swap. Only values that differ from the defaults are stored, so new built-in defaults reach
+fields an admin never changed.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/admin/face-swap/settings` | – | `{settings, defaults, sidecar: {configured, ready, models?}}` (readiness probed now) |
+| PUT | `/admin/face-swap/settings` | any subset of the settings; `null` resets a field (or all of `swapper`) to its default | same as GET (readiness may be cached) |
+| POST | `/admin/face-swap/test` | `{target_file_id, face_id, engine? = "swapper", settings_override?}` | `{image_data_url, engine, timings_ms, width, height, target_faces, source_faces}` |
+
+```json
+{ "default_engine": "swapper",
+  "qoder_prompt": "Face swap. Image 1 is the target photo …",
+  "qoder_crop_prompt": "Face swap on a close-up. …",
+  "crop_expand": 2.2,
+  "swapper": { "target_faces": "largest", "identity_mode": "average", "det_thresh": 0.5, "restorer": "codeformer",
+               "restore_blend": 0.8, "codeformer_fidelity": 0.7 } }
+```
+
+| setting | range | meaning |
+|---|---|---|
+| `default_engine` | `swapper` \| `qoder` \| `qoder_crop` | engine of a face swap without `engine` |
+| `qoder_prompt`, `qoder_crop_prompt` | 20–4000 chars (trimmed) | prompts of the `qoder` / `qoder_crop` engines |
+| `crop_expand` | 1.2–4 | `qoder_crop`: crop side = `crop_expand` × the face's larger side |
+| `swapper.target_faces` | `largest` \| `all` | which faces in the target get swapped |
+| `swapper.identity_mode` | `average` \| `frontal` | average all faces in the face image (e.g. a 3x3 sheet) or use the most frontal one |
+| `swapper.det_thresh` | 0.1–0.95 | face detection threshold (also used by `qoder_crop`) |
+| `swapper.restorer` | `codeformer` \| `gfpgan` \| `off` | face restoration after the swap |
+| `swapper.restore_blend` | 0–1 | how much of the restored face is blended in |
+| `swapper.codeformer_fidelity` | 0–1 | CodeFormer: higher = closer to the swapped face, lower = stronger restoration |
+
+- Unknown fields or out-of-range values are `400 validation_error` (with `issues`).
+- Engine settings are copied into each job when it is created (`request.face_swap.options`, `crop_expand`, the prompt), so
+  a change does not affect jobs already queued.
+- **Test** runs the swapper synchronously on one of the admin's own images and faces with the current settings merged with
+  `settings_override` (same shape as `PUT`), without creating a job or gallery item. `qoder`/`qoder_crop` are
+  `400 test_engine_unsupported`; sidecar errors are `400 no_face_in_target`/`no_face_in_source`/`faceswap_failed` or
+  `503 faceswap_unavailable`.
 
 ### Qoder credits
 

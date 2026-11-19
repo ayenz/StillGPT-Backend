@@ -22,6 +22,25 @@ services:
       db:
         condition: service_healthy
 
+  # Face swap sidecar (InsightFace-style detect/ArcFace/inswapper + CodeFormer/GFPGAN on onnxruntime CPU).
+  # Internal only: the backend reaches it at http://faceswap:8080 (FACESWAP_URL). Models (~1.4 GB) are downloaded
+  # on first start into the faceswap_models volume; /health/ready is 503 until they are loaded.
+  faceswap:
+    build: ./faceswap
+    image: stillgpt-faceswap:latest
+    container_name: stillgpt-faceswap
+    restart: unless-stopped
+    environment:
+      FACESWAP_API_KEY: ${FACESWAP_API_KEY:-}
+      FACESWAP_WORKERS: ${FACESWAP_WORKERS:-2}
+      FACESWAP_ORT_THREADS: ${FACESWAP_ORT_THREADS:-2}
+    ports:
+      - "127.0.0.1:${FACESWAP_HOST_PORT:-8791}:8080"   # debugging only
+    volumes:
+      - faceswap_models:/models
+    networks:
+      - default
+
   db:
     image: postgres:17-alpine
     container_name: stillgpt-db
@@ -45,6 +64,8 @@ volumes:
     name: ${MEDIA_VOLUME:-stillgpt_media}
   pgdata:
     name: ${PGDATA_VOLUME:-stillgpt_pgdata}
+  faceswap_models:
+    name: ${FACESWAP_MODELS_VOLUME:-stillgpt_faceswap_models}
 
 networks:
   automation:

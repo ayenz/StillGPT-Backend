@@ -185,7 +185,12 @@ export class MediaTrash {
       .where(and(inArray(mediaJobs.id, unique), isNotNull(mediaJobs.deletedAt)));
     if (!jobs.length) return counts;
     const jobIds = jobs.map((j) => j.id);
-    const outputs = await this.fileRows(jobs.flatMap((j) => j.resultFileIds));
+    // face swap intermediates (qoder_crop: the crop and Qoder's raw edit) go with the job too, unless something else uses them
+    const intermediates = jobs.flatMap((j) => {
+      const fs = (j.request.face_swap ?? {}) as { crop_file_id?: unknown; qoder_output_file_id?: unknown };
+      return [fs.crop_file_id, fs.qoder_output_file_id].filter((x): x is string => typeof x === 'string');
+    });
+    const outputs = await this.fileRows([...jobs.flatMap((j) => j.resultFileIds), ...intermediates]);
     if (!o.dryRun) {
       await this.d.db.delete(conversations).where(inArray(sql`${conversations.metadata}->>'job_id'`, jobIds));
       await this.d.db.delete(mediaJobs).where(inArray(mediaJobs.id, jobIds));
@@ -267,6 +272,9 @@ export class MediaTrash {
             sql`${mediaJobs.request}->'reference_file_ids' @> ${list}::jsonb`,
             sql`${mediaJobs.request}->>'first_frame_file_id' = ${fileId}`,
             sql`${mediaJobs.request}->>'last_frame_file_id' = ${fileId}`,
+            // face swap: the target photo (a qoder_crop job's inputs are the crop + face) and its intermediates
+            sql`${mediaJobs.request}->'face_swap'->>'source_file_id' = ${fileId}`,
+            sql`${mediaJobs.request}->'face_swap'->>'qoder_output_file_id' = ${fileId}`,
           ),
         ),
       )

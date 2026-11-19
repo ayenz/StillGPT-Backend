@@ -99,7 +99,7 @@ describe('face swap (native)', () => {
     const faceFile = await upload('face.png', makePng(4, 4), 'image/png');
     const face = (await json(await createFace({ name: 'Andi', file_id: faceFile.id }))).body;
 
-    const r = await json(await h.api(`/api/v1/images/${target.id}/face-swap`, { method: 'POST', json: { face_id: face.id, n: 2 } }));
+    const r = await json(await h.api(`/api/v1/images/${target.id}/face-swap`, { method: 'POST', json: { face_id: face.id, n: 2, engine: 'qoder' } }));
     expect(r.status).toBe(202);
     expect(r.body.id).toMatch(/^batch_/);
     expect(r.body.n).toBe(2);
@@ -113,7 +113,7 @@ describe('face swap (native)', () => {
         provider_used: 'qoder',
         n: 2,
         batch_index: i,
-        face_swap: { source_file_id: target.id, face_id: face.id, face_name: 'Andi' },
+        face_swap: { source_file_id: target.id, face_id: face.id, face_name: 'Andi', engine: 'qoder', face_file_id: faceFile.id },
       });
       expect(j.request).not.toHaveProperty('variation');
     }
@@ -123,7 +123,7 @@ describe('face swap (native)', () => {
 
     // the gallery shows it
     const listed = await json(await h.api(`/api/v1/jobs?batch_id=${r.body.id}`));
-    expect(listed.body.data[0].request.face_swap).toEqual({ source_file_id: target.id, face_id: face.id, face_name: 'Andi' });
+    expect(listed.body.data[0].request.face_swap).toEqual({ source_file_id: target.id, face_id: face.id, face_name: 'Andi', engine: 'qoder', face_file_id: faceFile.id });
 
     const [row] = await h.ctx.database.db.select().from(mediaJobs).where(eq(mediaJobs.id, r.body.jobs[0].id));
     const s = h.qoder.state.sessions.get(row!.qoderSessionId!)!;
@@ -134,12 +134,17 @@ describe('face swap (native)', () => {
     expect((await json(await h.api(`/api/v1/images/batches/${r.body.id}`))).body.jobs).toHaveLength(2);
   });
 
-  it('defaults n to 1; 404 for a missing face or someone else’s target; 400 for bad n or a non-image target', async () => {
+  it('defaults n to 1; no sidecar → falls back to qoder; 404 for a missing face or someone else’s target; 400 for bad n or a non-image target', async () => {
     const target = await upload('t.png', makePng(20, 30), 'image/png');
     const faceFile = await upload('f.png', makePng(), 'image/png');
     const face = (await json(await createFace({ name: 'Rina', file_id: faceFile.id }))).body;
-    const swap = (fileId: string, payload: unknown, key?: string) => h.api(`/api/v1/images/${fileId}/face-swap`, { method: 'POST', json: payload, key });
+    const swap = (fileId: string, payload: object, key?: string) =>
+      h.api(`/api/v1/images/${fileId}/face-swap`, { method: 'POST', json: { engine: 'qoder', ...payload }, key });
 
+    const noEngine = await json(await h.api(`/api/v1/images/${target.id}/face-swap`, { method: 'POST', json: { face_id: face.id } }));
+    expect(noEngine.status).toBe(202);
+    expect(noEngine.body.jobs[0].request.face_swap.engine).toBe('qoder');
+    expect((await json(await swap(target.id, { face_id: face.id, engine: 'swapper' }))).body.error.code).toBe('engine_unavailable');
     const one = await json(await swap(target.id, { face_id: face.id }));
     expect(one.status).toBe(202);
     expect(one.body.n).toBe(1);

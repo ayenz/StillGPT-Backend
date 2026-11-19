@@ -83,6 +83,14 @@ const schema = z
     FOLAX_API_KEY: optionalString(z.string().min(1)),
     /** Folax calls in flight at once (a batch of n runs n calls). Keep ≤ the adapter's `max_concurrency`. */
     FOLAX_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
+    /** faceswap sidecar (InsightFace swapper + face crop/paste), e.g. http://faceswap:8080; face swap engines swapper/qoder_crop are off when unset. */
+    FACESWAP_URL: optionalString(z.string().url()),
+    /** Sent as X-API-Key; leave empty when the sidecar runs without auth. */
+    FACESWAP_API_KEY: optionalString(z.string().min(1)),
+    /** Sidecar calls in flight at once (CPU bound). */
+    FACESWAP_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+    /** Per sidecar call. */
+    FACESWAP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
     IMAGE_PROVIDER_DEFAULT: z.enum(IMAGE_PROVIDERS).default('auto'),
     /** Auto-name native conversations from their first message (ChatGPT style). */
     AUTO_TITLE: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),

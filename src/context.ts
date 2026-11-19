@@ -7,6 +7,7 @@ import { ConversationService } from './core/conversations.js';
 import { PromptEnhancer } from './core/enhancer.js';
 import { EnhancerInstructions } from './core/enhancerInstructions.js';
 import { FaceService } from './core/faces.js';
+import { FaceSwapSettingsService } from './core/faceSwap.js';
 import { ReferenceReader } from './core/references.js';
 import { PromptVariator } from './core/variations.js';
 import { QoderHousekeeper } from './core/housekeeping.js';
@@ -24,6 +25,7 @@ import { UsageService } from './core/usage.js';
 import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
 import { createLogger, type Logger } from './log.js';
+import { FaceSwapClient } from './providers/faceswap.js';
 import { FolaxClient } from './providers/folax.js';
 import { QoderClient } from './qoder/client.js';
 import { patTokenProvider, serviceAccountTokenProvider } from './qoder/tokens.js';
@@ -46,6 +48,10 @@ export interface AppContext {
   media: MediaService;
   /** Saved faces for face swap. */
   faces: FaceService;
+  /** null when FACESWAP_URL is unset. */
+  faceswap: FaceSwapClient | null;
+  /** Admin face swap settings + engine availability. */
+  faceSwapSettings: FaceSwapSettingsService;
   enhancer: PromptEnhancer;
   enhancerInstructions: EnhancerInstructions;
   variator: PromptVariator;
@@ -147,6 +153,18 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
           fetchImpl: o.fetchImpl,
         })
       : null;
+  const faceswap = config.FACESWAP_URL
+    ? new FaceSwapClient({
+        baseUrl: config.FACESWAP_URL,
+        apiKey: config.FACESWAP_API_KEY,
+        concurrency: config.FACESWAP_CONCURRENCY,
+        timeoutMs: config.FACESWAP_TIMEOUT_MS,
+        log: log.child({ mod: 'faceswap' }),
+        fetchImpl: o.fetchImpl,
+      })
+    : null;
+  const faceSwapSettings = new FaceSwapSettingsService({ db, log: log.child({ mod: 'face_swap' }), client: faceswap });
+  await faceSwapSettings.load();
   const media = new MediaService({
     db,
     qoder,
@@ -160,6 +178,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     enhancer,
     variator,
     folax,
+    faceswap,
+    faceSwapSettings,
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
@@ -191,6 +211,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     passkeys,
     media,
     faces,
+    faceswap,
+    faceSwapSettings,
     enhancer,
     enhancerInstructions,
     variator,

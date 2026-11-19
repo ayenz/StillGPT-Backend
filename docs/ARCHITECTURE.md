@@ -283,6 +283,8 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
+`FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`qoder_crop` are unavailable when unset; empty key = no auth),
+`FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`,
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),
 `AUTO_TITLE=true` + `AUTO_TITLE_WAIT_MS=5000` (ChatGPT-style chat titles, `core/titler.ts`, model alias `titler`;
 runs on a hidden conversation in parallel with the first native turn; `metadata.title_source` = `auto` | `user`, a user rename pins it).
