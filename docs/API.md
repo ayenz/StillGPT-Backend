@@ -1176,8 +1176,22 @@ fields an admin never changed.
 ```
 GET /admin/folax/status
 → 200 {…same fields as GET /folax/status…, "latency_ms": 2140,
-       "token": {"accepted": true, "jwt_expires_at": "2026-11-09T02:59:33Z", "jwt_expired": true}}
+       "token": {"accepted": true, "jwt_expires_at": "2026-11-09T02:59:33Z", "jwt_expired": true},
+       "stillgpt_usage": {"since": "2026-11-16T00:00:00.000Z", "videos": 1, "edits": 2, "remove_people": 3, "chat_turns": 14,
+                          "by_user": [{"user_id": "usr_…", "email": "…", "videos": 1, "edits": 2, "remove_people": 3, "chat_turns": 14}]},
+       "outside_usage": {"videos": 0, "edits": 1}}
 ```
+- `stillgpt_usage` counts what StillGPT itself used in the current quota cycle (`since` = last Monday 00:00 UTC). The
+  numbers come from our own database, so they are exact:
+  - `videos` and `edits` (prompt edits) are the finished jobs that use the shared weekly quota. Failed jobs use none,
+    and deleted jobs still count.
+  - `remove_people` and `chat_turns` are free; they are listed for information.
+  - `by_user` gives the same counts per user, most quota first.
+- `outside_usage` is the quota used outside StillGPT this cycle (the Folax app on the account owner's phone, earlier
+  tests): `total − remaining` as Folax last reported it, minus `stillgpt_usage`.
+  - It is `null` while Folax has reported no number this cycle (`source` other than `observed`).
+  - Folax only reports the quota when an edit or a video runs. Phone use since the last report shows up at the next
+    one.
 - Checks Folax now instead of using the cached result. It sends a short chat through the adapter, which uses no quota;
   the adapter allows one fresh check per 10 s.
 - `token.accepted: true` together with `jwt_expired: true` is the current normal state: the token has expired but
