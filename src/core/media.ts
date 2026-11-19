@@ -8,7 +8,7 @@ import { AppError, badRequest, notFound, toAppError } from '../errors.js';
 import { newId } from '../ids.js';
 import type { Logger } from '../log.js';
 import { type FaceBox, type FaceSwapClient, PATCH_MISALIGNED, type PasteAlignment, type SwapperOptions } from '../providers/faceswap.js';
-import { FOLAX_PROMPT_MAX, type FolaxClient, type FolaxEditMode, toFolaxRatio } from '../providers/folax.js';
+import { FOLAX_PROMPT_MAX, type FolaxClient, type FolaxEditMode, type FolaxVideoJob, folaxError, toFolaxRatio } from '../providers/folax.js';
 import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
@@ -166,8 +166,16 @@ export interface VideoRequest {
   referenceFileIds?: string[];
   /** Run the prompt enhancer first (default false = use the prompt verbatim). */
   enhance?: boolean;
+  /**
+   * `qoder` (default) or `folax`: image-to-video from `firstFrameFileId` only, always ~5 s / 720p / no audio / aspect of
+   * the image (seconds, resolution, ratio and audio are ignored), vendor "AI generated" watermark, shared weekly quota.
+   */
+  provider?: VideoProvider;
   callbackUrl?: string;
 }
+
+export const VIDEO_PROVIDERS = ['qoder', 'folax'] as const;
+export type VideoProvider = (typeof VIDEO_PROVIDERS)[number];
 
 /** Public JSON shape of a job (native API). */
 export interface MediaJobView {
@@ -277,6 +285,8 @@ export interface MediaServiceDeps {
   videoConcurrency: number;
   /** Progress ticks and restart-recovery polling. Default 5 s. */
   pollIntervalMs?: number;
+  /** Folax video status polling. Default 15 s. */
+  folaxVideoPollMs?: number;
   /** Waits before re-submitting a job that Qoder rejected with a full generation queue. Default 30 s, 1, 2, 3, 5 min. */
   queueRetryDelaysMs?: number[];
   /** Waits before re-submitting a job whose generator hit a draining upstream instance (HTTP 423). Default 5, 15, 30 s. */
@@ -292,7 +302,13 @@ const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
-const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, faceswap: 15_000 } as const;
+const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, folax_video: 150_000, faceswap: 15_000 } as const;
+/** A Folax video is given up after this long (the adapter's own job timeout is 15 min). */
+const FOLAX_VIDEO_MAX_MS = 20 * 60_000;
+/** Consecutive failed status polls (adapter unreachable, upstream hiccups) before a Folax video job fails. */
+const FOLAX_VIDEO_MAX_POLL_ERRORS = 8;
+/** How often a busy adapter (429 too_many_jobs: 4 videos running) is asked again before the job fails. */
+const FOLAX_VIDEO_MAX_BUSY_RETRIES = 20;
 const MAX_RECOVERY_MS = 45 * 60_000;
 /** At most one `provider.degraded` webhook per provider per hour. */
 const DEGRADED_THROTTLE_MS = 3600_000;
@@ -345,9 +361,15 @@ const videoSchema = z
     lastFrameFileId: z.string().min(1).optional(),
     referenceFileIds: fileIds(10, 'reference images').default([]),
     enhance: z.boolean().default(false),
+    provider: z.enum(VIDEO_PROVIDERS).optional(),
     callbackUrl: z.url({ protocol: /^https?$/ }).optional(),
   })
   .superRefine((v, ctx) => {
+    if (v.provider === 'folax') {
+      if (!v.firstFrameFileId) ctx.addIssue({ code: 'custom', path: ['firstFrameFileId'], message: 'provider folax animates an image: first_frame_file_id is required' });
+      if (v.lastFrameFileId) ctx.addIssue({ code: 'custom', path: ['lastFrameFileId'], message: 'provider folax does not support a last frame' });
+      if (v.referenceFileIds.length) ctx.addIssue({ code: 'custom', path: ['referenceFileIds'], message: 'provider folax does not support reference images' });
+    }
     if (v.lastFrameFileId && !v.firstFrameFileId) ctx.addIssue({ code: 'custom', path: ['lastFrameFileId'], message: 'last frame requires a first frame' });
     if (v.referenceFileIds.length && v.firstFrameFileId)
       ctx.addIssue({ code: 'custom', path: ['referenceFileIds'], message: 'reference images cannot be combined with first/last frames' });
@@ -554,6 +576,8 @@ export class MediaService {
 
   async createVideoJob(req: VideoRequest): Promise<MediaJobView> {
     const v = validate(videoSchema, req);
+    const folax = v.provider === 'folax';
+    if (folax) this.assertFolaxUsable();
     await this.d.usage.assertWithinLimit(v.userId);
     const frames = [v.firstFrameFileId, v.lastFrameFileId, ...v.referenceFileIds].filter((x): x is string => !!x);
     await this.loadInputs(v.userId, frames);
@@ -575,17 +599,20 @@ export class MediaService {
       ...(e ? { original_prompt: v.prompt, enhanced: e.enhanced } : {}),
       enhance: v.enhance,
       mode,
-      seconds: v.seconds ?? e?.seconds ?? 5,
-      resolution: v.resolution,
+      // Folax output is fixed: ~5 s, 720p, no audio, the input image's aspect
+      seconds: folax ? 5 : (v.seconds ?? e?.seconds ?? 5),
+      resolution: folax ? '720P' : v.resolution,
       // with frames/references the input image decides the shape, so the enhancer's ratio only applies to text_to_video
-      ratio: v.ratio ?? (mode === 'text_to_video' ? (e?.ratio ?? '16:9') : 'adaptive'),
-      audio: v.audio,
+      ratio: folax ? 'adaptive' : (v.ratio ?? (mode === 'text_to_video' ? (e?.ratio ?? '16:9') : 'adaptive')),
+      audio: folax ? false : v.audio,
       first_frame_file_id: v.firstFrameFileId ?? null,
       last_frame_file_id: v.lastFrameFileId ?? null,
       reference_file_ids: v.referenceFileIds,
+      provider: v.provider ?? 'qoder',
+      provider_used: v.provider ?? 'qoder',
     };
     const job = await this.insertJob(v.userId, 'video', request, v.callbackUrl);
-    this.enqueue(job.id);
+    this.schedule(job);
     return this.view(job);
   }
 
@@ -808,6 +835,12 @@ export class MediaService {
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
       if (isCloseUpEngine(engine)) current = await this.prepareFaceCrop(job);
+      if (usesFolaxVideo(job)) {
+        const outcome = await this.runFolaxVideo(job);
+        // null: the server is stopping; the job stays in_progress and resumes after the restart
+        if (outcome) await this.finish(job.id, outcome);
+        return;
+      }
       // Folax edits never fall back: Folax is optional and the user picked it
       if (folaxEditOf(job)) return await this.finish(job.id, await this.runFolaxEdit(job));
       if (usesFolax(job)) {
@@ -899,6 +932,87 @@ export class MediaService {
     const r = await this.d.folax.edit({ mode, image: await this.d.store.read(input!.file), prompt: String(job.request.prompt), idempotencyKey: job.id });
     const file = await this.d.store.save({ userId: job.userId, kind: 'artifact', filename: r.filename, mimeType: r.mimeType, bytes: r.bytes, jobId: job.id });
     await this.d.usage.record({ userId: job.userId, kind: 'image', model: `folax-${mode}`, jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
+    return { fileIds: [file.id], credits: 0, error: null };
+  }
+
+  /**
+   * Folax image-to-video: submit (Idempotency-Key = job id), remember the adapter job and upstream task in
+   * `request.folax`, poll every `folaxVideoPollMs`, then download the mp4 into our storage. A re-run (restart) polls the
+   * remembered job; if the adapter forgot it (404) the upstream task is resumed without quota. Free, never falls back.
+   */
+  private async runFolaxVideo(job: MediaJob): Promise<Outcome | null> {
+    const folax = this.d.folax;
+    if (!folax) throw new AppError(503, 'provider_unavailable', 'The folax provider is not configured');
+    const pollMs = this.d.folaxVideoPollMs ?? 15_000;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const deadline = Date.now() + FOLAX_VIDEO_MAX_MS;
+    let state = (job.request.folax as FolaxVideoState | undefined) ?? null;
+    const remember = async (r: FolaxVideoJob) => {
+      state = { id: r.id, task_id: r.upstream?.task_id ?? state?.task_id ?? null, client_task_id: r.upstream?.client_task_id ?? state?.client_task_id ?? null };
+      job = { ...job, request: { ...job.request, folax: state } };
+      await this.d.db.update(mediaJobs).set({ request: job.request }).where(eq(mediaJobs.id, job.id));
+    };
+
+    if (!state?.id) {
+      const [frame] = await this.loadInputs(job.userId, [String(job.request.first_frame_file_id)]);
+      const image = await this.d.store.read(frame!.file);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await remember(await folax.submitVideo({ image, prompt: String(job.request.prompt), idempotencyKey: job.id }));
+          break;
+        } catch (err) {
+          const e = toAppError(err);
+          // 429 too_many_jobs (4 videos running) or our side timed out / lost the adapter: the same key makes a retry safe
+          const busy = e.code === 'provider_busy';
+          const transient = (e.code === 'folax_timeout' && e.details?.folax_code === undefined) || e.details?.folax_code === 'unreachable';
+          if (this.stopped) return null;
+          if (!(busy || transient) || attempt >= (busy ? FOLAX_VIDEO_MAX_BUSY_RETRIES : 3) || Date.now() > deadline) throw e;
+          this.d.log.warn('media.folax_video_retry', { jobId: job.id, code: e.code, attempt: attempt + 1 });
+          await sleep(busy ? Math.max(pollMs, Math.min(Number(e.details?.retry_after ?? 30) * 1000, 2 * pollMs)) : pollMs);
+        }
+      }
+    }
+
+    let errors = 0;
+    for (;;) {
+      if (this.stopped) return null;
+      let st: FolaxVideoJob;
+      try {
+        st = await folax.videoStatus(state!.id);
+        errors = 0;
+      } catch (err) {
+        const e = toAppError(err);
+        if (e.code === 'folax_not_found') {
+          // the adapter forgot the job (restart): continue the same upstream task, or replay the submit by key
+          this.d.log.warn('media.folax_video_resume', { jobId: job.id, taskId: state!.task_id });
+          if (state!.task_id) await remember(await folax.resumeVideo(state!.task_id, state!.client_task_id));
+          else {
+            const [frame] = await this.loadInputs(job.userId, [String(job.request.first_frame_file_id)]);
+            await remember(await folax.submitVideo({ image: await this.d.store.read(frame!.file), prompt: String(job.request.prompt), idempotencyKey: job.id }));
+          }
+          continue;
+        }
+        // 4xx and a rejected token end the job; an unreachable adapter or upstream hiccups get a few more polls
+        const down = e.code === 'provider_unavailable' && e.details?.folax_code !== 'unreachable';
+        if (e.status < 500 || down || ++errors >= FOLAX_VIDEO_MAX_POLL_ERRORS) throw e;
+        this.d.log.warn('media.folax_video_poll_failed', { jobId: job.id, code: e.code, errors });
+        await sleep(pollMs);
+        continue;
+      }
+      if (st.status === 'succeeded') break;
+      if (st.status === 'failed') {
+        folax.invalidateUsage();
+        const e = folaxError(502, { error: { code: st.error?.code ?? 'upstream_task_failed', message: st.error?.message ?? 'Folax video generation failed' } });
+        return { fileIds: [], credits: 0, error: { code: e.code, message: e.message } };
+      }
+      if (Date.now() > deadline) return { fileIds: [], credits: 0, error: { code: 'timeout', message: 'The Folax video did not finish in time' } };
+      await sleep(pollMs);
+    }
+
+    const bytes = await folax.videoContent(state!.id);
+    folax.invalidateUsage();
+    const file = await this.d.store.save({ userId: job.userId, kind: 'artifact', filename: `folax-${job.id}.mp4`, mimeType: 'video/mp4', bytes, jobId: job.id });
+    await this.d.usage.record({ userId: job.userId, kind: 'video', model: 'folax-video', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
     return { fileIds: [file.id], credits: 0, error: null };
   }
 
@@ -1120,8 +1234,8 @@ export class MediaService {
   /** Time-based progress estimate (upstream reports none), capped at 95 until the job is done. */
   private trackProgress(job: MediaJob, startedAt: Date): () => void {
     const edit = folaxEditOf(job);
-    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : EXPECTED_MS[job.kind];
-    const expected = base * (job.kind === 'video' ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
+    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : EXPECTED_MS[job.kind];
+    const expected = base * (job.kind === 'video' && !usesFolaxVideo(job) ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
     let last = 0;
     const timer = setInterval(() => {
       const progress = Math.min(95, Math.floor(((Date.now() - startedAt.getTime()) / expected) * 100));
@@ -1188,13 +1302,14 @@ export class MediaService {
     }
   }
 
+  /** Qoder videos wait in the VIDEO_CONCURRENCY queue; images and Folax videos (the adapter limits itself) start at once. */
   private schedule(job: MediaJob) {
-    if (job.kind === 'video') this.enqueue(job.id);
+    if (job.kind === 'video' && !usesFolaxVideo(job)) this.enqueue(job.id);
     else void this.run(job);
   }
 
   private async resumeInProgress(job: MediaJob) {
-    if (job.kind === 'video') this.runningVideos.add(job.id);
+    if (job.kind === 'video' && !usesFolaxVideo(job)) this.runningVideos.add(job.id);
     this.active.add(job.id);
     let requeued: MediaJob | null = null;
     try {
@@ -1463,6 +1578,14 @@ const baseName = (filename: string) => filename.replace(/\.[^.]+$/, '').slice(0,
 const extOf = (mime: string) => (mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg');
 
 const usesFolax = (job: MediaJob) => job.kind === 'image' && job.request.provider_used === 'folax';
+const usesFolaxVideo = (job: MediaJob) => job.kind === 'video' && job.request.provider_used === 'folax';
+
+/** `request.folax` of a Folax video job: the adapter job and the upstream task (to resume after an adapter restart). */
+interface FolaxVideoState {
+  id: string;
+  task_id: string | null;
+  client_task_id: string | null;
+}
 /** The Folax edit mode of an image job, or null for any other job. */
 function folaxEditOf(job: MediaJob): FolaxEditMode | null {
   const mode = usesFolax(job) ? (job.request.folax_edit as { mode?: unknown } | undefined)?.mode : undefined;

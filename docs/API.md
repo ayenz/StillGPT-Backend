@@ -203,7 +203,13 @@ Returns the same usage object as `/me` (this calendar month, UTC).
     { "id": "folax", "available": true, "edits": true, "max_edit_inputs": 1, "images_per_call": 2, "max_n": 10,
       "ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"], "prompt_max": 1500 }
   ],
-  "default_image_provider": "auto"
+  "default_image_provider": "auto",
+  "video_providers": [
+    { "id": "qoder", "available": true, "modes": ["text_to_video", "first_frame_to_video", "reference_to_video"] },
+    { "id": "folax", "available": true, "modes": ["first_frame_to_video"], "seconds": 5, "resolution": "720P",
+      "audio": false, "watermark": true }
+  ],
+  "default_video_provider": "qoder"
 }
 ```
 - In the UI, offer the **aliases** first. They keep working when Qoder retires or renames models.
@@ -250,7 +256,7 @@ response already contains it in `conversation.title`. Until then, and if naming 
 the title is the first 80 characters of the message; a late generated title is still saved, so refetch the list.
 A title given at creation or set with `PATCH` (rename) is never overwritten. Only the first message is used.
 `model` and `system_prompt` can be changed between turns, and the context is kept.
-Media models (`qoder-image`, `qoder-video`) are rejected here with `400 model_not_supported`.
+Media models (`qoder-image`, `qoder-video`, `folax-image`, `folax-video`) are rejected here with `400 model_not_supported`.
 
 ### GET /conversations/:id/messages
 Query: `?limit=100` (max 500) `&before=<message id>` for older pages. Messages come oldest first within a page.
@@ -737,11 +743,33 @@ GET /folax/status
 | `last_frame_file_id` | string | – | needs `first_frame_file_id` |
 | `reference_file_ids` | string[] | `[]` | 1–10 reference images (`reference_to_video` mode). Cannot be combined with frames |
 | `enhance` | bool | `false` | run the prompt enhancer first. Its prompt is used, plus its `seconds` and (text-to-video only) `ratio` when not given. `request.original_prompt` keeps the input |
+| `provider` | `qoder` \| `folax` | `qoder` | video generator. `folax` = Folax image-to-video, see below |
 | `callback_url` | URL | – | POSTed when the job finishes |
 
 Videos take **3–4 minutes**, and can take up to 30. They cannot be cancelled. Only a few run at once (`VIDEO_CONCURRENCY`,
 default 2), and the rest wait as `queued`. The output is H.264 MP4, 1080p at 30 fps, with AAC audio when `audio` is on.
 If the server restarts during a job, it picks the job up again and finishes it.
+
+#### Folax video (`provider: "folax"`)
+An optional, faster image-to-video. It never falls back to Qoder.
+
+- **An image is required:** `first_frame_file_id` animates that photo. There is no text-to-video.
+  `last_frame_file_id` and `reference_file_ids` are `400 validation_error`.
+- **Fixed output:** about **5 s**, **720p**, 24 fps, **no audio**, with the input image's aspect ratio (a 16:9 photo gives
+  1280×720). `seconds`, `resolution`, `ratio` and `audio` are ignored. The job's `request` records the real values:
+  `seconds: 5`, `resolution: "720P"`, `ratio: "adaptive"`, `audio: false`.
+- **Watermark:** the video has an **"AI generated" mark in the bottom-right corner**. The video vendor burns it in, and
+  it cannot be removed.
+- **Time:** about **2–2.5 minutes**. Folax videos do not wait behind Qoder videos in the queue.
+- **Quota:** each video uses one of the **20 shared weekly videos** (§8 "Folax status"). A failed video uses none.
+- **Credits:** none (`credits: 0`).
+- **Failures** fail the job with a Folax error code: `folax_quota_exceeded`, `content_rejected`, `folax_failed`,
+  `provider_unavailable`, …. When Folax is already known to be down, the request itself is `503 provider_unavailable`.
+- **Restarts:** the job survives both a StillGPT restart and a Folax adapter restart.
+  - `request.folax` keeps the adapter job and the upstream task ids, so StillGPT can continue the same task without
+    using quota again.
+  - When the video is done, StillGPT stores the mp4 in its own media storage. It is served like any other output
+    (`outputs[0].url`, thumbnails, previews).
 
 ### Following a job
 | Method | Path | Response |
@@ -1232,13 +1260,13 @@ conversation. Errors use each provider's own envelope.
 
 | Endpoint | Notes |
 |---|---|
-| `GET /v1/models`, `GET /v1/models/:id` | aliases and `qoder/<id>` models, plus `qoder-image`, `qoder-video` and (when configured) `folax-image` |
+| `GET /v1/models`, `GET /v1/models/:id` | aliases and `qoder/<id>` models, plus `qoder-image`, `qoder-video` and (when configured) `folax-image`, `folax-video` |
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
 | `POST /v1/images/generations` | `{prompt, model?, n? (1–10), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images, so StillGPT makes ceil(n/2) Folax calls in parallel (~10–15 s for all). If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |
 | `POST /v1/images/edits` | multipart: `image` or `image[]` (up to 3), `prompt`, `size`, `n`, `response_format`. Qoder by default. `model: "folax-image"` → Folax prompt edit (exactly 1 `image`, `n` 1, weekly quota; see §8 "Folax edits"). Folax failures keep their status: `429 folax_quota_exceeded` / `provider_busy`, `503 provider_unavailable`, `422 content_rejected`, … |
-| `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url` |
+| `POST /v1/videos` | OpenAI Videos API. JSON or multipart: `prompt`, `model: "qoder-video"`, `seconds` (string or number), `size` (`1280x720`, `720x1280`, `1920x1080`, `1024x1024`, …, mapped to ratio and resolution), optional `input_reference` image (becomes the first frame). StillGPT extras: `resolution`, `ratio`, `audio`, `callback_url`. `model: "folax-video"` = Folax image-to-video: `input_reference` is required, `seconds`/`size` are ignored (always 5 s, 720p, aspect of the image, vendor watermark, shared weekly quota; §8 "Folax video") |
 | `GET /v1/videos`, `GET /v1/videos/:id` | video object `{id, object: "video", model, status, progress, created_at, completed_at, seconds, size, error}` (unix seconds) |
 | `GET /v1/videos/:id/content` | the MP4 bytes, with `Range` support. Returns `409 job_not_completed` until the video is ready |
 | `DELETE /v1/videos/:id` | `501 not_supported` |

@@ -61,6 +61,8 @@ const schema = z
     VIDEO_CONCURRENCY: z.coerce.number().int().min(1).default(1),
     /** Media job progress ticks + restart-recovery polling. */
     MEDIA_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(5000),
+    /** How often a Folax video job is polled (the adapter recommends 15 s; a video takes ~2–2.5 min). */
+    FOLAX_VIDEO_POLL_MS: z.coerce.number().int().min(10).default(15_000),
     /** How often the webhook worker looks for due deliveries/retries. */
     WEBHOOK_POLL_INTERVAL_MS: z.coerce.number().int().min(10).default(5000),
     /** Waits (ms, comma separated) before re-submitting a media job rejected by a full Qoder generation queue. */

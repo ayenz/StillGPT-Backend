@@ -43,6 +43,7 @@ const videoBody = z.object({
   last_frame_file_id: z.unknown().optional(),
   reference_file_ids: z.unknown().optional(),
   enhance: z.unknown().optional(),
+  provider: z.unknown().optional(),
   callback_url: z.unknown().optional(),
 });
 
@@ -139,6 +140,7 @@ export function mediaJobRoutes(ctx: AppContext) {
       lastFrameFileId: b.last_frame_file_id,
       referenceFileIds: b.reference_file_ids,
       enhance: b.enhance,
+      provider: b.provider,
       callbackUrl: b.callback_url,
     } as VideoRequest;
     return c.json(mediaJobJson(await ctx.media.createVideoJob(req)), 202);
@@ -261,7 +263,7 @@ async function* jobEvents(ctx: AppContext, id: string, userId: string, signal: A
   }
 }
 
-/** `image_providers` section of GET /models. */
+/** `image_providers` and `video_providers` sections of GET /models. */
 export function imageProviders(ctx: AppContext) {
   return {
     image_providers: [
@@ -279,6 +281,12 @@ export function imageProviders(ctx: AppContext) {
       },
     ],
     default_image_provider: ctx.config.IMAGE_PROVIDER_DEFAULT,
+    video_providers: [
+      { id: 'qoder', available: true, modes: ['text_to_video', 'first_frame_to_video', 'reference_to_video'] },
+      // image-to-video only; fixed 5 s / 720p / no audio / aspect of the image; vendor watermark; shared weekly quota
+      { id: 'folax', available: !!ctx.folax, modes: ['first_frame_to_video'], seconds: 5, resolution: '720P', audio: false, watermark: true },
+    ],
+    default_video_provider: 'qoder',
   };
 }
 

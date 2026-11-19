@@ -26,6 +26,8 @@ export const IMAGE_MODEL = 'qoder-image';
 /** Listed only when Folax is configured. */
 export const FOLAX_IMAGE_MODEL = 'folax-image';
 export const VIDEO_MODEL = 'qoder-video';
+/** OpenAI-compatible model id of Folax image-to-video (`provider: folax`). */
+export const FOLAX_VIDEO_MODEL = 'folax-video';
 
 /**
  * Mirrors Qoder `GET /models` into the DB and resolves what clients ask for.
@@ -124,7 +126,7 @@ export class ModelRegistry {
   resolve(requested: string | undefined | null): Resolution {
     const raw = (requested ?? '').trim() || 'default';
     const id = raw.replace(/^qoder\//, '');
-    if (id === IMAGE_MODEL || id === FOLAX_IMAGE_MODEL || id === VIDEO_MODEL) throw badRequest(`'${id}' is a media model; use the images/videos endpoints`, 'model_not_supported');
+    if (id === IMAGE_MODEL || id === FOLAX_IMAGE_MODEL || id === VIDEO_MODEL || id === FOLAX_VIDEO_MODEL) throw badRequest(`'${id}' is a media model; use the images/videos endpoints`, 'model_not_supported');
 
     const chain = this.aliases[id];
     if (chain) {

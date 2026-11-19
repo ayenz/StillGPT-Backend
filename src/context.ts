@@ -189,6 +189,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
+    folaxVideoPollMs: config.FOLAX_VIDEO_POLL_MS,
     queueRetryDelaysMs: config.MEDIA_QUEUE_RETRY_DELAYS_MS,
     drainingRetryDelaysMs: config.MEDIA_DRAINING_RETRY_DELAYS_MS,
   });

@@ -2,7 +2,7 @@ import { type Context, Hono } from 'hono';
 import type { ImageProvider } from '../../config.js';
 import type { AppContext } from '../../context.js';
 import { IMAGE_SIZES, type ImageSize, MAX_IMAGE_BATCH, type MediaJobView, VIDEO_RATIOS, type VideoRatio, type VideoRequest, type VideoResolution } from '../../core/media.js';
-import { FOLAX_IMAGE_MODEL, IMAGE_MODEL, VIDEO_MODEL } from '../../core/models.js';
+import { FOLAX_IMAGE_MODEL, FOLAX_VIDEO_MODEL, IMAGE_MODEL, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, badRequest, notFound } from '../../errors.js';
 import { type Env, jsonBody, requireUser } from '../../http.js';
 import { assertUploadSize, formFiles, saveUpload, UPLOAD_LIMIT } from '../native/util.js';
@@ -202,9 +202,11 @@ export function paramsToVideoSize(ratio: string, resolution: string): string {
 }
 
 function videoParams(f: Record<string, unknown>): Omit<VideoRequest, 'userId'> {
-  if (f.model !== undefined && f.model !== VIDEO_MODEL && !String(f.model).startsWith('sora')) {
-    throw badRequest(`Unknown video model '${String(f.model)}'; use '${VIDEO_MODEL}'`, 'model_not_found', { param: 'model' });
+  if (f.model !== undefined && f.model !== VIDEO_MODEL && f.model !== FOLAX_VIDEO_MODEL && !String(f.model).startsWith('sora')) {
+    throw badRequest(`Unknown video model '${String(f.model)}'; use '${VIDEO_MODEL}' or '${FOLAX_VIDEO_MODEL}'`, 'model_not_found', { param: 'model' });
   }
+  // folax-video: image-to-video from input_reference; size/seconds are fixed (5 s, 720p, aspect of the image)
+  if (f.model === FOLAX_VIDEO_MODEL) return { prompt: f.prompt as string, provider: 'folax', callbackUrl: f.callback_url as string | undefined };
   if (f.size !== undefined && !videoSizeToParams(f.size)) throw badRequest(`Invalid size '${String(f.size)}' (expected WIDTHxHEIGHT)`, 'invalid_size', { param: 'size' });
   const fromSize = f.size === undefined ? null : videoSizeToParams(f.size);
   const seconds = f.seconds === undefined || f.seconds === '' ? undefined : Number(f.seconds);
@@ -233,7 +235,7 @@ export function videoObject(job: MediaJobView) {
   return {
     id: job.id,
     object: 'video' as const,
-    model: VIDEO_MODEL,
+    model: r.provider_used === 'folax' ? FOLAX_VIDEO_MODEL : VIDEO_MODEL,
     status: job.status,
     progress: job.progress,
     created_at: unix(job.created_at)!,

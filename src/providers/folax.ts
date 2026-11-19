@@ -68,6 +68,16 @@ export interface FolaxEditResult extends FolaxImage {
   replayed: boolean;
 }
 
+/** An adapter video job (`/v1/videos`). Output: always ~5 s, 720p, no audio, aspect of the input image, vendor watermark. */
+export interface FolaxVideoJob {
+  id: string;
+  status: 'queued' | 'processing' | 'succeeded' | 'failed';
+  progress?: number;
+  quota_remaining?: number | null;
+  upstream?: { task_id?: string | null; client_task_id?: string | null };
+  error?: { code?: string; message?: string } | null;
+}
+
 /** Adapter error codes (OpenAI envelope `error.code`, v0.4+) → our AppError. */
 const API_ERRORS: Record<string, { status: number; code: string; message?: string }> = {
   quota_exceeded: { status: 429, code: 'folax_quota_exceeded', message: 'The weekly Folax quota is used up' },
@@ -256,6 +266,32 @@ export class FolaxClient {
       height: img.height ?? null,
       replayed: r.headers.get('idempotent-replayed') === 'true',
     };
+  }
+
+  /**
+   * `POST /v1/videos` (image-to-video, async; ~7 s until 202). The weekly video quota is used when the task succeeds.
+   * With `idempotencyKey` a repeat returns the same job (no new task), even after an adapter restart.
+   */
+  async submitVideo(o: { image: Buffer; prompt: string; idempotencyKey: string }): Promise<FolaxVideoJob> {
+    const json = { image: o.image.toString('base64'), prompt: o.prompt.trim().slice(0, FOLAX_PROMPT_MAX) };
+    return (await this.api<FolaxVideoJob>('/v1/videos', { json, idempotencyKey: o.idempotencyKey, timeoutMs: 120_000 })).body;
+  }
+
+  /** `GET /v1/videos/{id}`. 404 `folax_not_found` when the adapter forgot the job (restart without a key) → `resumeVideo`. */
+  async videoStatus(id: string): Promise<FolaxVideoJob> {
+    return (await this.api<FolaxVideoJob>(`/v1/videos/${encodeURIComponent(id)}`, { timeoutMs: 30_000 })).body;
+  }
+
+  /** `POST /v1/videos/resume`: a new adapter job for an existing upstream task (no quota). */
+  async resumeVideo(taskId: string, clientTaskId: string | null): Promise<FolaxVideoJob> {
+    return (await this.api<FolaxVideoJob>('/v1/videos/resume', { json: { task_id: taskId, client_task_id: clientTaskId }, timeoutMs: 60_000 })).body;
+  }
+
+  /** `GET /v1/videos/{id}/content`: the 720p mp4 (409 `folax_not_ready` before it succeeded). */
+  async videoContent(id: string): Promise<Buffer> {
+    const res = await this.send(`/v1/videos/${encodeURIComponent(id)}/content`, { timeoutMs: 180_000 });
+    if (!res.ok) throw await this.failure('/v1/videos/content', res);
+    return Buffer.from(await res.arrayBuffer());
   }
 
   /** True only when the last known upstream state is `down` (no probe; cheap pre-check before creating a job). */

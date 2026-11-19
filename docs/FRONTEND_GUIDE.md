@@ -211,6 +211,14 @@ POST /videos {prompt, seconds?: 5, resolution?: "1080P", ratio?: "16:9", audio?:
 - Durasi 2–30 detik, resolusi 480P/720P/1080P, rasio 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.
 - **Lama: biasanya 3–8 menit, bisa sampai 30 menit.** Tidak bisa dibatalkan. Server memproses satu video sekaligus;
   jika antrean Qoder penuh, server otomatis mencoba lagi (job tetap `in_progress`).
+- **Video Folax (opsional):** kirim `provider: "folax"` + `first_frame_file_id` (**wajib**; tidak ada text-to-video).
+  - Hasilnya selalu ±5 detik, 720p, **tanpa suara**, dengan rasio mengikuti foto. Opsi durasi, resolusi, rasio, dan
+    audio diabaikan, jadi sembunyikan opsi itu di UI saat Folax dipilih.
+  - Ada **watermark "AI generated" di pojok kanan bawah** dari vendor, dan tidak bisa dihapus. Beri tahu user sebelum
+    generate.
+  - Selesai ±2–2,5 menit, tanpa kredit, dan memotong **kuota video mingguan bersama** (lihat 5.3a).
+  - Kalau gagal, job `failed` dengan `error.code`, misalnya `folax_quota_exceeded`. Tidak ada fallback ke Qoder.
+  - Daftar provider ada di `GET /models` → `video_providers`.
 
 ### 5.3a Status Folax & kuota bersama
 Folax adalah provider tambahan (nice-to-have). Default tetap Qoder. Fitur khusus Folax (model chat Folax, video Folax,

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppContext } from '../../context.js';
-import { FOLAX_IMAGE_MODEL, IMAGE_MODEL, type ModelRow, VIDEO_MODEL } from '../../core/models.js';
+import { FOLAX_IMAGE_MODEL, FOLAX_VIDEO_MODEL, IMAGE_MODEL, type ModelRow, VIDEO_MODEL } from '../../core/models.js';
 import { AppError, anthropicErrorBody } from '../../errors.js';
 import type { Env } from '../../http.js';
 import { publicModelId } from './turn.js';
@@ -45,6 +45,7 @@ function catalog(ctx: AppContext, bootSec: number): ModelEntry[] {
     media(IMAGE_MODEL, 'image', 'Qoder Image (ImageGen)'),
     ...(ctx.folax ? [media(FOLAX_IMAGE_MODEL, 'image', 'Folax Image (fast, 2 images per call; edits: 1 input image, shared weekly quota)')] : []),
     media(VIDEO_MODEL, 'video', 'Qoder Video (VideoGen)'),
+    ...(ctx.folax ? [media(FOLAX_VIDEO_MODEL, 'video', 'Folax Video (image-to-video, 5 s 720p, watermark, shared weekly quota)')] : []),
   ];
 }
 
