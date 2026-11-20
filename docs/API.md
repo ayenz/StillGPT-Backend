@@ -997,6 +997,10 @@ otherwise, `400 validation_error` if it is not an image).
 | `engine` | `swapper_polish` \| `swapper` \| `qoder` \| `qoder_crop` | admin setting `default_engine` | an explicitly requested engine that is not available is `400 engine_unavailable`; without `engine`, an unavailable default falls back to `qoder` |
 | `n` | int 1–4 | `1` | how many takes to make in parallel; **always 1 for `swapper`** |
 | `callback_url` | URL | – | POSTed when each job finishes (§9) |
+| `settings_override` | object | – | **admin only**: same shape and validation as `PUT /admin/face-swap/settings`, merged onto the current settings for this batch only (`null`s ignored); affects the prompt, `crop_expand` and swapper `options` snapshotted into the jobs; its `default_engine` only matters without `engine`. Global settings are not changed |
+| `tag` | string 1–64 `[A-Za-z0-9._:-]` | – | **admin only**: experiment label, stored as `request.face_swap.tag`; list with `GET /admin/face-swap/jobs?tag=` |
+
+- A non-admin sending `settings_override` or `tag` gets `403 forbidden`; invalid values are `400 validation_error`.
 
 - The response is the same batch as `POST /images` with `n` (follow it with `/images/batches/:id`, its `/events`, or the
   gallery). It never waits for the images. Jobs show progress, SSE events, webhooks and gallery entries like any image job.
@@ -1284,6 +1288,7 @@ fields an admin never changed.
 | GET | `/admin/face-swap/settings` | – | `{settings, defaults, sidecar: {configured, ready, models?}}` (readiness probed now) |
 | PUT | `/admin/face-swap/settings` | any subset of the settings; `null` resets a field (or all of `swapper`) to its default | same as GET (readiness may be cached) |
 | POST | `/admin/face-swap/test` | `{target_file_id, face_id, engine? = "swapper", settings_override?}` | `{image_data_url, engine, timings_ms, width, height, target_faces, source_faces, backend?: "gpu"\|"cpu"}` |
+| GET | `/admin/face-swap/jobs?tag=<tag>` | – | `{data: Job[]}`: the admin's own (not trashed) face swap jobs with that `tag`, newest first, all statuses, max 500; job JSON as in `/jobs`. Missing/invalid tag: `400 validation_error` |
 
 ```json
 { "default_engine": "swapper_polish",

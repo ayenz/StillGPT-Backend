@@ -3,10 +3,10 @@ import { z } from 'zod';
 import type { AppContext } from '../../context.js';
 import type { Face } from '../../core/faces.js';
 import { applyPatch, DEFAULT_FACE_SWAP_SETTINGS, FACE_SWAP_ENGINES, type FaceSwapSettings, faceSwapSettingsPatch } from '../../core/faceSwap.js';
-import { imageBatchJson, MAX_FACE_SWAP_BATCH } from '../../core/media.js';
-import { badRequest } from '../../errors.js';
+import { imageBatchJson, MAX_FACE_SWAP_BATCH, mediaJobJson } from '../../core/media.js';
+import { badRequest, forbidden } from '../../errors.js';
 import type { Env } from '../../http.js';
-import { body, fileView } from './util.js';
+import { body, fileView, parse } from './util.js';
 
 const faceSwapBody = z.object({
   face_id: z.string().min(1),
@@ -15,7 +15,14 @@ const faceSwapBody = z.object({
   /** 1–4 parallel results (default 1; always 1 for `swapper`). */
   n: z.number().int().min(1).max(MAX_FACE_SWAP_BATCH).optional(),
   callback_url: z.string().optional(),
+  /** Admin only: settings patch for this batch (same shape as PUT /admin/face-swap/settings, nulls ignored). */
+  settings_override: faceSwapSettingsPatch.optional(),
+  /** Admin only: experiment label, listable via GET /admin/face-swap/jobs?tag=. */
+  tag: z.string().optional(),
 });
+
+const FACE_SWAP_TAG = /^[A-Za-z0-9._:-]{1,64}$/;
+const tagError = () => badRequest('tag must be 1-64 characters of A-Z a-z 0-9 . _ : -', 'validation_error', { param: 'tag' });
 
 /** /faces (saved identities) and POST /images/:fileId/face-swap. */
 export function faceRoutes(ctx: AppContext) {
@@ -41,8 +48,14 @@ export function faceRoutes(ctx: AppContext) {
 
   /** Always async: 202 with the image batch; follow it via /images/batches/:id(/events) or the gallery. */
   app.post('/images/:fileId/face-swap', async (c) => {
-    const b = await body(c, faceSwapBody);
-    const userId = c.get('user').id;
+    const raw = await body(c, z.unknown());
+    const user = c.get('user');
+    // admin-only fields are refused before validation, so a non-admin never learns about the override's shape
+    if (raw && typeof raw === 'object' && ('settings_override' in raw || 'tag' in raw) && user.role !== 'admin')
+      throw forbidden('settings_override and tag are admin only');
+    const b = parse(faceSwapBody, raw);
+    if (b.tag !== undefined && !FACE_SWAP_TAG.test(b.tag)) throw tagError();
+    const userId = user.id;
     const face = await ctx.faces.get(b.face_id, userId);
     const batch = await ctx.media.createFaceSwapBatch({
       userId,
@@ -51,6 +64,8 @@ export function faceRoutes(ctx: AppContext) {
       engine: b.engine,
       n: b.n,
       callbackUrl: b.callback_url,
+      settingsOverride: b.settings_override,
+      tag: b.tag,
     });
     return c.json(imageBatchJson(batch), 202);
   });
@@ -72,6 +87,13 @@ export function faceSwapAdminRoutes(ctx: AppContext) {
 
   /** Partial merge; `null` resets a field (or the whole `swapper` block) to its default. */
   app.put('/admin/face-swap/settings', async (c) => c.json(await view(await ctx.faceSwapSettings.update(await jsonOf(c)))));
+
+  /** Experiment jobs of the admin with `request.face_swap.tag = tag`: newest first, all statuses, max 500. */
+  app.get('/admin/face-swap/jobs', async (c) => {
+    const tag = c.req.query('tag') ?? '';
+    if (!FACE_SWAP_TAG.test(tag)) throw tagError();
+    return c.json({ data: (await ctx.media.listFaceSwapJobsByTag(c.get('user').id, tag)).map(mediaJobJson) });
+  });
 
   /** Runs the swapper on one of the admin's images + faces without creating a job; qoder engines are not supported. */
   app.post('/admin/face-swap/test', async (c) => {

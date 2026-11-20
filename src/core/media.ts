@@ -14,7 +14,7 @@ import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
 import type { EventBus } from './bus.js';
-import type { FaceSwapEngine, FaceSwapSettingsService } from './faceSwap.js';
+import { applyPatch, type FaceSwapEngine, type FaceSwapSettingsPatch, type FaceSwapSettingsService } from './faceSwap.js';
 import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
 import { MAX_VARIATIONS, type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
@@ -143,6 +143,10 @@ export interface FaceSwapRequest {
   /** 1–MAX_FACE_SWAP_BATCH, default 1; always 1 for `swapper` (deterministic). */
   n?: number;
   callbackUrl?: string;
+  /** Admin experiments: settings patch (nulls ignored) applied on top of the current settings for this batch only. */
+  settingsOverride?: FaceSwapSettingsPatch;
+  /** Admin experiments: label stored as `request.face_swap.tag` (see listFaceSwapJobsByTag). */
+  tag?: string;
 }
 
 /** `request.face_swap` of a face swap job. */
@@ -152,6 +156,8 @@ export interface FaceSwapJobInfo {
   face_name: string;
   /** Missing on phase-1 jobs (= `qoder`). */
   engine?: FaceSwapEngine;
+  /** Admin experiment label (POST /images/:fileId/face-swap `tag`). */
+  tag?: string;
   /** The face's reference image (identity source). */
   face_file_id?: string;
   /** Snapshot of the swapper options at creation (`swapper`, `swapper_polish`, and det_thresh for `qoder_crop`). */
@@ -606,7 +612,8 @@ export class MediaService {
   async createFaceSwapBatch(req: FaceSwapRequest): Promise<ImageBatchView> {
     const settingsService = this.d.faceSwapSettings;
     if (!settingsService) throw new AppError(503, 'engine_unavailable', 'Face swap is not configured');
-    const settings = settingsService.get();
+    // snapshot: every job of the batch runs with these values (the runner never reads the live settings)
+    const settings = applyPatch(settingsService.get(), req.settingsOverride);
     const requested = req.n ?? 1;
     if (!Number.isInteger(requested) || requested < 1 || requested > MAX_FACE_SWAP_BATCH)
       throw badRequest(`n must be an integer between 1 and ${MAX_FACE_SWAP_BATCH}`, 'validation_error', { param: 'n' });
@@ -625,6 +632,7 @@ export class MediaService {
       face_file_id: req.face.fileId,
       ...(engine !== 'qoder' ? { options: settings.swapper } : {}),
       ...(isCloseUpEngine(engine) ? { crop_expand: settings.crop_expand } : {}),
+      ...(req.tag ? { tag: req.tag } : {}),
     };
     const base = {
       userId: req.userId,
@@ -731,6 +739,17 @@ export class MediaService {
       .where(and(...conds))
       .orderBy(desc(mediaJobs.createdAt))
       .limit(Math.min(Math.max(opts.limit ?? 20, 1), 100));
+    return Promise.all(rows.map((r) => this.view(r)));
+  }
+
+  /** Admin experiments: the user's face swap jobs with `request.face_swap.tag = tag`, newest first, all statuses (max 500). */
+  async listFaceSwapJobsByTag(userId: string, tag: string): Promise<MediaJobView[]> {
+    const rows = await this.d.db
+      .select()
+      .from(mediaJobs)
+      .where(and(eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), sql`${mediaJobs.request} -> 'face_swap' ->> 'tag' = ${tag}`))
+      .orderBy(desc(mediaJobs.createdAt), desc(mediaJobs.id))
+      .limit(500);
     return Promise.all(rows.map((r) => this.view(r)));
   }
 

@@ -618,3 +618,95 @@ describe('POST /admin/face-swap/test', () => {
     expect((await json(await admin('/test', { method: 'POST', json: { target_file_id: target.id, face_id: 'face_missing' } }))).body.error.code).toBe('face_not_found');
   });
 });
+
+describe('admin face swap experiments: settings_override and tag', () => {
+  const adminSwap = (fileId: string, payload: unknown) => h.api(`/api/v1/images/${fileId}/face-swap`, { method: 'POST', json: payload, key: h.admin.apiKey });
+  const adminFinished = async (batchId: string) => {
+    await readSse(await h.api(`/api/v1/images/batches/${batchId}/events`, { key: h.admin.apiKey }));
+    return (await json(await h.api(`/api/v1/images/batches/${batchId}`, { key: h.admin.apiKey }))).body;
+  };
+  const POLISH = 'An experimental polish prompt that is long enough.';
+  const CROP_PROMPT = 'An experimental close-up prompt that is long enough.';
+  const WHOLE = 'An experimental whole-photo prompt that is long enough.';
+
+  it('applies the override to this batch only (snapshot used by every step) and leaves global settings untouched', async () => {
+    const { target, face } = await setup({ key: h.admin.apiKey });
+    const override = { polish_prompt: POLISH, crop_expand: 3, swapper: { det_thresh: 0.3, restorer: 'off', identity_mode: null } };
+    const r = await json(await adminSwap(target.id, { face_id: face.id, engine: 'swapper_polish', settings_override: override, tag: 'exp-1:a.b_c' }));
+    expect(r.status).toBe(202);
+    const options = { ...DEFAULT_FACE_SWAP_SETTINGS.swapper, det_thresh: 0.3, restorer: 'off' };
+    expect(r.body.jobs[0].request).toMatchObject({ prompt: POLISH, face_swap: { engine: 'swapper_polish', crop_expand: 3, options, tag: 'exp-1:a.b_c' } });
+    expect((await adminFinished(r.body.id)).status).toBe('completed');
+    expect(sidecar.calls.find((c) => c.path === '/v1/swap')!.body.options).toEqual(options);
+    expect(sidecar.calls.find((c) => c.path === '/v1/face-crop')!.body).toMatchObject({ expand: 3, det_thresh: 0.3 });
+    const [row] = await h.ctx.database.db.select().from(mediaJobs).where(eq(mediaJobs.id, r.body.jobs[0].id));
+    const s = h.qoder.state.sessions.get(row!.qoderSessionId!)!;
+    expect(JSON.stringify(s)).toContain(POLISH);
+
+    // global settings untouched; the next batch without override uses them
+    expect(h.ctx.faceSwapSettings.get()).toEqual(DEFAULT_FACE_SWAP_SETTINGS);
+    expect(await h.ctx.database.db.select().from(kv).where(eq(kv.key, 'face_swap.settings'))).toEqual([]);
+    const plain = await json(await adminSwap(target.id, { face_id: face.id, engine: 'swapper_polish' }));
+    expect(plain.body.jobs[0].request).toMatchObject({ prompt: FACE_SWAP_POLISH_PROMPT, face_swap: { crop_expand: 2.2, options: DEFAULT_FACE_SWAP_SETTINGS.swapper } });
+    expect(plain.body.jobs[0].request.face_swap.tag).toBeUndefined();
+    await adminFinished(plain.body.id);
+  });
+
+  it('default_engine in the override picks the engine only when engine is omitted; prompts follow the engine', async () => {
+    const { target, face } = await setup({ key: h.admin.apiKey });
+    const override = { default_engine: 'qoder_crop', qoder_crop_prompt: CROP_PROMPT, qoder_prompt: WHOLE };
+    const a = await json(await adminSwap(target.id, { face_id: face.id, settings_override: override }));
+    expect(a.body.jobs[0].request).toMatchObject({ prompt: CROP_PROMPT, face_swap: { engine: 'qoder_crop' } });
+    const b = await json(await adminSwap(target.id, { face_id: face.id, engine: 'qoder', settings_override: override }));
+    expect(b.body.jobs[0].request).toMatchObject({ prompt: WHOLE, face_swap: { engine: 'qoder' } });
+    await adminFinished(a.body.id);
+    await adminFinished(b.body.id);
+  });
+
+  it('validates override and tag (400) and refuses both for non-admins (403)', async () => {
+    const { target, face } = await setup({ key: h.admin.apiKey });
+    for (const bad of [
+      { settings_override: { crop_expand: 10 } },
+      { settings_override: { polish_prompt: 'short' } },
+      { settings_override: { unknown: 1 } },
+      { settings_override: { swapper: { restorer: 'x' } } },
+      { tag: '' },
+      { tag: 'has space' },
+      { tag: 'x'.repeat(65) },
+      { tag: 5 },
+    ]) {
+      const r = await json(await adminSwap(target.id, { face_id: face.id, ...bad }));
+      expect(r.status, JSON.stringify(bad)).toBe(400);
+      expect(r.body.error.code).toBe('validation_error');
+    }
+    const user = await setup();
+    for (const extra of [{ settings_override: { crop_expand: 3 } }, { tag: 'exp' }, { settings_override: { crop_expand: 10 } }]) {
+      const r = await json(await swap(user.target.id, { face_id: user.face.id, ...extra }));
+      expect(r.status, JSON.stringify(extra)).toBe(403);
+      expect(r.body.error.code).toBe('forbidden');
+    }
+    expect((await h.api('/api/v1/admin/face-swap/jobs?tag=exp')).status).toBe(403);
+  });
+
+  it('GET /admin/face-swap/jobs?tag= lists the admin own tagged jobs, newest first, all statuses', async () => {
+    const { target, face } = await setup({ key: h.admin.apiKey });
+    const first = await json(await adminSwap(target.id, { face_id: face.id, engine: 'qoder', n: 2, tag: 'list-me' }));
+    await adminFinished(first.body.id);
+    sidecar.failNext('/v1/swap', 422, 'NO_FACE_IN_TARGET');
+    const second = await json(await adminSwap(target.id, { face_id: face.id, engine: 'swapper', tag: 'list-me' }));
+    const failed = await adminFinished(second.body.id);
+    expect(failed.status).toBe('failed');
+    await adminFinished((await json(await adminSwap(target.id, { face_id: face.id, engine: 'swapper', tag: 'other' }))).body.id);
+
+    const r = await json(await admin('/jobs?tag=list-me'));
+    expect(r.status).toBe(200);
+    // newest first: the later batch, then both jobs of the first batch (same created_at)
+    expect(r.body.data[0].id).toBe(second.body.jobs[0].id);
+    expect(r.body.data.slice(1).map((j: any) => j.id).sort()).toEqual(first.body.jobs.map((j: any) => j.id).sort());
+    expect(r.body.data.map((j: any) => j.status)).toEqual(['failed', 'completed', 'completed']);
+    expect(r.body.data.every((j: any) => j.request.face_swap.tag === 'list-me')).toBe(true);
+    expect((await json(await admin('/jobs?tag=nothing-here'))).body.data).toEqual([]);
+    expect((await admin('/jobs')).status).toBe(400);
+    expect((await admin('/jobs?tag=bad%20tag')).status).toBe(400);
+  });
+});
