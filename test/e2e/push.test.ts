@@ -94,8 +94,8 @@ async function waitFor(cond: () => boolean | Promise<boolean>, ms = 3000) {
 }
 
 describe('push subscriptions', () => {
-  it('GET /me/push reports the VAPID key', async () => {
-    expect((await json(await h.api('/api/v1/me/push'))).body).toEqual({ enabled: true, public_key: vapid.publicKey });
+  it('GET /me/push reports the VAPID key (FCM off without a service account)', async () => {
+    expect((await json(await h.api('/api/v1/me/push'))).body).toEqual({ enabled: true, public_key: vapid.publicKey, fcm: false });
   });
 
   it('stores one row per endpoint and rejects non push-service endpoints', async () => {

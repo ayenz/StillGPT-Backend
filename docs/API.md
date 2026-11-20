@@ -1122,7 +1122,7 @@ created with a `callback_url` (automation) do not notify. The payload has no pro
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/me/push` | – | `{enabled, public_key}` (`public_key` = `applicationServerKey`; `enabled: false` when the server has no VAPID keys) |
+| GET | `/me/push` | – | `{enabled, public_key, fcm}` (`public_key` = `applicationServerKey`; `enabled: false` when the server has no VAPID keys; `fcm: true` when FCM for the Android app is configured) |
 | POST | `/me/push-subscriptions` | `PushSubscription.toJSON()`: `{endpoint, keys: {p256dh, auth}}` | `201 {id, created_at}`; the same endpoint again updates it (or moves it to this user) |
 | DELETE | `/me/push-subscriptions` | `{endpoint}` | `204` |
 | POST | `/me/push-subscriptions/test` | `{endpoint}` | `204` after the push service accepted a test notification; `404` unknown endpoint |
@@ -1133,6 +1133,25 @@ Message (JSON, read by the service worker): `{title, body, url, tag, image?}`; `
 (`/gallery/<job id>`), `tag` = `job-<batch id or job id>`, `image` = the result's signed preview URL. Titles:
 `Image ready`, `Video ready`, `Upscale 4x ready`, `Face swap ready`, `4 images ready`, `3 of 4 images ready`,
 `… failed` (body = the job's error message).
+
+### Push notifications (Android app, FCM)
+
+The native Android app gets the same notifications (same moments, titles and bodies, no prompt text, batches once,
+no `callback_url` jobs) through Firebase Cloud Messaging HTTP v1.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/me/fcm-tokens` | `{token, platform: "android", device?}` (`token` ≤ 4096, `device` ≤ 100 chars) | `204`; upsert by token (a token registered by another user moves to the caller) |
+| DELETE | `/me/fcm-tokens` | `{token}` | `204` (only the caller's own token; unknown = no-op) |
+| POST | `/me/fcm-tokens/test` | – | `202 {sent, failed}` after sending "StillGPT notifications are on" to all of the caller's tokens; `404` no tokens; `503 push_unavailable` when FCM is not configured |
+
+Tokens are stored even when FCM is off (`fcm: false` in `GET /me/push`). Message per token:
+`notification: {title, body, image?}` (`image` = the result's signed preview URL, only when it is a public `https`
+URL), `android: {priority: "high", ttl: "86400s", notification: {channel_id: "creations", icon: "ic_stat_stillgpt",
+tag}}` (`tag` = job id, or batch id for a batch), and `data` (all strings):
+`{type: "job", job_id, path: "/jobs/<id>"}`, `{type: "batch", batch_id, path: "/batches/<id>"}` or `{type: "test"}`.
+Tokens FCM reports as `UNREGISTERED`, `NOT_FOUND` or `INVALID_ARGUMENT` (invalid registration token) are deleted;
+other errors are logged.
 
 ## 10. Admin
 

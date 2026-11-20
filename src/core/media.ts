@@ -19,6 +19,7 @@ import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
 import { MAX_VARIATIONS, type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
 import type { Artifact, Credits, TurnEvent } from './events.js';
+import type { FcmMessage, FcmService } from './fcm.js';
 import type { PushMessage, PushService } from './push.js';
 import type { MediaStore, StoredFile, UrlScope } from './storage.js';
 import type { TurnResult, TurnRunner } from './turns.js';
@@ -328,6 +329,18 @@ export function jobPushMessage(v: MediaJobView, batch?: BatchOutcome): PushMessa
   return { title: `${label} ready`, body: 'Tap to open it in your gallery.', url: `/gallery/${v.id}`, tag, ...(picture ? { image: picture } : {}) };
 }
 
+/**
+ * The FCM message (native Android app) for a finished job or, with `batch`, its whole image batch: the same title, body
+ * and picture as the Web Push one, plus `data` that routes the tap to `/jobs/<id>` or `/batches/<id>`.
+ */
+export function jobFcmMessage(v: MediaJobView, batch?: BatchOutcome): FcmMessage {
+  const p = jobPushMessage(v, batch);
+  const picture = p.image ? { image: p.image } : {};
+  if (batch && batch.n > 1 && v.batch_id)
+    return { title: p.title, body: p.body, tag: v.batch_id, ...picture, data: { type: 'batch', batch_id: v.batch_id, path: `/batches/${v.batch_id}` } };
+  return { title: p.title, body: p.body, tag: v.id, ...picture, data: { type: 'job', job_id: v.id, path: `/jobs/${v.id}` } };
+}
+
 export interface MediaServiceDeps {
   db: DB;
   qoder: QoderClient;
@@ -351,6 +364,8 @@ export interface MediaServiceDeps {
   upscaler?: UpscaleClient | null;
   /** Web Push to the owner's browsers when a job finishes; absent/disabled = no notifications. */
   push?: PushService | null;
+  /** FCM to the owner's Android app installs when a job finishes; absent/disabled = no notifications. */
+  fcm?: FcmService | null;
   defaultImageProvider: ImageProvider;
   videoConcurrency: number;
   /** Progress ticks and restart-recovery polling. Default 5 s. */
@@ -1398,10 +1413,10 @@ export class MediaService {
     await this.d.webhooks.emit(row.userId, event, data).catch((err) => this.d.log.error('media.webhook_failed', { jobId, err }));
     if (row.callbackUrl) await this.d.webhooks.deliverTo(row.callbackUrl, event, data).catch((err) => this.d.log.error('media.callback_failed', { jobId, err }));
     // automation jobs (n8n with a callback_url) do not notify the user's devices
-    else if (this.d.push?.enabled) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
+    else if (this.d.push?.enabled || this.d.fcm?.enabled) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
   }
 
-  /** Push to the owner's browsers; for an image batch only once, when its last job finishes. */
+  /** Push to the owner's browsers and Android app; for an image batch only once, when its last job finishes. */
   private async notifyFinished(row: MediaJob, view: MediaJobView) {
     let batch: BatchOutcome | undefined;
     if (row.batchId) {
@@ -1413,7 +1428,10 @@ export class MediaService {
       const done = jobs.filter((j) => j.status === 'completed');
       batch = { n: jobs.length, completed: done.length, openId: done[0]?.id ?? null };
     }
-    await this.d.push!.notify(row.userId, jobPushMessage(view, batch));
+    await Promise.all([
+      this.d.push?.enabled ? this.d.push.notify(row.userId, jobPushMessage(view, batch)) : null,
+      this.d.fcm?.enabled ? this.d.fcm.notify(row.userId, jobFcmMessage(view, batch)) : null,
+    ]);
   }
 
   private publishProgress(id: string, status: MediaJob['status'], progress: number) {

@@ -98,6 +98,8 @@ const schema = z
     VAPID_PRIVATE_KEY: optionalString(z.string().min(20)),
     /** VAPID contact (`mailto:` or `https:` URL); defaults to PUBLIC_BASE_URL. */
     VAPID_SUBJECT: optionalString(z.string().regex(/^(mailto:|https:\/\/)/, 'must start with mailto: or https://')),
+    /** Firebase Cloud Messaging (HTTP v1) for the native Android app: base64 of the Firebase service-account JSON (project_id, client_email, private_key); off when unset. */
+    FCM_SERVICE_ACCOUNT_B64: optionalString(z.string().min(20)),
     /** GPU box for face swap (`/v1/swap` only; the sidecar with FACESWAP_DEVICE=cuda over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
     FACESWAP_GPU_URL: optionalString(z.string().url()),
     /** Sent as X-API-Key to the GPU box; empty = no auth. */

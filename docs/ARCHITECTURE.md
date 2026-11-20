@@ -92,6 +92,7 @@ src/
     variations.ts          "other variation": prompt → n variants that change outfit/colours/background, away from references
     webhooks.ts            outgoing webhooks (HMAC-signed), per-request callback_url
     push.ts                Web Push (VAPID) to the PWA when a media job finishes
+    fcm.ts                 FCM HTTP v1 (service-account JWT → OAuth) to the Android app when a media job finishes
     usage.ts               credit accounting + per-user limits
     bus.ts                 in-memory pub/sub for live turn/job events
   providers/
@@ -301,6 +302,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` (+ `VAPID_SUBJECT`, default `PUBLIC_BASE_URL`; Web Push "creation ready" notifications, `core/push.ts`, off when unset),
+`FCM_SERVICE_ACCOUNT_B64` (base64 Firebase service-account JSON; FCM "creation ready" notifications to the Android app, `core/fcm.ts`, off when unset),
 `FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`, `FACESWAP_GPU_URL` + `FACESWAP_GPU_API_KEY` (optional GPU box for `/v1/swap`), `FACESWAP_GPU_TIMEOUT_MS=90000`,
 `UPSCALE_GPU_URL` + `UPSCALE_GPU_API_KEY` (optional GPU upscaler; upscale is available when it or `FACESWAP_URL` is set),
 `UPSCALE_GPU_TIMEOUT_MS=240000`, `UPSCALE_CPU_TIMEOUT_MS=600000`,

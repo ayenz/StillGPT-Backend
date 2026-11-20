@@ -27,6 +27,7 @@ import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
 import { createLogger, type Logger } from './log.js';
 import { type PushSender, PushService } from './core/push.js';
+import { FcmService, parseServiceAccount } from './core/fcm.js';
 import { FaceSwapClient } from './providers/faceswap.js';
 import { UpscaleClient } from './providers/upscale.js';
 import { AppError } from './errors.js';
@@ -70,6 +71,8 @@ export interface AppContext {
   webhooks: WebhookService;
   /** Web Push to the PWA; `enabled` is false without VAPID keys. */
   push: PushService;
+  /** FCM to the native Android app; `enabled` is false without FCM_SERVICE_ACCOUNT_B64. */
+  fcm: FcmService;
   housekeeper: QoderHousekeeper;
   /** Gallery trash (soft delete, restore, purge). */
   trash: MediaTrash;
@@ -89,6 +92,8 @@ export interface ContextOverrides {
   qoderRetryBaseMs?: number;
   /** Replaces the Web Push sender (tests). */
   pushSender?: PushSender;
+  /** fetch for FCM only (OAuth + messages:send); defaults to `fetchImpl` (tests). */
+  fcmFetch?: typeof fetch;
 }
 
 export async function createContext(config: Config, o: ContextOverrides = {}): Promise<AppContext> {
@@ -140,6 +145,12 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
         ? { publicKey: config.VAPID_PUBLIC_KEY, privateKey: config.VAPID_PRIVATE_KEY, subject: config.VAPID_SUBJECT ?? config.PUBLIC_BASE_URL }
         : null,
     sender: o.pushSender,
+  });
+  const fcm = new FcmService({
+    db,
+    log: log.child({ mod: 'fcm' }),
+    account: config.FCM_SERVICE_ACCOUNT_B64 ? parseServiceAccount(config.FCM_SERVICE_ACCOUNT_B64) : null,
+    fetchImpl: o.fcmFetch ?? o.fetchImpl,
   });
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY
@@ -216,6 +227,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     faceSwapSettings,
     upscaler,
     push,
+    fcm,
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
@@ -262,6 +274,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     folax,
     webhooks,
     push,
+    fcm,
     housekeeper,
     trash,
     mediaHousekeeper,

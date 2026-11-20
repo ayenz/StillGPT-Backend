@@ -267,6 +267,24 @@ export const pushSubscriptions = pgTable(
   (t) => [index('push_subscriptions_user_idx').on(t.userId)],
 );
 
+/** FCM registration tokens of the native Android app (one per app install): notified when a media job of the user finishes. */
+export const fcmTokens = pgTable(
+  'fcm_tokens',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    /** FCM registration token; unique across users (a token registered by another user moves to them). */
+    token: text('token').notNull().unique(),
+    platform: text('platform', { enum: ['android'] }).notNull(),
+    /** Device label from the app, e.g. "Pixel 8". */
+    device: text('device'),
+    createdAt: createdAt(),
+    /** Last registration or accepted message. */
+    lastUsedAt: ts('last_used_at').notNull().defaultNow(),
+  },
+  (t) => [index('fcm_tokens_user_idx').on(t.userId)],
+);
+
 // ── webhooks & usage ────────────────────────────────────────────────────────
 
 export const webhooks = pgTable('webhooks', {
