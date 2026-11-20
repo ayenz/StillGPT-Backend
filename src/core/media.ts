@@ -1431,8 +1431,8 @@ export class MediaService {
     const data = { job: mediaJobJson(view) };
     await this.d.webhooks.emit(row.userId, event, data).catch((err) => this.d.log.error('media.webhook_failed', { jobId, err }));
     if (row.callbackUrl) await this.d.webhooks.deliverTo(row.callbackUrl, event, data).catch((err) => this.d.log.error('media.callback_failed', { jobId, err }));
-    // automation jobs (n8n with a callback_url) do not notify the user's devices
-    else if (this.d.push?.enabled || this.d.fcm?.enabled) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
+    // automation jobs (n8n with a callback_url) and tagged admin face swap experiments do not notify the user's devices
+    else if ((this.d.push?.enabled || this.d.fcm?.enabled) && !faceSwapTagOf(row)) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
   }
 
   /** Push to the owner's browsers and Android app; for an image batch only once, when its last job finishes. */
@@ -1754,6 +1754,11 @@ const baseName = (filename: string) => filename.replace(/\.[^.]+$/, '').slice(0,
 const extOf = (mime: string) => (mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg');
 
 const usesFolax = (job: MediaJob) => job.kind === 'image' && job.request.provider_used === 'folax';
+/** The admin experiment tag of a face swap job (`request.face_swap.tag`), if any. */
+const faceSwapTagOf = (job: MediaJob): string | undefined => {
+  const tag = (job.request.face_swap as { tag?: unknown } | undefined)?.tag;
+  return typeof tag === 'string' && tag ? tag : undefined;
+};
 const usesFolaxVideo = (job: MediaJob) => job.kind === 'video' && job.request.provider_used === 'folax';
 
 /** `request.folax` of a Folax video job: the adapter job and the upstream task (to resume after an adapter restart). */
