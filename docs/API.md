@@ -230,16 +230,17 @@ When the server has Folax configured, `data` also lists five optional chat model
 
 - **Persona:** every Folax model introduces itself as **"Folax by Infinix"**. Folax's server forces this persona, and
   it cannot be changed. Your `system_prompt` is still used for style and language.
-- **Chat only:** no tools, no sandbox, and no documents.
+- **No sandbox and no documents.** Server-side tools (web search, files, image/video generation) are Qoder only. Your
+  own **tools** (function calling) work on the OpenAI endpoint, see "Folax tool calling" below.
   - A conversation with the `assistant` profile behaves like `chat` on a Folax model.
   - Attaching a file (`file` block / `attachments`) is `400 unsupported_attachment`, and nothing is stored.
   - Folax models cannot be used for the prompt enhancer, prompt variations or media jobs.
 - **Images:** up to **4** JPEG/PNG/WebP images per message (`400 too_many_images` / `unsupported_attachment`).
   - Only the images of the **current** message are sent. Earlier images become an `[image]` marker in the context.
   - With an image attached, Folax answers with one shared vision model, whichever Folax model was picked.
-- **Context:** Folax keeps no state. StillGPT sends the recent history every time, as much as fits (about 18,000
-  characters). Very long conversations lose their oldest part on Folax.
-  - A single message is limited to 12,000 characters (`400 message_too_long`).
+- **Context:** Folax keeps no state. StillGPT sends the recent history every time, as much as fits (about 140,000
+  characters, up to 500 messages). Very long conversations lose their oldest part on Folax.
+  - A single message is limited to 100,000 characters (`400 message_too_long`).
 - **Switching:** a conversation can switch between Qoder and Folax models at any time; both sides see the whole
   conversation. Switching back to Qoder starts a fresh Qoder session that gets the history as a transcript.
 - **Cost and speed:** free (`credits: 0`). The first text arrives after ~1.5–3.5 s (ChatGPT 3–7 s). The text streams in
@@ -252,6 +253,69 @@ When the server has Folax configured, `data` also lists five optional chat model
   - On the OpenAI/Anthropic endpoints these codes come with HTTP 429 / 503 / 504 / 502.
 - An unknown `folax/…` id is `400 model_not_found`. On a server without Folax, a `folax/…` id is
   `400 provider_unavailable` and is never replaced by a Qoder model.
+
+#### Folax tool calling (coding agents)
+`POST /v1/chat/completions` with a `folax/…` model accepts OpenAI **tools** (function calling). This lets coding
+agents such as OpenCode, Continue, Cline or Roo Code read and edit files and run commands on your machine. Qoder models
+still refuse `tools` (`400 tools_not_supported`).
+
+- **Request format:** standard OpenAI.
+  - `tools` (type `function`) and `tool_choice` (`auto`, `none`, `required` or `{"type":"function","function":{"name":…}}`).
+  - `parallel_tool_calls: false` gives at most one call per reply.
+  - Tool results go back as `{"role":"tool","tool_call_id":…,"content":…}` after the assistant message that holds
+    `tool_calls`.
+- **Answers:** a call comes back as `message.tool_calls[]` with `finish_reason: "tool_calls"`, and several calls can come
+  at once.
+  - Folax has no native tool calling: the Folax adapter simulates it through the prompt.
+  - The adapter checks that each call names one of your tools with a JSON-object `arguments`. When the model still gets
+    the format wrong, the reply is plain text with `finish_reason: "stop"`, even with `tool_choice: "required"`. Your
+    client checks the arguments against the schema itself.
+- **Stateless:** these requests are passed straight to Folax. Nothing is stored as a conversation, and the client sends
+  the whole history each step. Each step is one free usage row.
+- **Which requests go this way:** any `folax/…` request with non-empty `tools`, or whose history has `tool_calls` or
+  `role: "tool"` messages. Without tools, Folax chat works as described above.
+- **Pick `folax/chatgpt` or `folax/gemini`** (the most stable). `folax/grok` and `folax/folax` also work, but
+  `folax/metaai` with tools is `400 model_not_supported` because it is unreliable.
+- **Speed:** about 5–15 s per step, sometimes up to ~4 minutes. A small agent task (5–6 steps) takes 30–60 s.
+  - **Use `stream: true`.** With tools, the answer arrives in one piece at the end, and `: keepalive` comments keep the
+    connection open meanwhile. A non-streaming call that takes longer than ~100 s can be cut off by the proxy in front
+    of the API (HTTP 524).
+- **Images:** they must be JPEG/PNG/WebP. `http(s)` image URLs are downloaded and sent on as data URLs, up to 10 MB.
+  - Images in the last tool result (screenshots) are seen too, up to 4 per step. A step with an image is answered by
+    Folax's shared vision model, whichever Folax model was picked.
+  - `file` parts are `400 unsupported_attachment`.
+- **Limits:** 150,000 characters (the tool schemas count) and 500 messages per request.
+- **Errors:** the same as for Folax chat: `429 provider_busy` (all 4 agent slots are busy; retry after `Retry-After`),
+  `503 provider_unavailable`, `504 folax_timeout`, `502 folax_failed`. An invalid `tools` / `tool_choice` gives `502
+  folax_failed` with the adapter's message. Legacy `functions` are `400 invalid_request`.
+
+**OpenCode** (`opencode.json`):
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "stillgpt": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "StillGPT (Folax)",
+      "options": { "baseURL": "https://<host>/v1", "apiKey": "sg_…" },
+      "models": { "folax/chatgpt": {}, "folax/gemini": {} }
+    }
+  }
+}
+```
+
+**Continue** (`~/.continue/config.yaml`). Continue only sends tools to models it knows support them, so declare it:
+```yaml
+models:
+  - name: ChatGPT (Folax via StillGPT)
+    provider: openai
+    model: folax/chatgpt
+    apiBase: https://<host>/v1
+    apiKey: sg_…
+    capabilities: [tool_use]
+    roles: [chat, edit]
+```
+Then use Continue's **Agent** mode.
 
 ---
 
@@ -1307,7 +1371,7 @@ Branch on `code`, not on `message`. `details` appears only on some errors.
 | 429 | `folax_quota_exceeded`, `provider_busy` | Folax only: the shared weekly quota is used up (wait until it resets) / Folax is busy (retry after `details.retry_after`). See §8 "Folax status" |
 | 503 | `provider_unavailable` | an optional provider (Folax) is down or not configured |
 | 400 / 503 | `image_too_large` / `upscale_unavailable` | upscale only: the source has more than 4.2 MP / no upscale backend is configured (§8 "Upscale") |
-| 400 | `unsupported_attachment`, `too_many_images`, `message_too_long` | Folax chat models only: files, GIFs, more than 4 images, or a message over 12,000 characters (§4 "Folax chat models") |
+| 400 | `unsupported_attachment`, `too_many_images`, `message_too_long` | Folax chat models only: files, GIFs, more than 4 images, or a message over 100,000 characters (§4 "Folax chat models") |
 | 502 / 503 | `upstream_unavailable`, `upstream_auth`, `upstream_*` | a Qoder problem. Retry later |
 | 504 | `turn_timeout` | the turn took more than 45 min |
 | 500 | `internal_error` | a bug. Report it with the `X-Request-Id` |
@@ -1359,7 +1423,7 @@ conversation. Errors use each provider's own envelope.
 | Endpoint | Notes |
 |---|---|
 | `GET /v1/models`, `GET /v1/models/:id` | aliases and `qoder/<id>` models, then (when configured) the Folax chat models `folax/<id>` (`owned_by: "folax"`, see §4 "Folax chat models"), plus `qoder-image`, `qoder-video` and (when configured) `folax-image`, `folax-video` |
-| `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming |
+| `POST /v1/chat/completions` | OpenAI Chat Completions, streaming and non-streaming. `tools` work on `folax/…` models only (§4 "Folax tool calling"); other models answer `400 tools_not_supported` |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages`, `POST /v1/messages/count_tokens` | Anthropic Messages API (`x-api-key` header) |
 | `POST /v1/images/generations` | `{prompt, model?, n? (1–10), size?, response_format?: "url"\|"b64_json"}` → `{created, data: [{url}\|{b64_json}]}`. `model`: `qoder-image` → Qoder, `folax-image` → Folax, absent or `dall-e-*`/`gpt-image-*` → the server's default provider (§8). Sizes that are not supported map to the closest allowed aspect ratio (e.g. `1920x1080` → `1792x1024`, `512x512` → `1024x1024`). On Qoder the `n` images are generated in parallel (~30–40 s for all). One Folax call yields 2 images, so StillGPT makes ceil(n/2) Folax calls in parallel (~10–15 s for all). If some images fail, the ones that succeeded are returned (fewer than `n`); it is an error only when none succeeded |

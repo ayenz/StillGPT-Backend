@@ -30,17 +30,17 @@ export function folaxModelName(id: string): string {
   return name;
 }
 
-/** Adapter limits (chat.max_messages 100, chat.max_input_characters 20000, chat.max_images 4 on the last message). */
+/** Adapter limits (v0.6+: chat.max_messages 500, chat.max_input_characters 150000, chat.max_images 4 on the last message). */
 export const FOLAX_LIMITS = {
-  maxMessages: 100,
-  /** Total characters we send (adapter rejects above 20000; keep a margin for "[image]" markers). */
-  maxChars: 18_000,
+  maxMessages: 500,
+  /** Total characters we send (adapter v0.6+ rejects above 150000; keep a margin for "[image]" markers). */
+  maxChars: 140_000,
   /** Longest user message we accept for a Folax model. */
-  maxMessageChars: 12_000,
+  maxMessageChars: 100_000,
   /** System prompt (profile + conversation instructions) is cut here. */
-  maxSystemChars: 4_000,
+  maxSystemChars: 20_000,
   /** Each earlier message is cut here, so more of the conversation fits. */
-  maxHistoryMessageChars: 3_000,
+  maxHistoryMessageChars: 20_000,
   maxImages: 4,
   /** Adapter takes ≤ 10 MB per image; larger stills are shrunk. */
   maxImageBytes: 9 * 1024 * 1024,

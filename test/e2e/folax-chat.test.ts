@@ -130,7 +130,7 @@ describe('native chat on a Folax model', () => {
 
     expect(await createConv({ model: 'folax/deepseek' })).toMatchObject({ status: 400, body: { error: { code: 'model_not_found' } } });
     expect((await patchConv(conv.body.id, { model: 'folax/nope' })).status).toBe(400);
-    expect((await send(conv.body.id, { text: 'x'.repeat(12_001) })).body.error.code).toBe('message_too_long');
+    expect((await send(conv.body.id, { text: 'x'.repeat(100_001) })).body.error.code).toBe('message_too_long');
     expect(chats()).toHaveLength(0);
   });
 

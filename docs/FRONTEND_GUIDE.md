@@ -140,6 +140,7 @@ async function sendMessage(convId: string, text: string, attachments: string[], 
   - Semua model Folax mengaku **"Folax by Infinix"**. Ini paksaan dari server Folax.
   - **Tanpa file/dokumen**: lampiran file → `400 unsupported_attachment`. Nonaktifkan tombol lampir file saat model
     Folax dipilih.
+  - Satu pesan maksimal 100.000 karakter (`400 message_too_long`).
   - Maksimal **4 gambar** per pesan (JPEG/PNG/WebP). Gambar di pesan lama tidak dilihat ulang oleh model.
   - Gratis, cepat (teks pertama ±2–7 detik). Tombol Stop tetap jalan.
   - Kalau Folax sibuk atau mati, turn gagal dengan `error.code` `provider_busy` atau `provider_unavailable`. Tidak ada

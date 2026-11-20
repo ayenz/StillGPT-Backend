@@ -10,7 +10,7 @@ import type { QoderContentBlock, QoderEvent, QoderStreamFrame } from '../qoder/t
 import { AGENT_BASE_MODEL, type AgentPool } from './agentPool.js';
 import { prepareInput, reupload } from './attachments.js';
 import type { EventBus } from './bus.js';
-import { assertFolaxContent, buildFolaxMessages, FOLAX_MODEL_PREFIX, isFolaxModelId } from './folaxChat.js';
+import { assertFolaxContent, buildFolaxMessages, FOLAX_LIMITS, FOLAX_MODEL_PREFIX, isFolaxModelId } from './folaxChat.js';
 import type { ConversationRow, ConversationService } from './conversations.js';
 import { type Artifact, type Credits, type StopReason, type TurnEvent, zeroCredits } from './events.js';
 import type { ModelRegistry } from './models.js';
@@ -340,8 +340,8 @@ export class TurnRunner {
       st.model = res.model;
 
       const profile = PROFILES.chat; // no tools on Folax, whatever the conversation's profile
-      // the newest 200 messages (more never fit the adapter's limits), oldest first
-      const recent = await this.d.db.select().from(messageRows).where(eq(messageRows.conversationId, conv.id)).orderBy(desc(messageRows.createdAt)).limit(201);
+      // the newest messages the adapter takes (more never fit its limits), oldest first
+      const recent = await this.d.db.select().from(messageRows).where(eq(messageRows.conversationId, conv.id)).orderBy(desc(messageRows.createdAt)).limit(FOLAX_LIMITS.maxMessages + 1);
       const history = recent
         .reverse()
         .filter((m) => m.id !== handle.userMessageId && (m.role === 'user' || m.role === 'assistant'))

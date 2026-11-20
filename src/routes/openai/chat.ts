@@ -14,6 +14,7 @@ import {
   parseBody,
   toolsNotSupported,
 } from './input.js';
+import { folaxToolsProxy, isFolaxToolsRequest } from './folaxTools.js';
 import { beginTurn, completeTurn, nowSec, publicModelId, type StartedTurn, streamTurn, type Write } from './turn.js';
 
 const TextPart = z.object({ type: z.literal('text'), text: z.string() });
@@ -62,7 +63,10 @@ type ChatRequest = z.infer<typeof ChatRequest>;
 /** POST /chat/completions */
 export function chatCompletions(ctx: AppContext) {
   return async (c: Context<Env>) => {
-    const req = parseBody(ChatRequest, await jsonBody(c));
+    const raw = await jsonBody(c);
+    // Folax models with tools (coding agents): proxied to the adapter, see folaxTools.ts. Everything else is unchanged.
+    if (isFolaxToolsRequest(raw)) return folaxToolsProxy(ctx, c, raw);
+    const req = parseBody(ChatRequest, raw);
     rejectUnsupported(req);
 
     const system = joinSystem([

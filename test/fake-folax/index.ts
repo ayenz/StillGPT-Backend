@@ -179,9 +179,30 @@ export async function startFakeFolax() {
 
   /** POST /v1/chat/completions, `stream: true`: role chunk, the reply in pieces, stop, [DONE] (like the adapter). */
   async function chat(body: unknown, res: ServerResponse) {
-    const b = body as { model?: string; stream?: boolean; messages?: unknown[] };
+    const b = body as { model?: string; stream?: boolean; messages?: { role: string; content?: unknown }[]; tools?: { function: { name: string } }[] };
     if (!['folax', 'chatgpt', 'gemini', 'metaai', 'grok'].includes(String(b?.model)))
       return res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: 'model', type: 'invalid_request_error', code: 'model_not_found', param: null } }));
+    // tools mode (v0.6): answered in one piece; the first step calls the first tool, after a tool result it answers
+    if (b.tools?.length || b.messages?.some((m) => m.role === 'tool')) {
+      const afterTool = b.messages?.at(-1)?.role === 'tool';
+      const calls = afterTool || !b.tools?.length ? null : [{ id: 'call_1', type: 'function', function: { name: b.tools[0]!.function.name, arguments: '{"path": "index.html"}' } }];
+      const message = calls ? { role: 'assistant', content: null, tool_calls: calls } : { role: 'assistant', content: state.chatReply ?? 'Selesai.' };
+      const finish = calls ? 'tool_calls' : 'stop';
+      if (state.chatPieceDelayMs) await new Promise((r) => setTimeout(r, state.chatPieceDelayMs));
+      if (!b.stream)
+        return res.writeHead(200, { 'content-type': 'application/json', 'x-folax-context': 'tools' }).end(
+          JSON.stringify({ id: 'chatcmpl-t', object: 'chat.completion', created: 1, model: b.model, choices: [{ index: 0, message, logprobs: null, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }),
+        );
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-folax-context': 'tools' });
+      const chunk = (delta: unknown, fin: string | null = null) =>
+        `data: ${JSON.stringify({ id: 'chatcmpl-t', object: 'chat.completion.chunk', created: 1, model: b.model, choices: [{ index: 0, delta, logprobs: null, finish_reason: fin }] })}\n\n`;
+      res.write(': keepalive\n\n');
+      res.write(chunk({ role: 'assistant', content: '' }));
+      if (calls) for (const [i, call] of calls.entries()) res.write(chunk({ tool_calls: [{ index: i, ...call }] }));
+      else res.write(chunk({ content: message.content }));
+      res.write(chunk({}, finish));
+      return res.end('data: [DONE]\n\n');
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
     const chunk = (delta: unknown, finish: string | null = null) =>
       `data: ${JSON.stringify({ id: 'chatcmpl-x', object: 'chat.completion.chunk', created: 1, model: b.model, choices: [{ index: 0, delta, logprobs: null, finish_reason: finish }] })}\n\n`;
