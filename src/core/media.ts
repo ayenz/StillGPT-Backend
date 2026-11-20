@@ -19,6 +19,7 @@ import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
 import { MAX_VARIATIONS, type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
 import type { Artifact, Credits, TurnEvent } from './events.js';
+import type { PushMessage, PushService } from './push.js';
 import type { MediaStore, StoredFile, UrlScope } from './storage.js';
 import type { TurnResult, TurnRunner } from './turns.js';
 import type { UsageService } from './usage.js';
@@ -282,6 +283,51 @@ export type MediaJobJson = ReturnType<typeof mediaJobJson>;
 export const imageBatchJson = (b: ImageBatchView) => ({ ...b, jobs: b.jobs.map(mediaJobJson) });
 export const isTerminal = (status: MediaJob['status']) => status === 'completed' || status === 'failed';
 
+/** Outcome of an image batch when its last job finished (for one notification per batch). */
+export interface BatchOutcome {
+  n: number;
+  completed: number;
+  /** A completed job of the batch, opened on tap when the finishing job itself failed. */
+  openId: string | null;
+}
+
+/** "Image", "Video", "Upscale 4x", "Face swap". */
+function jobLabel(v: Pick<MediaJobView, 'kind' | 'request'>): string {
+  const up = v.request.upscale as { scale?: number } | undefined;
+  if (up) return up.scale ? `Upscale ${up.scale}x` : 'Upscale';
+  if (v.request.face_swap) return 'Face swap';
+  return v.kind === 'video' ? 'Video' : 'Image';
+}
+
+const clip = (text: string, max = 140) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/**
+ * The push notification for a finished job (or, with `batch`, for its whole image batch). No prompt text: it shows
+ * on lock screens. The picture is the result's preview rendition (never the full-size file).
+ */
+export function jobPushMessage(v: MediaJobView, batch?: BatchOutcome): PushMessage {
+  const label = jobLabel(v);
+  const ok = v.status === 'completed';
+  const picture = ok ? (v.outputs[0]?.previewUrl ?? v.outputs[0]?.thumbnailUrl ?? undefined) : undefined;
+  const tag = `job-${v.batch_id ?? v.id}`;
+  if (batch && batch.n > 1) {
+    const noun = v.request.face_swap ? 'face swap results' : 'images';
+    const failed = batch.n - batch.completed;
+    const openId = ok ? v.id : batch.openId;
+    if (batch.completed === 0)
+      return { title: `${label} failed`, body: clip(v.error?.message ?? 'None of the results could be created.'), url: `/gallery/${v.id}`, tag };
+    return {
+      title: failed ? `${batch.completed} of ${batch.n} ${noun} ready` : `${batch.n} ${noun} ready`,
+      body: failed ? `${failed} failed. Tap to open your gallery.` : 'Tap to open them in your gallery.',
+      url: openId ? `/gallery/${openId}` : '/gallery',
+      tag,
+      ...(picture ? { image: picture } : {}),
+    };
+  }
+  if (!ok) return { title: `${label} failed`, body: clip(v.error?.message ?? 'Something went wrong.'), url: `/gallery/${v.id}`, tag };
+  return { title: `${label} ready`, body: 'Tap to open it in your gallery.', url: `/gallery/${v.id}`, tag, ...(picture ? { image: picture } : {}) };
+}
+
 export interface MediaServiceDeps {
   db: DB;
   qoder: QoderClient;
@@ -303,6 +349,8 @@ export interface MediaServiceDeps {
   faceSwapSettings?: FaceSwapSettingsService;
   /** Image upscaler; null/absent when no upscale backend is configured. */
   upscaler?: UpscaleClient | null;
+  /** Web Push to the owner's browsers when a job finishes; absent/disabled = no notifications. */
+  push?: PushService | null;
   defaultImageProvider: ImageProvider;
   videoConcurrency: number;
   /** Progress ticks and restart-recovery polling. Default 5 s. */
@@ -1349,6 +1397,23 @@ export class MediaService {
     const data = { job: mediaJobJson(view) };
     await this.d.webhooks.emit(row.userId, event, data).catch((err) => this.d.log.error('media.webhook_failed', { jobId, err }));
     if (row.callbackUrl) await this.d.webhooks.deliverTo(row.callbackUrl, event, data).catch((err) => this.d.log.error('media.callback_failed', { jobId, err }));
+    // automation jobs (n8n with a callback_url) do not notify the user's devices
+    else if (this.d.push?.enabled) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
+  }
+
+  /** Push to the owner's browsers; for an image batch only once, when its last job finishes. */
+  private async notifyFinished(row: MediaJob, view: MediaJobView) {
+    let batch: BatchOutcome | undefined;
+    if (row.batchId) {
+      const jobs = await this.d.db
+        .select({ id: mediaJobs.id, status: mediaJobs.status })
+        .from(mediaJobs)
+        .where(and(eq(mediaJobs.batchId, row.batchId), isNull(mediaJobs.deletedAt)));
+      if (jobs.some((j) => !isTerminal(j.status))) return;
+      const done = jobs.filter((j) => j.status === 'completed');
+      batch = { n: jobs.length, completed: done.length, openId: done[0]?.id ?? null };
+    }
+    await this.d.push!.notify(row.userId, jobPushMessage(view, batch));
   }
 
   private publishProgress(id: string, status: MediaJob['status'], progress: number) {

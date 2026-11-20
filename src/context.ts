@@ -26,6 +26,7 @@ import { UsageService } from './core/usage.js';
 import { WebhookService } from './core/webhooks.js';
 import { type Database, openDatabase } from './db/client.js';
 import { createLogger, type Logger } from './log.js';
+import { type PushSender, PushService } from './core/push.js';
 import { FaceSwapClient } from './providers/faceswap.js';
 import { UpscaleClient } from './providers/upscale.js';
 import { AppError } from './errors.js';
@@ -67,6 +68,8 @@ export interface AppContext {
   /** null when FOLAX_URL/FOLAX_API_KEY are unset. */
   folax: FolaxClient | null;
   webhooks: WebhookService;
+  /** Web Push to the PWA; `enabled` is false without VAPID keys. */
+  push: PushService;
   housekeeper: QoderHousekeeper;
   /** Gallery trash (soft delete, restore, purge). */
   trash: MediaTrash;
@@ -84,6 +87,8 @@ export interface ContextOverrides {
   fetchImpl?: typeof fetch;
   /** Qoder retry backoff base (tests use a few ms). */
   qoderRetryBaseMs?: number;
+  /** Replaces the Web Push sender (tests). */
+  pushSender?: PushSender;
 }
 
 export async function createContext(config: Config, o: ContextOverrides = {}): Promise<AppContext> {
@@ -127,6 +132,15 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const turnstileCfg = turnstileConfig(config);
   const turnstile = turnstileCfg ? new TurnstileVerifier(turnstileCfg, log.child({ mod: 'turnstile' }), o.fetchImpl) : null;
   const webhooks = new WebhookService(db, log.child({ mod: 'webhooks' }), o.fetchImpl, { pollIntervalMs: config.WEBHOOK_POLL_INTERVAL_MS });
+  const push = new PushService({
+    db,
+    log: log.child({ mod: 'push' }),
+    config:
+      config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY
+        ? { publicKey: config.VAPID_PUBLIC_KEY, privateKey: config.VAPID_PRIVATE_KEY, subject: config.VAPID_SUBJECT ?? config.PUBLIC_BASE_URL }
+        : null,
+    sender: o.pushSender,
+  });
   const folax =
     config.FOLAX_URL && config.FOLAX_API_KEY
       ? new FolaxClient({
@@ -201,6 +215,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     faceswap,
     faceSwapSettings,
     upscaler,
+    push,
     defaultImageProvider: config.IMAGE_PROVIDER_DEFAULT,
     videoConcurrency: config.VIDEO_CONCURRENCY,
     pollIntervalMs: config.MEDIA_POLL_INTERVAL_MS,
@@ -246,6 +261,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     titler,
     folax,
     webhooks,
+    push,
     housekeeper,
     trash,
     mediaHousekeeper,

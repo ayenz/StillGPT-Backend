@@ -1112,6 +1112,26 @@ one-off resume URLs such as the n8n Wait node.
 
 ---
 
+### Push notifications (PWA)
+
+Web Push (VAPID) to the user's browsers when one of their media jobs finishes: images, videos, upscales, face swaps
+(success and failure; chat replies do not notify). An image batch notifies once, when its last job finishes. Jobs
+created with a `callback_url` (automation) do not notify. The payload has no prompt text (it shows on lock screens).
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/me/push` | – | `{enabled, public_key}` (`public_key` = `applicationServerKey`; `enabled: false` when the server has no VAPID keys) |
+| POST | `/me/push-subscriptions` | `PushSubscription.toJSON()`: `{endpoint, keys: {p256dh, auth}}` | `201 {id, created_at}`; the same endpoint again updates it (or moves it to this user) |
+| DELETE | `/me/push-subscriptions` | `{endpoint}` | `204` |
+| POST | `/me/push-subscriptions/test` | `{endpoint}` | `204` after the push service accepted a test notification; `404` unknown endpoint |
+
+`endpoint` must be an `https` URL of a browser push service (FCM, Mozilla, Apple, WNS), else `400`; `503
+push_unavailable` when push is not configured. Endpoints the push service reports gone (404/410) are deleted.
+Message (JSON, read by the service worker): `{title, body, url, tag, image?}`; `url` is a frontend path
+(`/gallery/<job id>`), `tag` = `job-<batch id or job id>`, `image` = the result's signed preview URL. Titles:
+`Image ready`, `Video ready`, `Upscale 4x ready`, `Face swap ready`, `4 images ready`, `3 of 4 images ready`,
+`… failed` (body = the job's error message).
+
 ## 10. Admin
 
 These endpoints need `role: "admin"`. Other users get `403 forbidden`.

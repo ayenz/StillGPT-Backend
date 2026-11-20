@@ -7,6 +7,7 @@ import { faceRoutes, faceSwapAdminRoutes } from './faces.js';
 import { folaxAdminRoutes, folaxRoutes } from './folax.js';
 import { galleryAdminRoutes, galleryRoutes } from './gallery.js';
 import { fileRoutes, mediaJobRoutes, promptRoutes, webhookRoutes } from './media.js';
+import { pushRoutes } from './push.js';
 
 /**
  * Native API, mounted at /api/v1 (PWA, Flutter, n8n). snake_case JSON, errors `{error:{code,message}}`.
@@ -33,5 +34,6 @@ export function nativeRoutes(ctx: AppContext) {
   app.route('/', folaxRoutes(ctx));
   app.route('/', promptRoutes(ctx));
   app.route('/', webhookRoutes(ctx));
+  app.route('/', pushRoutes(ctx));
   return app;
 }

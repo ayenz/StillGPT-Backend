@@ -250,6 +250,23 @@ export const faces = pgTable(
   (t) => [index('faces_user_idx').on(t.userId)],
 );
 
+/** Web Push subscriptions (one per browser/device, PWA): notified when a media job of the user finishes. */
+export const pushSubscriptions = pgTable(
+  'push_subscriptions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    /** The push service URL of this browser (FCM, Mozilla, Apple, WNS); unique across users. */
+    endpoint: text('endpoint').notNull().unique(),
+    p256dh: text('p256dh').notNull(),
+    auth: text('auth').notNull(),
+    userAgent: text('user_agent'),
+    createdAt: createdAt(),
+    lastSuccessAt: ts('last_success_at'),
+  },
+  (t) => [index('push_subscriptions_user_idx').on(t.userId)],
+);
+
 // ── webhooks & usage ────────────────────────────────────────────────────────
 
 export const webhooks = pgTable('webhooks', {

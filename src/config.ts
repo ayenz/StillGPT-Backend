@@ -93,6 +93,11 @@ const schema = z
     FACESWAP_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
     /** Per sidecar call. */
     FACESWAP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+    /** Web Push (VAPID) for "your creation is ready" notifications in the PWA; off when the keys are unset. Generate with `npx web-push generate-vapid-keys`. */
+    VAPID_PUBLIC_KEY: optionalString(z.string().min(20)),
+    VAPID_PRIVATE_KEY: optionalString(z.string().min(20)),
+    /** VAPID contact (`mailto:` or `https:` URL); defaults to PUBLIC_BASE_URL. */
+    VAPID_SUBJECT: optionalString(z.string().regex(/^(mailto:|https:\/\/)/, 'must start with mailto: or https://')),
     /** GPU box for face swap (`/v1/swap` only; the sidecar with FACESWAP_DEVICE=cuda over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
     FACESWAP_GPU_URL: optionalString(z.string().url()),
     /** Sent as X-API-Key to the GPU box; empty = no auth. */
