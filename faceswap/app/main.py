@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from typing import Annotated, Literal
 
 import cv2
@@ -25,7 +25,7 @@ from . import gpugate, imaging, upscale
 from .engine import estimate_alignment, pick_face
 from .logs import setup_logging
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 log = logging.getLogger("faceswap")
 
 
@@ -41,6 +41,8 @@ ORT_THREADS = _int_env("FACESWAP_ORT_THREADS", max(1, (os.cpu_count() or 4) // W
 MODEL_DIR = os.environ.get("FACESWAP_MODEL_DIR", "/models")
 # Upscale-only mode (GPU box): no face-swap models, only the detector + upscalers.
 UPSCALE_ONLY = os.environ.get("FACESWAP_UPSCALE_ONLY") == "1"
+# Where the swap models (recognizer, swapper, restorers) run: cpu | cuda. The detector always stays on the CPU.
+FACESWAP_DEVICE = (os.environ.get("FACESWAP_DEVICE", "") or "cpu").strip().lower()
 UPSCALE_DEVICE = (os.environ.get("UPSCALE_DEVICE", "") or "cpu").strip().lower()  # cpu | cuda | off
 UPSCALE_WORKERS = _int_env("UPSCALE_WORKERS", 1)
 UPSCALE_MAX_PIXELS = _int_env("UPSCALE_MAX_PIXELS", 4_200_000)
@@ -68,6 +70,7 @@ class State:
     upscale_error: str | None = None
     upscale_loading = False
     upscale_executor: ThreadPoolExecutor | None = None
+    gpu_executor: ThreadPoolExecutor | None = None  # one thread: every CUDA job (swap and upscale) in turn
     gate: gpugate.GpuGate | None = None
 
 
@@ -84,7 +87,10 @@ def _load_models() -> None:
         try:
             from .models import ensure_models
 
-            state.engine = Engine(ensure_models(MODEL_DIR, FACE_KEYS), ORT_THREADS)
+            if FACESWAP_DEVICE not in ("cpu", "cuda"):
+                raise RuntimeError(f"invalid FACESWAP_DEVICE {FACESWAP_DEVICE!r} (cpu | cuda)")
+            upscale.prepare_device(FACESWAP_DEVICE)
+            state.engine = Engine(ensure_models(MODEL_DIR, FACE_KEYS), ORT_THREADS, FACESWAP_DEVICE)
             state.error = None
             detector = state.engine.detector
         except Exception as e:  # noqa: BLE001
@@ -130,13 +136,51 @@ def _load_upscaler(detector=None) -> None:
         state.upscale_loading = False
 
 
+# ---------------------------------------------------------------- GPU sharing (swap <-> upscale)
+
+
+def _swap_on_gpu() -> bool:
+    return FACESWAP_DEVICE == "cuda" and not UPSCALE_ONLY
+
+
+def _uses_gpu() -> bool:
+    return UPSCALE_DEVICE == "cuda" or _swap_on_gpu()
+
+
+def _release_gpu(kind: str | None = None) -> None:
+    """Drops the GPU sessions of `kind` ("swap" | "upscale"), or of both."""
+    if kind in (None, "swap") and state.engine is not None and state.engine.device == "cuda":
+        state.engine.release()
+    if kind in (None, "upscale") and state.upscaler is not None and state.upscaler.device == "cuda":
+        state.upscaler.release()
+
+
+@contextmanager
+def gpu_job(kind: str, timings: dict[str, int]):
+    """A CUDA job (runs on the single gpu thread): pauses the other GPU containers (gate), hands the card over by
+    releasing the other kind's sessions (swap and upscale models do not fit together), and drops this kind's sessions
+    when the job fails on the GPU (e.g. out of memory) so the next job starts clean."""
+    t = time.perf_counter()
+    with state.gate.job() if state.gate is not None else nullcontext():
+        _release_gpu("upscale" if kind == "swap" else "swap")
+        timings["gpu_wait"] = _ms(t)
+        try:
+            yield
+        except (imaging.ImageError, HTTPException):
+            raise
+        except Exception:
+            _release_gpu(kind)
+            raise
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     state.executor = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="infer")
     state.upscale_executor = ThreadPoolExecutor(max_workers=UPSCALE_WORKERS, thread_name_prefix="upscale")
-    if UPSCALE_DEVICE == "cuda":
-        state.gate = gpugate.from_env(MODEL_DIR, lambda: state.upscaler.release() if state.upscaler else None)
+    if _uses_gpu():
+        state.gpu_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
+        state.gate = gpugate.from_env(MODEL_DIR, _release_gpu)
         state.gate.startup()
     if os.environ.get("FACESWAP_SKIP_MODELS") != "1":
         threading.Thread(target=_load_models, name="model-loader", daemon=True).start()
@@ -149,12 +193,15 @@ async def lifespan(app: FastAPI):
             "model_dir": MODEL_DIR,
             "upscale_only": UPSCALE_ONLY,
             "upscale_device": UPSCALE_DEVICE,
+            "faceswap_device": FACESWAP_DEVICE,
             "upscale_workers": UPSCALE_WORKERS,
         },
     )
     yield
     state.executor.shutdown(wait=False, cancel_futures=True)
     state.upscale_executor.shutdown(wait=False, cancel_futures=True)
+    if state.gpu_executor is not None:
+        state.gpu_executor.shutdown(wait=False, cancel_futures=True)
     if state.gate is not None:
         state.gate.shutdown()
 
@@ -292,29 +339,37 @@ def do_swap(eng, req: SwapRequest) -> dict:
     if o.target_faces == "largest":
         faces = [max(faces, key=lambda f: f.area)]
 
-    t = time.perf_counter()
-    emb, used = eng.identity(sources, o.identity_mode, o.det_thresh)
-    latent = eng.swapper.latent(emb)
-    timings["identity"] = _ms(t)
+    restore = o.restorer != "off" and o.restore_blend > 0
+    device = getattr(eng, "device", "cpu")
+    with gpu_job("swap", timings) if device == "cuda" else nullcontext():
+        if device == "cuda":
+            t = time.perf_counter()
+            eng.ensure(["recognizer", "swapper"] + ([o.restorer] if restore else []))
+            timings["load"] = _ms(t)
 
-    t = time.perf_counter()
-    img = target.bgr
-    for f in faces:
-        img = eng.swapper.swap(img, f, latent)
-    timings["swap"] = _ms(t)
-
-    if o.restorer != "off" and o.restore_blend > 0:
         t = time.perf_counter()
-        r = eng.restorers[o.restorer]
+        emb, used = eng.identity(sources, o.identity_mode, o.det_thresh)
+        latent = eng.swapper.latent(emb)
+        timings["identity"] = _ms(t)
+
+        t = time.perf_counter()
+        img = target.bgr
         for f in faces:
-            img = r.restore(img, f, o.restore_blend, o.codeformer_fidelity)
-        timings["restore"] = _ms(t)
+            img = eng.swapper.swap(img, f, latent)
+        timings["swap"] = _ms(t)
+
+        if restore:
+            t = time.perf_counter()
+            r = eng.restorer(o.restorer)
+            for f in faces:
+                img = r.restore(img, f, o.restore_blend, o.codeformer_fidelity)
+            timings["restore"] = _ms(t)
 
     t = time.perf_counter()
     b64, mime = imaging.encode_image(img, o.output_format, o.jpeg_quality, target.alpha)
     timings["encode"] = _ms(t)
     timings["total"] = _ms(t_all)
-    log.info("swap", extra={"faces": len(faces), "source_faces": used, "restorer": o.restorer, "timings_ms": timings})
+    log.info("swap", extra={"faces": len(faces), "source_faces": used, "restorer": o.restorer, "device": device, "timings_ms": timings})
     return {
         "image": b64,
         "mime_type": mime,
@@ -322,6 +377,7 @@ def do_swap(eng, req: SwapRequest) -> dict:
         "height": int(img.shape[0]),
         "target_faces": len(faces),
         "source_faces": used,
+        "device": device,
         "timings_ms": timings,
     }
 
@@ -439,10 +495,7 @@ def do_upscale(up: upscale.Upscaler, req: UpscaleRequest) -> dict:
     seed = int.from_bytes(hashlib.sha256(img.raw).digest()[:8], "big")
     timings["decode"] = _ms(t)
 
-    t = time.perf_counter()
-    with state.gate.job() if state.gate is not None else nullcontext():
-        if state.gate is not None:
-            timings["gpu_wait"] = _ms(t)  # pausing other GPU containers
+    with gpu_job("upscale", timings) if up.device == "cuda" else nullcontext():
         out, info = up.upscale(img.bgr, req.scale, req.mode, seed)
     del img
     timings.update(info["timings_ms"])
@@ -528,7 +581,13 @@ async def ready():
         )
     return {
         "ready": True,
-        "models": {"detector": "scrfd_10g", "recognizer": "arcface_w600k_r50", "swapper": "inswapper_128", "restorers": ["codeformer", "gfpgan"]},
+        "models": {
+            "detector": "scrfd_10g",
+            "recognizer": "arcface_w600k_r50",
+            "swapper": "inswapper_128",
+            "restorers": ["codeformer", "gfpgan"],
+            "device": getattr(state.engine, "device", "cpu"),
+        },
         "upscale": _upscale_status(),
         "version": VERSION,
         "workers": WORKERS,
@@ -542,7 +601,10 @@ async def live():
 
 @app.post("/v1/swap", dependencies=[Depends(require_key)])
 async def swap(req: SwapRequest):
-    return await run_cpu(do_swap, engine(), req)
+    eng = engine()
+    if getattr(eng, "device", "cpu") == "cuda":  # in turn with the upscales on the one GPU
+        return await asyncio.get_running_loop().run_in_executor(state.gpu_executor, do_swap, eng, req)
+    return await run_cpu(do_swap, eng, req)
 
 
 @app.post("/v1/face-crop", dependencies=[Depends(require_key)])
@@ -559,8 +621,9 @@ async def face_paste(req: PasteRequest):
 async def upscale_image(req: UpscaleRequest):
     up = upscaler()
     loop = asyncio.get_running_loop()
-    # own pool (UPSCALE_WORKERS): a long upscale never takes all face-swap workers
-    return JSONResponse(await loop.run_in_executor(state.upscale_executor, do_upscale, up, req))
+    # own pool (UPSCALE_WORKERS): a long upscale never takes all face-swap workers; on CUDA the shared gpu thread
+    pool = state.gpu_executor if up.device == "cuda" and state.gpu_executor is not None else state.upscale_executor
+    return JSONResponse(await loop.run_in_executor(pool, do_upscale, up, req))
 
 
 def _cv_threads() -> None:

@@ -21,7 +21,17 @@ export interface FaceSwapImage {
 export interface SwapResult extends FaceSwapImage {
   targetFaces: number;
   sourceFaces: number;
+  /** Which sidecar swapped: the GPU box or the CPU sidecar (fallback). */
+  backend: 'gpu' | 'cpu';
   timingsMs: Record<string, number>;
+}
+
+/** The GPU box for `/v1/swap` (the sidecar with FACESWAP_DEVICE=cuda, over ZeroTier). */
+export interface FaceSwapGpuConfig {
+  baseUrl: string;
+  apiKey?: string;
+  /** Per call, including the wait behind a running upscale on the same GPU; past it the swap falls back to the CPU. */
+  timeoutMs: number;
 }
 
 /** Square around the target's largest face: `[x, y, side, side]` in original (EXIF-corrected) pixels. */
@@ -64,6 +74,8 @@ export interface FaceSwapOptions {
   concurrency?: number;
   /** How long a readiness probe result is reused. Default 30 s. */
   readyCacheMs?: number;
+  /** `/v1/swap` goes here first; crop/paste always use `baseUrl`. */
+  gpu?: FaceSwapGpuConfig;
 }
 
 /** AppError code of a `/v1/face-paste` rejection because the patch's face does not line up with the base. */
@@ -80,9 +92,17 @@ const CODES: Record<string, { status: number; code: string; message: string }> =
   AUTH_INVALID: { status: 503, code: 'faceswap_unavailable', message: 'Face swap service rejected the API key' },
 };
 
+/** The GPU target failed in a way the CPU sidecar may not (down, not ready, wrong key, timeout): fall back. */
+class GpuDown extends Error {}
+
+/** Sidecar codes caused by the inputs themselves: the CPU sidecar would answer the same, so no fallback. */
+const INPUT_ERRORS = new Set(['NO_FACE_IN_TARGET', 'NO_FACE_IN_SOURCE', 'BAD_IMAGE', 'TOO_LARGE', 'INVALID_REQUEST']);
+
 /**
- * Client for the faceswap sidecar (Python: InsightFace + inswapper + face restore, CPU). Images travel as base64 JSON.
- * Calls are CPU bound, so only `concurrency` run at once; the rest wait in FIFO order.
+ * Client for the faceswap sidecar (Python: InsightFace + inswapper + face restore). Images travel as base64 JSON.
+ * CPU calls are CPU bound, so only `concurrency` run at once; the rest wait in FIFO order. With `gpu` set, `/v1/swap`
+ * tries the GPU box first (when its cached probe says it is ready with swap on CUDA) and falls back to the CPU sidecar
+ * when it is unreachable, times out or answers 5xx/401/404; rejections of the inputs end the call without fallback.
  */
 export class FaceSwapClient {
   private readonly fetch: typeof fetch;
@@ -90,6 +110,7 @@ export class FaceSwapClient {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   private readyCache: { at: number; value: FaceSwapReadiness } | null = null;
+  private gpuReadyCache: { at: number; ready: boolean } | null = null;
 
   constructor(private readonly o: FaceSwapOptions) {
     this.fetch = o.fetchImpl ?? fetch;
@@ -97,19 +118,57 @@ export class FaceSwapClient {
   }
 
   async swap(target: Buffer, sources: Buffer[], options: Partial<SwapperOptions> = {}): Promise<SwapResult> {
-    const r = await this.call<{ image: string; mime_type: string; width: number; height: number; target_faces: number; source_faces: number; timings_ms?: Record<string, number> }>(
-      '/v1/swap',
-      { target: b64(target), sources: sources.map(b64), options },
-    );
-    return {
-      bytes: Buffer.from(r.image, 'base64'),
-      mimeType: r.mime_type,
-      width: r.width,
-      height: r.height,
-      targetFaces: r.target_faces,
-      sourceFaces: r.source_faces,
-      timingsMs: r.timings_ms ?? {},
-    };
+    const payload = { target: b64(target), sources: sources.map(b64), options };
+    if (this.o.gpu && (await this.gpuReady())) {
+      try {
+        return toSwap(await this.gpuRequest<SwapResponse>(this.o.gpu, '/v1/swap', payload), 'gpu');
+      } catch (err) {
+        if (!(err instanceof GpuDown)) throw err;
+        this.gpuReadyCache = { at: Date.now(), ready: false };
+        this.o.log.warn('faceswap.gpu_fallback', { reason: err.message });
+      }
+    }
+    return toSwap(await this.call<SwapResponse>('/v1/swap', payload), 'cpu');
+  }
+
+  /** The GPU box is configured and its (cached) `/health/ready` says ready with the swap models on CUDA. */
+  async gpuReady(fresh = false): Promise<boolean> {
+    const gpu = this.o.gpu;
+    if (!gpu) return false;
+    const ttl = this.o.readyCacheMs ?? 30_000;
+    if (!fresh && this.gpuReadyCache && Date.now() - this.gpuReadyCache.at < ttl) return this.gpuReadyCache.ready;
+    let ready = false;
+    try {
+      const res = await this.fetch(`${trimSlash(gpu.baseUrl)}/health/ready`, { headers: keyHeader(gpu.apiKey), signal: AbortSignal.timeout(5000) });
+      const body = (await res.json().catch(() => ({}))) as { ready?: unknown; models?: { device?: unknown } };
+      ready = res.ok && body.ready === true && body.models?.device === 'cuda';
+    } catch {
+      ready = false;
+    }
+    this.gpuReadyCache = { at: Date.now(), ready };
+    return ready;
+  }
+
+  private async gpuRequest<T>(gpu: FaceSwapGpuConfig, path: string, payload: unknown): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetch(`${trimSlash(gpu.baseUrl)}${path}`, {
+        method: 'POST',
+        headers: { ...keyHeader(gpu.apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(gpu.timeoutMs),
+      });
+    } catch (err) {
+      throw new GpuDown(`GPU face swap unreachable: ${(err as Error).message}`);
+    }
+    if (!res.ok) {
+      const detail = await errorDetail(res);
+      this.o.log.warn('faceswap.failed', { backend: 'gpu', path, status: res.status, detail });
+      const known = CODES[detail];
+      if (known && INPUT_ERRORS.has(detail) && (res.status === 413 || res.status === 422)) throw new AppError(known.status, known.code, known.message);
+      throw new GpuDown(`GPU face swap failed (${res.status} ${detail})`);
+    }
+    return (await res.json()) as T;
   }
 
   async crop(image: Buffer, o: { detThresh?: number; expand?: number; size?: number } = {}): Promise<CropResult> {
@@ -186,10 +245,7 @@ export class FaceSwapClient {
       throw new AppError(503, 'faceswap_unavailable', `Face swap service unreachable: ${(err as Error).message}`);
     }
     if (!res.ok) {
-      const detail = await res
-        .json()
-        .then((b: { detail?: unknown }) => (typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)))
-        .catch(() => res.statusText);
+      const detail = await errorDetail(res);
       this.o.log.warn('faceswap.failed', { path, status: res.status, detail });
       const known = CODES[detail];
       if (known) throw new AppError(known.status, known.code, known.message);
@@ -200,12 +256,43 @@ export class FaceSwapClient {
   }
 
   private base() {
-    return this.o.baseUrl.replace(/\/$/, '');
+    return trimSlash(this.o.baseUrl);
   }
 
   private headers(): Record<string, string> {
-    return this.o.apiKey ? { 'X-API-Key': this.o.apiKey } : {};
+    return keyHeader(this.o.apiKey);
   }
 }
 
+interface SwapResponse {
+  image: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  target_faces: number;
+  source_faces: number;
+  timings_ms?: Record<string, number>;
+}
+
+function toSwap(r: SwapResponse, backend: SwapResult['backend']): SwapResult {
+  return {
+    bytes: Buffer.from(r.image, 'base64'),
+    mimeType: r.mime_type,
+    width: r.width,
+    height: r.height,
+    targetFaces: r.target_faces,
+    sourceFaces: r.source_faces,
+    backend,
+    timingsMs: r.timings_ms ?? {},
+  };
+}
+
+const errorDetail = (res: Response): Promise<string> =>
+  res
+    .json()
+    .then((b: { detail?: unknown }) => (typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)))
+    .catch(() => res.statusText);
+
+const trimSlash = (url: string) => url.replace(/\/$/, '');
+const keyHeader = (key?: string): Record<string, string> => (key ? { 'X-API-Key': key } : {});
 const b64 = (b: Buffer) => b.toString('base64');

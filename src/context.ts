@@ -169,6 +169,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
         apiKey: config.FACESWAP_API_KEY,
         concurrency: config.FACESWAP_CONCURRENCY,
         timeoutMs: config.FACESWAP_TIMEOUT_MS,
+        gpu: config.FACESWAP_GPU_URL ? { baseUrl: config.FACESWAP_GPU_URL, apiKey: config.FACESWAP_GPU_API_KEY, timeoutMs: config.FACESWAP_GPU_TIMEOUT_MS } : undefined,
         log: log.child({ mod: 'faceswap' }),
         fetchImpl: o.fetchImpl,
       })

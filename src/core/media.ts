@@ -598,6 +598,7 @@ export class MediaService {
       height: r.height,
       target_faces: r.targetFaces,
       source_faces: r.sourceFaces,
+      backend: r.backend,
     };
   }
 
@@ -1105,6 +1106,7 @@ export class MediaService {
     const fs = job.request.face_swap as FaceSwapJobInfo;
     const [target, face] = await this.loadInputs(job.userId, [fs.source_file_id, faceFileIdOf(job)]);
     const r = await this.d.faceswap.swap(await this.d.store.read(target!.file), [await this.d.store.read(face!.file)], fs.options);
+    this.d.log.info('faceswap.swapped', { jobId: job.id, backend: r.backend, timings_ms: r.timingsMs });
     await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'faceswap', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });
     return { r, target: target!.file };
   }

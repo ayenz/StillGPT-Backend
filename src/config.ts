@@ -93,7 +93,13 @@ const schema = z
     FACESWAP_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
     /** Per sidecar call. */
     FACESWAP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
-    /** GPU upscaler (the faceswap sidecar in upscale-only mode on the GPU box, over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
+    /** GPU box for face swap (`/v1/swap` only; the sidecar with FACESWAP_DEVICE=cuda over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
+    FACESWAP_GPU_URL: optionalString(z.string().url()),
+    /** Sent as X-API-Key to the GPU box; empty = no auth. */
+    FACESWAP_GPU_API_KEY: optionalString(z.string().min(1)),
+    /** Per swap call on the GPU (includes waiting behind a running upscale there); past it the swap falls back to the CPU. */
+    FACESWAP_GPU_TIMEOUT_MS: z.coerce.number().int().min(1000).default(90_000),
+    /** GPU upscaler (the GPU sidecar on the GPU box, over ZeroTier), e.g. http://10.121.21.101:8090. Primary; the CPU fallback is FACESWAP_URL. */
     UPSCALE_GPU_URL: optionalString(z.string().url()),
     /** Sent as X-API-Key to the GPU upscaler; empty = no auth. */
     UPSCALE_GPU_API_KEY: optionalString(z.string().min(1)),

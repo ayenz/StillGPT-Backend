@@ -47,14 +47,15 @@ before commercial use.
 | `FACESWAP_MODEL_DIR` | `/models` | |
 | `PORT` / `HOST` | 8080 / 0.0.0.0 | |
 | `FACESWAP_UPSCALE_ONLY` | 0 | 1 = only detector + upscalers; `/v1/swap`, `/v1/face-crop`, `/v1/face-paste` answer 503 `UPSCALE_ONLY` |
+| `FACESWAP_DEVICE` | cpu | where recognizer, swapper and restorers run: `cpu` or `cuda` (see [Face swap on the GPU](#face-swap-on-the-gpu)); the detector always runs on the CPU |
 | `UPSCALE_DEVICE` | cpu | `cpu`, `cuda` (onnxruntime-gpu, `Dockerfile.gpu`) or `off` (503 `UPSCALE_DISABLED`, no upscaler download) |
 | `UPSCALE_WORKERS` | 1 | parallel upscale jobs, in their own thread pool (never takes the face-swap workers) |
 | `UPSCALE_MAX_PIXELS` | 4200000 | input limit (413 `TOO_LARGE`) |
 | `UPSCALE_BIG_FACE_MP` | 0.15 | CPU only: faces whose box + context exceed this many input megapixels keep the base (no nomos pass) |
 | `UPSCALE_EYE_STRENGTH` | 0.8 | eye fix strength (0..1); 0 = off (and no GFPGAN download in upscale-only mode) |
 | `UPSCALE_JPEG_QUALITY` | 97 | default output quality (request `jpeg_quality` overrides) |
-| `UPSCALE_GPU_IDLE_S` | 150 | CUDA only: idle seconds before the GPU sessions are released and paused containers are started again |
-| `UPSCALE_PAUSE_CONTAINERS` | empty | CUDA only: comma list of containers to stop (if running) during GPU work |
+| `UPSCALE_GPU_IDLE_S` | 150 | CUDA only: idle seconds after the last GPU job (swap or upscale) before the GPU sessions are released and paused containers are started again |
+| `UPSCALE_PAUSE_CONTAINERS` | empty | CUDA only: comma list of containers to stop (if running) during GPU work (swap and upscale) |
 | `DOCKER_HOST` | empty | Docker Engine API for the pause controller, `tcp://host:port` (a docker-socket-proxy) |
 
 Upscale uses `FACESWAP_ORT_THREADS` too. On the CPU host one 4x upscale keeps 1 core set busy for ~0.5–2 min, so
@@ -70,7 +71,8 @@ target's (oriented) pixel size. PNG alpha of the target is preserved for PNG out
 
 - `GET /health/ready` → 200 `{ready, models: {detector, recognizer, swapper, restorers}, version, workers}`;
   503 `{ready:false, loading, error}` while downloading/loading. `GET /health/live` is always 200.
-- `POST /v1/swap` `{target, sources[1..9], options?}` → `{image, mime_type, width, height, target_faces, source_faces, timings_ms}`.
+- `POST /v1/swap` `{target, sources[1..9], options?}` → `{image, mime_type, width, height, target_faces, source_faces, device,
+  timings_ms: {decode, detect, gpu_wait?, load?, identity, swap, restore?, encode, total}}` (`gpu_wait`/`load` on CUDA only).
   Options: `target_faces` largest|all, `identity_mode` average|frontal, `det_thresh` 0.1–0.95 (0.5),
   `restorer` codeformer|gfpgan|off, `restore_blend` 0–1 (0.8), `codeformer_fidelity` 0–1 (0.7),
   `output_format` jpeg|png, `jpeg_quality` 50–100 (95). Identity = weighted average (det score × frontalness) of
@@ -96,6 +98,22 @@ target's (oriented) pixel size. PNG alpha of the target is preserved for PNG out
 Error codes: 401 `AUTH_INVALID`, 413 `TOO_LARGE`, 422 `BAD_IMAGE` / `NO_FACE_IN_TARGET` / `NO_FACE_IN_SOURCE` /
 `BAD_BOX` / `PATCH_MISALIGNED` / `INVALID_REQUEST` (schema, with `errors`), 503 `MODELS_LOADING` / `MODELS_FAILED` /
 `UPSCALE_DISABLED` / `UPSCALE_ONLY`.
+
+## Face swap on the GPU
+
+With `FACESWAP_DEVICE=cuda` (the GPU box, `Dockerfile.gpu`) `/v1/swap` runs recognizer, swapper and the requested
+restorer on CUDA; the detector stays on the CPU. Output equals the CPU path (max pixel difference 1/255).
+
+The swap models (all five ~4.7 GB of VRAM; per job recognizer + swapper + one restorer, ~3.6 GB with CodeFormer) and
+the upscalers (~5.4 GB with nomos) do not fit a 6 GB card together, so the GPU is handed over: every CUDA job (swap
+and upscale) runs in turn on one `gpu` thread, inside the pause gate (`UPSCALE_PAUSE_CONTAINERS`), and first drops
+the other kind's sessions. Its own sessions are created on first use and stay until the other kind needs the card, the
+GPU has been idle for `UPSCALE_GPU_IDLE_S`, or a job fails on the GPU (then they are dropped so the next job starts
+clean). The start-up warm-up verifies each swap model on CUDA one at a time and drops it again.
+
+GTX 1060, 1 face, CodeFormer: ~0.4 s (identity 0.03, swap 0.09, restore 0.27) with the sessions loaded; loading them
+takes ~2.4 s (3.5 s cold) and is reported as `timings_ms.load`; a hand-over from the upscaler is part of `gpu_wait`.
+The Oracle CPU sidecar (2 threads) needs ~18 s for the same job. `face-crop` / `face-paste` stay on the CPU host.
 
 ## Upscale
 

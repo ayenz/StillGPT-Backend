@@ -95,7 +95,7 @@ src/
     bus.ts                 in-memory pub/sub for live turn/job events
   providers/
     folax.ts               FolaxClient: folax-adapter sidecar (fast external image generator)
-    faceswap.ts            FaceSwapClient: faceswap sidecar (swap, face crop/paste)
+    faceswap.ts            FaceSwapClient: faceswap sidecar (swap on the GPU box first, CPU fallback; face crop/paste on the CPU)
     upscale.ts             UpscaleClient: /v1/upscale on the GPU box (primary) with the CPU faceswap sidecar as fallback
   routes/
     health.ts
@@ -200,11 +200,17 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
 - Upscale (`POST /images/:fileId/upscale`, `providers/upscale.ts`): an image job with `provider_used: upscale` and
   `request.upscale`, no Qoder turn, free, no credit-limit check, inputs ≤ 4.2 MP. The same sidecar code (`faceswap/`) runs on
-  two machines: the **GPU** box (GTX 1060, upscale-only mode, reached over ZeroTier at `UPSCALE_GPU_URL`) is primary; the
+  two machines: the **GPU** box (GTX 1060, reached over ZeroTier at `UPSCALE_GPU_URL`) is primary; the
   **CPU** faceswap sidecar (`FACESWAP_URL`) is the fallback when the GPU is unconfigured, not ready (`/health/ready` →
   `upscale.ready`, cached 30 s), unreachable, times out (`UPSCALE_GPU_TIMEOUT_MS`, 4 min) or answers non-image errors (5xx/401/404).
   Image rejections (413 `TOO_LARGE`, 422 `BAD_IMAGE`) do not fall back. One call in flight per backend. Restart recovery
   re-runs queued/in-progress upscale jobs (no session → back to `queued`).
+- Face swap `/v1/swap` (engines `swapper`, `swapper_polish`) goes to the same GPU box first (`FACESWAP_GPU_URL`, sidecar with
+  `FACESWAP_DEVICE=cuda`: ~0.4 s instead of ~18 s on the CPU sidecar) when its cached probe (`/health/ready` → `ready` and
+  `models.device: "cuda"`, 30 s) says so; unreachable, timeout (`FACESWAP_GPU_TIMEOUT_MS`, 90 s, includes waiting behind an
+  upscale there) or 5xx/401/404 fall back to `FACESWAP_URL`; input rejections (no face, bad image) do not. The GPU sidecar
+  runs swaps and upscales in turn and hands the card over (their models do not fit 6 GB together). `face-crop`/`face-paste`
+  always use the CPU sidecar.
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).
 - Gallery renditions (`&variant=thumb|preview`, WebP) are rendered in the background on save and cached next to the original as `<file>.<variant>.v1.webp`; files saved before this existed are rendered on first request. Video stills need ffmpeg (`FFMPEG_PATH`, shipped in the Docker image); without it videos have `thumbnail_url: null`.
 
@@ -293,7 +299,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
-`FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`,
+`FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`, `FACESWAP_GPU_URL` + `FACESWAP_GPU_API_KEY` (optional GPU box for `/v1/swap`), `FACESWAP_GPU_TIMEOUT_MS=90000`,
 `UPSCALE_GPU_URL` + `UPSCALE_GPU_API_KEY` (optional GPU upscaler; upscale is available when it or `FACESWAP_URL` is set),
 `UPSCALE_GPU_TIMEOUT_MS=240000`, `UPSCALE_CPU_TIMEOUT_MS=600000`,
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),

@@ -1242,7 +1242,7 @@ fields an admin never changed.
 |---|---|---|---|
 | GET | `/admin/face-swap/settings` | – | `{settings, defaults, sidecar: {configured, ready, models?}}` (readiness probed now) |
 | PUT | `/admin/face-swap/settings` | any subset of the settings; `null` resets a field (or all of `swapper`) to its default | same as GET (readiness may be cached) |
-| POST | `/admin/face-swap/test` | `{target_file_id, face_id, engine? = "swapper", settings_override?}` | `{image_data_url, engine, timings_ms, width, height, target_faces, source_faces}` |
+| POST | `/admin/face-swap/test` | `{target_file_id, face_id, engine? = "swapper", settings_override?}` | `{image_data_url, engine, timings_ms, width, height, target_faces, source_faces, backend?: "gpu"\|"cpu"}` |
 
 ```json
 { "default_engine": "swapper_polish",

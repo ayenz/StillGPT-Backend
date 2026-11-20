@@ -433,16 +433,9 @@ def _ms(t0: float) -> int:
 
 class OrtModel:
     def __init__(self, path: Path, device: str, threads: int):
-        from .engine import _session
+        from .engine import device_session
 
-        providers = (
-            [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
-            if device == "cuda"
-            else ["CPUExecutionProvider"]
-        )
-        self.sess = _session(path, threads, providers)
-        if device == "cuda" and self.sess.get_providers()[0] != "CUDAExecutionProvider":
-            raise RuntimeError(f"CUDA execution provider not active for {path.name}")
+        self.sess = device_session(path, threads, device)
         self.input_name = self.sess.get_inputs()[0].name
 
     def __call__(self, x: np.ndarray) -> np.ndarray:

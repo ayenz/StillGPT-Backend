@@ -1,5 +1,5 @@
 """Face detection (SCRFD), identity (ArcFace), swapping (inswapper_128) and restoration (CodeFormer / GFPGAN)
-on onnxruntime CPU. Own minimal implementation of the insightface reference algorithms, so we do not need the
+on onnxruntime (CPU, or CUDA for the swap models on the GPU box). Own minimal implementation of the insightface reference algorithms, so we do not need the
 insightface package (and its cython build) on arm64."""
 
 from __future__ import annotations
@@ -173,6 +173,17 @@ def _session(path: Path, threads: int, providers: list | None = None) -> ort.Inf
     return ort.InferenceSession(str(path), sess_options=so, providers=providers or ["CPUExecutionProvider"])
 
 
+CUDA_PROVIDERS = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
+
+
+def device_session(path: Path, threads: int, device: str = "cpu") -> ort.InferenceSession:
+    """A session on `device` (cpu | cuda); on cuda it fails when onnxruntime silently fell back to the CPU."""
+    sess = _session(path, threads, CUDA_PROVIDERS if device == "cuda" else None)
+    if device == "cuda" and sess.get_providers()[0] != "CUDAExecutionProvider":
+        raise RuntimeError(f"CUDA execution provider not active for {path.name}")
+    return sess
+
+
 class Detector:
     def __init__(self, path: Path, threads: int, input_size: int = 640):
         self.sess = _session(path, threads)
@@ -232,8 +243,8 @@ class Detector:
 
 
 class Recognizer:
-    def __init__(self, path: Path, threads: int):
-        self.sess = _session(path, threads)
+    def __init__(self, path: Path, threads: int, device: str = "cpu"):
+        self.sess = device_session(path, threads, device)
         self.input_name = self.sess.get_inputs()[0].name
 
     def embed(self, img: np.ndarray, face: Face) -> np.ndarray:
@@ -245,8 +256,8 @@ class Recognizer:
 
 
 class Swapper:
-    def __init__(self, path: Path, emap: np.ndarray, threads: int):
-        self.sess = _session(path, threads)
+    def __init__(self, path: Path, emap: np.ndarray, threads: int, device: str = "cpu"):
+        self.sess = device_session(path, threads, device)
         self.emap = emap
         self.size = 128
 
@@ -307,9 +318,9 @@ def paste_aligned(img: np.ndarray, crop: np.ndarray, M: np.ndarray, mask: np.nda
 class Restorer:
     """GFPGAN 1.4 / CodeFormer on a 512 FFHQ-aligned crop; inputs/outputs in [-1, 1] RGB."""
 
-    def __init__(self, name: str, path: Path, threads: int):
+    def __init__(self, name: str, path: Path, threads: int, device: str = "cpu"):
         self.name = name
-        self.sess = _session(path, threads)
+        self.sess = device_session(path, threads, device)
         self.inputs = {i.name for i in self.sess.get_inputs()}
 
     def restore(self, img: np.ndarray, face: Face, blend: float, fidelity: float) -> np.ndarray:
@@ -364,32 +375,97 @@ def load_emap(swapper_path: Path) -> np.ndarray:
     return emap
 
 
+RESTORERS = ("codeformer", "gfpgan")
+
+
 class Engine:
-    def __init__(self, paths: dict[str, Path], threads: int):
+    """CPU: every session is created at start and kept. CUDA (GPU box): the detector stays on the CPU (cheap, shared
+    with the upscaler); recognizer, swapper and the requested restorer are created on the GPU on first use and dropped
+    by release(), so the GPU can be handed to the upscaler (both sets together do not fit a 6 GB card)."""
+
+    def __init__(self, paths: dict[str, Path], threads: int, device: str = "cpu"):
         t0 = time.monotonic()
+        self.paths = paths
+        self.threads = threads
+        self.device = device
         self.detector = Detector(paths["detector"], threads)
-        self.recognizer = Recognizer(paths["recognizer"], threads)
-        self.swapper = Swapper(paths["swapper"], load_emap(paths["swapper"]), threads)
-        self.restorers = {
-            "codeformer": Restorer("codeformer", paths["codeformer"], threads),
-            "gfpgan": Restorer("gfpgan", paths["gfpgan"], threads),
-        }
+        self.emap = load_emap(paths["swapper"])
+        self._models: dict[str, object] = {}
+        self._lock = threading.Lock()
+        if device == "cpu":
+            for key in ("recognizer", "swapper", *RESTORERS):
+                self._get(key)
         self._id_cache: OrderedDict[str, tuple[np.ndarray, int]] = OrderedDict()
         self._id_lock = threading.Lock()
-        log.info("models loaded", extra={"ms": int((time.monotonic() - t0) * 1000), "threads": threads})
+        log.info("models loaded", extra={"ms": int((time.monotonic() - t0) * 1000), "threads": threads, "device": device})
         self.warmup()
 
+    # ---- sessions
+
+    def _make(self, key: str):
+        if key == "recognizer":
+            return Recognizer(self.paths["recognizer"], self.threads, self.device)
+        if key == "swapper":
+            return Swapper(self.paths["swapper"], self.emap, self.threads, self.device)
+        if key in RESTORERS:
+            return Restorer(key, self.paths[key], self.threads, self.device)
+        raise KeyError(key)
+
+    def _get(self, key: str):
+        with self._lock:
+            m = self._models.get(key)
+            if m is None:
+                t0 = time.monotonic()
+                m = self._models[key] = self._make(key)
+                if self.device != "cpu":
+                    log.info("session created", extra={"model": key, "device": self.device, "ms": int((time.monotonic() - t0) * 1000)})
+            return m
+
+    def ensure(self, keys: list[str]) -> None:
+        """Creates the sessions a job needs up front (so their load time is measured apart from inference)."""
+        for k in keys:
+            self._get(k)
+
+    @property
+    def recognizer(self) -> Recognizer:
+        return self._get("recognizer")
+
+    @property
+    def swapper(self) -> Swapper:
+        return self._get("swapper")
+
+    def restorer(self, name: str) -> Restorer:
+        return self._get(name)
+
+    @property
+    def loaded(self) -> bool:
+        return bool(self._models)
+
+    def release(self, keys: tuple[str, ...] | None = None) -> None:
+        """CUDA only: drops the GPU sessions (frees VRAM); the next job re-creates them. CPU sessions stay."""
+        if self.device == "cpu":
+            return
+        with self._lock:
+            dropped = [k for k in (keys or tuple(self._models)) if self._models.pop(k, None) is not None]
+        if dropped and keys is None:
+            log.info("swap sessions released", extra={"device": self.device, "models": dropped})
+
     def warmup(self) -> None:
-        """One dummy pass through every model so the first real request does not pay onnxruntime's first-run cost."""
+        """One dummy pass through every model so the first real request does not pay onnxruntime's first-run cost.
+        On CUDA it verifies cuDNN works with each model, one at a time (all of them at once would need ~4.7 GB)."""
         t0 = time.monotonic()
+        drop = (lambda k: self.release((k,))) if self.device != "cpu" else (lambda k: None)
         img = np.full((256, 256, 3), 128, np.uint8)
         self.detector.detect(img, 0.5)
         face = Face(box=np.array([64, 64, 192, 192], np.float32), score=1.0, kps=arcface_template(112) + 72)
         emb = self.recognizer.embed(img, face)
+        drop("recognizer")
         img = self.swapper.swap(img, face, self.swapper.latent(emb))
-        for r in self.restorers.values():
-            r.restore(img, face, 0.5, 0.7)
-        log.info("warmup done", extra={"ms": int((time.monotonic() - t0) * 1000)})
+        drop("swapper")
+        for name in RESTORERS:
+            self.restorer(name).restore(img, face, 0.5, 0.7)
+            drop(name)
+        log.info("warmup done", extra={"ms": int((time.monotonic() - t0) * 1000), "device": self.device})
 
     # ---- identity
 

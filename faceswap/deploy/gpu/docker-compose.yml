@@ -1,6 +1,6 @@
-# GPU upscale sidecar for stillmen.dell (GTX 1060, shared with Immich ML).
+# GPU sidecar for stillmen.dell (GTX 1060, shared with Immich ML): upscale + face swap (/v1/swap) on CUDA, in turn.
 #   cd faceswap/deploy/gpu && cp .env.example .env && docker compose up -d --build
-# Reached by the StillGPT backend over ZeroTier only (UPSCALE_GPU_URL=http://10.121.21.101:8090).
+# Reached by the StillGPT backend over ZeroTier only (UPSCALE_GPU_URL / FACESWAP_GPU_URL=http://10.121.21.101:8090).
 name: stillgpt-upscale
 
 services:
@@ -13,7 +13,9 @@ services:
     restart: unless-stopped
     environment:
       FACESWAP_API_KEY: ${FACESWAP_API_KEY:?set FACESWAP_API_KEY in .env}
-      FACESWAP_UPSCALE_ONLY: "1"
+      FACESWAP_UPSCALE_ONLY: "0"
+      FACESWAP_DEVICE: cuda
+      FACESWAP_WORKERS: "1"           # CPU pool (face-crop/paste are not sent here); GPU jobs run on one gpu thread
       UPSCALE_DEVICE: cuda
       UPSCALE_WORKERS: "1"
       FACESWAP_ORT_THREADS: ${FACESWAP_ORT_THREADS:-4}
