@@ -963,43 +963,71 @@ grace period (default 7 days, set by an admin, see §10). Users cannot list the 
 
 ### Faces and face swap
 A **face** is a saved identity: a name plus one of the user's images (a single portrait, or a 3x3 sheet of the same
-person from different angles). A **face swap** puts a saved face onto a target image with one of three engines.
+person from different angles), and optionally a second, clear front-facing **portrait** of the same person (improves the
+likeness of `head_swap`). A **face swap** puts a saved face onto a target image with one of the engines below.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/faces` | – | `{data: [face]}`, newest first |
-| POST | `/faces` | `{name, file_id}` | `201` face |
-| PATCH | `/faces/:id` | `{name}` | face |
+| POST | `/faces` | `{name, file_id, portrait_file_id?}` | `201` face |
+| PATCH | `/faces/:id` | `{name?, portrait_file_id?}` (`portrait_file_id: null` removes the portrait) | face |
 | DELETE | `/faces/:id` | – | `204`. The file and earlier face-swap results stay |
 | GET | `/face-swap/config` | – | `{default_engine, engines, max_n}` (see below) |
-| POST | `/images/:fileId/face-swap` | `{face_id, engine?, n?, callback_url?}` | **always `202`** with an image batch (async) |
+| POST | `/images/:fileId/face-swap` | `{face_id, engine?, n?, all_candidates?, callback_url?}` | **always `202`** with an image batch (async) |
 
 Face:
 ```json
 { "id": "face_…", "name": "Budi", "file_id": "file_…",
   "file": { "id": "file_…", "filename": "budi.png", "mime_type": "image/png", "size": 123456, "kind": "upload",
             "url": "…", "thumbnail_url": "…", "preview_url": "…", "created_at": "…" },
+  "portrait_file_id": "file_…",
+  "portrait": { "id": "file_…", "filename": "front.jpg", … },
   "created_at": "…" }
 ```
-`file` has the same shape as `GET /files/:id`.
+`file` and `portrait` have the same shape as `GET /files/:id`; `portrait_file_id` and `portrait` are `null` without a portrait.
 
 - `name`: 1–60 characters (trimmed). `file_id`: one of the user's files, PNG, JPEG or WebP (upload it with `POST /files`
   first, or use a gallery output). Other types are `400 validation_error`; an unknown or foreign file is `404 file_not_found`.
+- `portrait_file_id`: same rules as `file_id` (`400 validation_error` for other types or a non-string, `404 file_not_found`).
+  Changing or removing it drops the face's cached head swap `combo` image.
 - At most **50 faces** per user: one more is `409 face_limit_reached`.
 - An unknown face (or someone else's) is `404 face_not_found` on `PATCH`, `DELETE` and face swap.
-- While a face uses a file, housekeeping does not delete it (even an old, otherwise unused upload), and trashing the job
+- While a face uses a file (main image, portrait or its cached combo image), housekeeping does not delete it (even an old, otherwise unused upload), and trashing the job
   that produced it does not hide it.
 
 **Engines**
 
 | engine | how | results | credits | output size |
 |---|---|---|---|---|
-| `swapper_polish` (default) | `swapper` on the target first, then the `qoder_crop` flow on the **swapped** photo with `polish_prompt`: the sidecar cuts a close-up from the swapped photo → Qoder retouches it at `1024x1024` (image 1 = crop, image 2 = face) for sharper eyes, natural skin and hair strands → the sidecar pastes it back onto the swapped photo | `n` (1–4); each job runs its own swapper step | the Qoder edits' | the target's original resolution |
+| `head_swap` (default) | see **Head swap** below: describe the target → K whole-photo Qoder candidates in parallel → the sidecar aligns each, swaps the identity in, keeps Qoder's eyes and blends the head into the untouched original → the best candidate wins | `n` (1–4); each job runs its own K candidates | every candidate's Qoder turn + the describe turn (once per target file) | the target's original resolution |
+| `swapper_polish` | `swapper` on the target first, then the `qoder_crop` flow on the **swapped** photo with `polish_prompt`: the sidecar cuts a close-up from the swapped photo → Qoder retouches it at `1024x1024` (image 1 = crop, image 2 = face) for sharper eyes, natural skin and hair strands → the sidecar pastes it back onto the swapped photo | `n` (1–4); each job runs its own swapper step | the Qoder edits' | the target's original resolution |
 | `swapper` | faceswap sidecar: face detection + identity embedding + inswapper + face restoration | always 1 (deterministic) | 0 (free) | the target's original resolution |
 | `qoder` | Qoder edit of the whole photo: image 1 = target, image 2 = face | `n` (1–4) | the Qoder edit's | the largest allowed size with the target's aspect ratio (3:4 → `1024x1280`) |
 | `qoder_crop` | the sidecar cuts a square around the target's largest face → Qoder edits that close-up at `1024x1024` (image 1 = crop, image 2 = face) → the sidecar blends it back into the original photo | `n` (1–4) | the Qoder edit's | the target's original resolution |
 
-`swapper`, `swapper_polish` and `qoder_crop` need the faceswap sidecar (`FACESWAP_URL`) to be configured and ready.
+`head_swap`, `swapper`, `swapper_polish` and `qoder_crop` need the faceswap sidecar (`FACESWAP_URL`) to be configured and ready.
+
+**Head swap** (`head_swap`), per job (= per output image):
+1. **Describe**: a vision model reads the target's `{hair, expression, angle}` (short English phrases, prompt
+   `head_swap.describe_prompt`). Cached on the target file, so only the first job on a target pays for it (parallel jobs
+   of one batch share one describe turn); stored as `face_swap.traits` (`null` when unreadable: the templates then say
+   "the hair shown in image 1" etc.).
+2. **Candidates**: one Qoder edit per entry of `head_swap.candidates` (default 3), all in parallel: image 1 = target,
+   image 2 = the face's reference (`primary` = main image, `portrait` = the portrait, `combo` = portrait left + main
+   image right, both 1400 px high with a 24 px white gap, built once and cached per face; `portrait`/`combo` fall back to
+   `primary` without a portrait), prompt = the template with `{hair}`, `{expression}`, `{angle}` filled in, size = the
+   largest allowed size of the target's aspect ratio. Candidate turns of all jobs share `HEAD_SWAP_TURN_CONCURRENCY`
+   (default 6) slots; more wait in order, so any K and `n` work.
+3. **Composite**: per finished candidate one sidecar call (`/v1/head-composite`, GPU box first, CPU fallback):
+   align → swapper on the candidate (identity = main image + portrait) → eyes from Qoder → head blended into the original
+   → features `{hair_dE, d_expr, identity, aligned, fallback, inliers}`.
+4. **Select**: cost = `min(hair_dE, 40)/10 + d_expr*4 − identity*2`; the lowest wins (`face_swap.chosen`) and is the
+   job's output. The other composites stay internal files (listed in `face_swap.candidates`), unless `all_candidates`.
+- A candidate whose Qoder turn or composite fails is skipped (its `error` is set); the job fails with `head_swap_failed`
+  only when all fail. Credits = the job's candidate turns + its describe turn (0 when cached), also when it failed.
+- Each step is stored as it finishes, so after a server restart a job resumes where it was: a candidate turn that was
+  running is read back from its Qoder session (not paid again), one that never reached Qoder starts again, finished
+  candidates are kept.
 
 **Misaligned close-ups** (`qoder_crop`, `swapper_polish`): the sidecar pastes the edited close-up landmark-aligned and
 rejects it when Qoder changed the framing (face moved, shrunk or rotated). The job then runs a **new Qoder turn** with the
@@ -1009,8 +1037,8 @@ a `swapper_polish` job **completes** with the plain swapper result as its output
 
 **`GET /face-swap/config`** (any user):
 ```json
-{ "default_engine": "swapper_polish",
-  "engines": { "swapper_polish": { "available": true }, "swapper": { "available": true }, "qoder": { "available": true },
+{ "default_engine": "head_swap",
+  "engines": { "head_swap": { "available": true }, "swapper_polish": { "available": true }, "swapper": { "available": true }, "qoder": { "available": true },
                "qoder_crop": { "available": true } },
   "max_n": 4 }
 ```
@@ -1022,10 +1050,11 @@ otherwise, `400 validation_error` if it is not an image).
 | field | type | default | notes |
 |---|---|---|---|
 | `face_id` | string | required | a saved face of the user's |
-| `engine` | `swapper_polish` \| `swapper` \| `qoder` \| `qoder_crop` | admin setting `default_engine` | an explicitly requested engine that is not available is `400 engine_unavailable`; without `engine`, an unavailable default falls back to `qoder` |
+| `engine` | `head_swap` \| `swapper_polish` \| `swapper` \| `qoder` \| `qoder_crop` | admin setting `default_engine` | an explicitly requested engine that is not available is `400 engine_unavailable`; without `engine`, an unavailable default falls back to `qoder` |
 | `n` | int 1–4 | `1` | how many takes to make in parallel; **always 1 for `swapper`** |
+| `all_candidates` | boolean | `false` | `head_swap` only (ignored otherwise): every successful candidate composite becomes an output, the auto-selected best first, then the others by cost; stored as `face_swap.all_candidates: true` (`chosen` still marks the best). Credits are the same (the K candidates always run) |
 | `callback_url` | URL | – | POSTed when each job finishes (§9) |
-| `settings_override` | object | – | **admin only**: same shape and validation as `PUT /admin/face-swap/settings`, merged onto the current settings for this batch only (`null`s ignored); affects the prompt, `crop_expand` and swapper `options` snapshotted into the jobs; its `default_engine` only matters without `engine`. Global settings are not changed |
+| `settings_override` | object | – | **admin only**: same shape and validation as `PUT /admin/face-swap/settings`, merged onto the current settings for this batch only (`null`s ignored); affects the prompt, `crop_expand`, swapper `options` and the `head_swap` block snapshotted into the jobs; its `default_engine` only matters without `engine`. Global settings are not changed |
 | `tag` | string 1–64 `[A-Za-z0-9._:-]` | – | **admin only**: experiment label, stored as `request.face_swap.tag`; list with `GET /admin/face-swap/jobs?tag=` |
 
 - A non-admin sending `settings_override` or `tag` gets `403 forbidden`; invalid values are `400 validation_error`.
@@ -1045,9 +1074,24 @@ otherwise, `400 validation_error` if it is not an image).
   `swapper_polish` also has `swapped_file_id` (the swapper result the close-up is cut from and pasted onto) and, when
   every polish was misaligned, `polish_failed: "misaligned"`. These intermediates are internal files, never outputs.
   A close-up job's `input_file_ids` become `[crop, face file]` once the crop is made; its only output is the full photo.
-- Job errors from the sidecar: `no_face_in_target`, `no_face_in_source`, `faceswap_unavailable` (sidecar down or not
+  `head_swap` jobs (`prompt` is `"Face swap: <name>"`, `options` = `head_swap.swapper`) have:
+  ```json
+  { "engine": "head_swap", "portrait_file_id": "file_…",
+    "head_swap": { "candidates": [{ "template": "…", "reference": "portrait" }], "describe_prompt": "…", "eye_keep": true },
+    "all_candidates": true,
+    "traits": { "hair": "…", "expression": "…", "angle": "…" }, "describe_credits": 0.02,
+    "candidates": [{ "template_index": 0, "reference": "combo", "reference_used": "combo", "reference_file_id": "file_…",
+                     "prompt": "…", "conversation_id": "conv_…", "job_qoder_session": "…", "last_event_id": "…",
+                     "credits": 0.5, "file_id": "file_…", "composite_file_id": "file_…",
+                     "features": { "hair_dE": 3.1, "d_expr": 0.05, "identity": 0.55, "aligned": true, "fallback": false, "inliers": 120 },
+                     "cost": -0.5, "backend": "gpu", "error": null }],
+    "chosen": 0 }
+  ```
+  (`portrait_file_id` only with a portrait, `all_candidates` only when requested; candidate fields appear as the steps
+  finish; `file_id` is Qoder's raw candidate.)
+- Job errors from the sidecar: `no_face_in_target`, `no_face_in_source`, `no_face_in_generated` (head swap candidate, per candidate), `faceswap_unavailable` (sidecar down or not
   configured), `faceswap_failed` (anything else, e.g. an unreadable or too large image); `qoder_misaligned` (`qoder_crop`
-  only, see above).
+  only, see above); `head_swap_failed` (every head swap candidate failed).
 
 ### Upscale
 Enlarges one of the user's images 2x or 4x. **Free, no limits** (no credits, the monthly credit limit is not checked).
@@ -1316,23 +1360,31 @@ fields an admin never changed.
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/admin/face-swap/settings` | – | `{settings, defaults, sidecar: {configured, ready, models?}}` (readiness probed now) |
-| PUT | `/admin/face-swap/settings` | any subset of the settings; `null` resets a field (or all of `swapper`) to its default | same as GET (readiness may be cached) |
+| PUT | `/admin/face-swap/settings` | any subset of the settings; `null` resets a field (or all of `swapper` / `head_swap`, or a field inside `head_swap`) to its default; `head_swap.candidates` is replaced as a whole list | same as GET (readiness may be cached) |
 | POST | `/admin/face-swap/test` | `{target_file_id, face_id, engine? = "swapper", settings_override?}` | `{image_data_url, engine, timings_ms, width, height, target_faces, source_faces, backend?: "gpu"\|"cpu"}` |
 | GET | `/admin/face-swap/jobs?tag=<tag>` | – | `{data: Job[]}`: the admin's own (not trashed) face swap jobs with that `tag`, newest first, all statuses, max 500; job JSON as in `/jobs`. Missing/invalid tag: `400 validation_error` |
 
 ```json
-{ "default_engine": "swapper_polish",
+{ "default_engine": "head_swap",
   "qoder_prompt": "Face swap. Image 1 is the target photo …",
   "qoder_crop_prompt": "Make the person in image 1 look exactly like the person in image 2. …",
   "polish_prompt": "Photo retouch of a close-up crop. …",
   "crop_expand": 2.2,
   "swapper": { "target_faces": "largest", "identity_mode": "average", "det_thresh": 0.5, "restorer": "codeformer",
-               "restore_blend": 0.8, "codeformer_fidelity": 0.7 } }
+               "restore_blend": 0.8, "codeformer_fidelity": 0.7 },
+  "head_swap": {
+    "candidates": [ { "template": "Swap the face of the person in image 1 … In image 1 she has {hair}: … Her expression in image 1 is: {expression}. … head angle ({angle}) …", "reference": "portrait" },
+                    { "template": "(same Q5 template)", "reference": "combo" },
+                    { "template": "Make the person in image 1 the same person as in image 2. …", "reference": "portrait" } ],
+    "describe_prompt": "Look at the person in the attached photo … Reply with JSON only …",
+    "swapper": { "target_faces": "largest", "identity_mode": "average", "det_thresh": 0.5, "restorer": "gfpgan",
+                 "restore_blend": 0.8, "codeformer_fidelity": 0.7 },
+    "eye_keep": true } }
 ```
 
 | setting | range | meaning |
 |---|---|---|
-| `default_engine` | `swapper_polish` \| `swapper` \| `qoder` \| `qoder_crop` | engine of a face swap without `engine` |
+| `default_engine` | `head_swap` \| `swapper_polish` \| `swapper` \| `qoder` \| `qoder_crop` | engine of a face swap without `engine` |
 | `qoder_prompt`, `qoder_crop_prompt`, `polish_prompt` | 20–4000 chars (trimmed) | prompts of the `qoder` / `qoder_crop` / `swapper_polish` engines |
 | `crop_expand` | 1.2–4 | close-up engines: crop side = `crop_expand` × the face's larger side |
 | `swapper.target_faces` | `largest` \| `all` | which faces in the target get swapped |
@@ -1341,9 +1393,13 @@ fields an admin never changed.
 | `swapper.restorer` | `codeformer` \| `gfpgan` \| `off` | face restoration after the swap |
 | `swapper.restore_blend` | 0–1 | how much of the restored face is blended in |
 | `swapper.codeformer_fidelity` | 0–1 | CodeFormer: higher = closer to the swapped face, lower = stronger restoration |
+| `head_swap.candidates` | 1–6 × `{template, reference}` | one Qoder candidate per entry; `template` 20–4000 chars, placeholders only `{hair}`, `{expression}`, `{angle}`; `reference` `primary` \| `portrait` \| `combo` |
+| `head_swap.describe_prompt` | 20–4000 chars | vision prompt of the describe step (must ask for JSON `{hair, expression, angle}`) |
+| `head_swap.swapper` | as `swapper` | swapper options of the head composite (default restorer `gfpgan`, blend 0.8) |
+| `head_swap.eye_keep` | boolean | keep Qoder's eyes over the swapper's result |
 
 - Unknown fields or out-of-range values are `400 validation_error` (with `issues`).
-- Engine settings are copied into each job when it is created (`request.face_swap.options`, `crop_expand`, the prompt), so
+- Engine settings are copied into each job when it is created (`request.face_swap.options`, `crop_expand`, the prompt, `head_swap`), so
   a change does not affect jobs already queued.
 - **Test** runs the swapper synchronously on one of the admin's own images and faces with the current settings merged with
   `settings_override` (same shape as `PUT`), without creating a job or gallery item. All other engines are

@@ -1,6 +1,7 @@
 import sharp from 'sharp';
 import { z } from 'zod';
 import type { ContentBlock } from '../db/schema.js';
+import { HEAD_SWAP_PLACEHOLDERS, type HeadTraits } from './faceSwap.js';
 import { AppError, badRequest } from '../errors.js';
 import type { Logger } from '../log.js';
 import { INLINE_IMAGE_TYPES } from './attachments.js';
@@ -28,6 +29,24 @@ export interface ReferenceTraits {
   file_id: string;
   traits: Traits | null;
   cached: boolean;
+}
+
+/** Result of the head swap describe step (see `ReferenceReader.describeHead`). */
+export interface HeadDescription {
+  /** null when the image could not be read (the templates then use neutral wording). */
+  traits: HeadTraits | null;
+  /** true when the description came from the file's cache (or another job's describe of the same file): no credits. */
+  cached: boolean;
+  credits: number;
+}
+
+/** Reads `{hair, expression, angle}` from a describe reply; null unless at least one is usable. */
+export function parseHeadTraits(text: string): HeadTraits | null {
+  const o = firstJsonObject(text);
+  if (!o || typeof o !== 'object') return null;
+  const r = o as Record<string, unknown>;
+  const out = Object.fromEntries(HEAD_SWAP_PLACEHOLDERS.map((k) => [k, clip(r[k], 200)])) as HeadTraits;
+  return Object.values(out).some(Boolean) ? out : null;
 }
 
 export const referenceView = (d: DescribedImage): ReferenceTraits => ({ file_id: d.file.id, traits: d.traits, cached: d.cached });
@@ -78,6 +97,9 @@ export function describeForPrompt(images: ({ traits: Traits | null } | null | un
  * vision model and the result is cached on the file, so repeat clicks cost nothing.
  */
 export class ReferenceReader {
+  /** Head swap describes in flight per file id: parallel jobs of one batch share one vision turn. */
+  private readonly headInFlight = new Map<string, Promise<HeadDescription>>();
+
   constructor(
     private readonly d: {
       conversations: ConversationService;
@@ -126,6 +148,44 @@ export class ReferenceReader {
     }
   }
 
+  /**
+   * Head swap describe step: the target's hair, expression and head angle, cached on the file (`files.head_traits`),
+   * so only the first job of a target pays for the vision turn (its usage is recorded with that job's id).
+   * Never throws: a failure is `traits: null`.
+   */
+  async describeHead(fileId: string, userId: string, o: { prompt: string; jobId?: string }): Promise<HeadDescription> {
+    const running = this.headInFlight.get(fileId);
+    if (running) return running.then((r) => ({ ...r, cached: true, credits: 0 }));
+    const p = this.describeHeadNow(fileId, userId, o).finally(() => this.headInFlight.delete(fileId));
+    this.headInFlight.set(fileId, p);
+    return p;
+  }
+
+  private async describeHeadNow(fileId: string, userId: string, o: { prompt: string; jobId?: string }): Promise<HeadDescription> {
+    try {
+      const file = await this.d.store.get(fileId, userId);
+      const cached = parseHeadTraits(JSON.stringify(file.headTraits ?? {}));
+      if (cached) return { traits: cached, cached: true, credits: 0 };
+      if (!INLINE_IMAGE_TYPES.includes(file.mimeType)) return { traits: null, cached: false, credits: 0 };
+      const turn = await this.oneShot(
+        userId,
+        this.d.visionModel ?? 'vision',
+        [
+          { type: 'image', fileId: file.id, mimeType: file.mimeType },
+          { type: 'text', text: o.prompt },
+        ],
+        { jobId: o.jobId, purpose: 'head_swap_description' },
+      );
+      const traits = turn.ok ? parseHeadTraits(turn.text) : null;
+      if (traits) await this.d.store.setHeadTraits(file.id, traits);
+      else this.d.log.warn('references.describe_head_unusable', { fileId, text: turn.text.slice(0, 200) });
+      return { traits, cached: false, credits: turn.credits };
+    } catch (err) {
+      this.d.log.warn('references.describe_head_failed', { fileId, err });
+      return { traits: null, cached: false, credits: 0 };
+    }
+  }
+
   private async sizeOf(file: StoredFile): Promise<{ width?: number; height?: number }> {
     try {
       const m = await sharp(this.d.store.pathOf(file)).metadata();
@@ -137,9 +197,15 @@ export class ReferenceReader {
     }
   }
 
-  private async oneShot(userId: string, model: string, content: ContentBlock[]) {
-    const conv = await this.d.conversations.create({ userId, profile: 'chat', model, title: 'reference description', metadata: { hidden: true, purpose: 'reference_description' } });
-    const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content });
+  private async oneShot(userId: string, model: string, content: ContentBlock[], o: { jobId?: string; purpose?: string } = {}) {
+    const conv = await this.d.conversations.create({
+      userId,
+      profile: 'chat',
+      model,
+      title: 'reference description',
+      metadata: { hidden: true, purpose: o.purpose ?? 'reference_description', ...(o.jobId ? { job_id: o.jobId } : {}) },
+    });
+    const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content, ...(o.jobId ? { jobId: o.jobId } : {}) });
     const r = await handle.done;
     return { ok: r.stopReason !== 'error', text: r.text, credits: r.credits.total };
   }

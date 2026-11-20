@@ -15,6 +15,8 @@ const faceSwapBody = z.object({
   /** 1–4 parallel results (default 1; always 1 for `swapper`). */
   n: z.number().int().min(1).max(MAX_FACE_SWAP_BATCH).optional(),
   callback_url: z.string().optional(),
+  /** `head_swap` only: every successful candidate becomes an output (best first) instead of only the best. */
+  all_candidates: z.boolean().optional(),
   /** Admin only: settings patch for this batch (same shape as PUT /admin/face-swap/settings, nulls ignored). */
   settings_override: faceSwapSettingsPatch.optional(),
   /** Admin only: experiment label, listable via GET /admin/face-swap/jobs?tag=. */
@@ -27,18 +29,27 @@ const tagError = () => badRequest('tag must be 1-64 characters of A-Z a-z 0-9 . 
 /** /faces (saved identities) and POST /images/:fileId/face-swap. */
 export function faceRoutes(ctx: AppContext) {
   const app = new Hono<Env>();
-  const view = (f: Face) => ({ id: f.id, name: f.name, file_id: f.fileId, file: fileView(f.file, ctx.store), created_at: f.createdAt.toISOString() });
+  const view = (f: Face) => ({
+    id: f.id,
+    name: f.name,
+    file_id: f.fileId,
+    file: fileView(f.file, ctx.store),
+    portrait_file_id: f.portraitFileId ?? null,
+    portrait: f.portrait ? fileView(f.portrait, ctx.store) : null,
+    created_at: f.createdAt.toISOString(),
+  });
 
   app.get('/faces', async (c) => c.json({ data: (await ctx.faces.list(c.get('user').id)).map(view) }));
 
   app.post('/faces', async (c) => {
-    const b = await body(c, z.object({ name: z.unknown(), file_id: z.unknown() }));
-    return c.json(view(await ctx.faces.create(c.get('user').id, { name: b.name, fileId: b.file_id })), 201);
+    const b = await body(c, z.object({ name: z.unknown(), file_id: z.unknown(), portrait_file_id: z.unknown().optional() }));
+    return c.json(view(await ctx.faces.create(c.get('user').id, { name: b.name, fileId: b.file_id, portraitFileId: b.portrait_file_id })), 201);
   });
 
+  /** `name` and/or `portrait_file_id` (null removes the portrait). */
   app.patch('/faces/:id', async (c) => {
-    const b = await body(c, z.object({ name: z.unknown() }));
-    return c.json(view(await ctx.faces.rename(c.req.param('id'), c.get('user').id, b.name)));
+    const b = await body(c, z.object({ name: z.unknown().optional(), portrait_file_id: z.unknown().optional() }));
+    return c.json(view(await ctx.faces.update(c.req.param('id'), c.get('user').id, { name: b.name, portraitFileId: b.portrait_file_id })));
   });
 
   app.delete('/faces/:id', async (c) => {
@@ -60,9 +71,10 @@ export function faceRoutes(ctx: AppContext) {
     const batch = await ctx.media.createFaceSwapBatch({
       userId,
       targetFileId: c.req.param('fileId'),
-      face: { id: face.id, name: face.name, fileId: face.fileId },
+      face: { id: face.id, name: face.name, fileId: face.fileId, portraitFileId: face.portraitFileId, combo: () => ctx.faces.comboFileId(face) },
       engine: b.engine,
       n: b.n,
+      allCandidates: b.all_candidates,
       callbackUrl: b.callback_url,
       settingsOverride: b.settings_override,
       tag: b.tag,

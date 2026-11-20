@@ -187,10 +187,18 @@ export class MediaTrash {
     const jobIds = jobs.map((j) => j.id);
     // face swap intermediates (close-up engines: the swapped photo, the crop, Qoder's raw edits incl. misaligned ones)
     // go with the job too, unless something else uses them
+    // head swap: every candidate's raw Qoder output and composite
     const intermediates = jobs.flatMap((j) => {
-      const fs = (j.request.face_swap ?? {}) as { swapped_file_id?: unknown; crop_file_id?: unknown; qoder_output_file_id?: unknown; misaligned_file_ids?: unknown };
+      const fs = (j.request.face_swap ?? {}) as {
+        swapped_file_id?: unknown;
+        crop_file_id?: unknown;
+        qoder_output_file_id?: unknown;
+        misaligned_file_ids?: unknown;
+        candidates?: unknown;
+      };
       const misaligned = Array.isArray(fs.misaligned_file_ids) ? fs.misaligned_file_ids : [];
-      return [fs.swapped_file_id, fs.crop_file_id, fs.qoder_output_file_id, ...misaligned].filter((x): x is string => typeof x === 'string');
+      const candidates = Array.isArray(fs.candidates) ? (fs.candidates as { file_id?: unknown; composite_file_id?: unknown }[]).flatMap((c) => [c?.file_id, c?.composite_file_id]) : [];
+      return [fs.swapped_file_id, fs.crop_file_id, fs.qoder_output_file_id, ...misaligned, ...candidates].filter((x): x is string => typeof x === 'string');
     });
     const outputs = await this.fileRows([...jobs.flatMap((j) => j.resultFileIds), ...intermediates]);
     if (!o.dryRun) {
@@ -253,9 +261,13 @@ export class MediaTrash {
     return (await this.inJob(fileId, excludeJobIds)) || (await this.inChat(fileId, chats)) || (await this.inFace(fileId));
   }
 
-  /** Reference image of a saved face (face swap). */
+  /** Image of a saved face (face swap): the main image, the front portrait or the cached head swap combo. */
   private async inFace(fileId: string): Promise<boolean> {
-    const [row] = await this.d.db.select({ id: faces.id }).from(faces).where(eq(faces.fileId, fileId)).limit(1);
+    const [row] = await this.d.db
+      .select({ id: faces.id })
+      .from(faces)
+      .where(or(eq(faces.fileId, fileId), eq(faces.portraitFileId, fileId), eq(faces.comboFileId, fileId)))
+      .limit(1);
     return !!row;
   }
 
@@ -279,6 +291,11 @@ export class MediaTrash {
             sql`${mediaJobs.request}->'face_swap'->>'qoder_output_file_id' = ${fileId}`,
             sql`${mediaJobs.request}->'face_swap'->>'swapped_file_id' = ${fileId}`,
             sql`${mediaJobs.request}->'face_swap'->'misaligned_file_ids' @> ${list}::jsonb`,
+            // head swap: the portrait (identity source), and each candidate's reference image, raw Qoder output and composite
+            sql`${mediaJobs.request}->'face_swap'->>'portrait_file_id' = ${fileId}`,
+            sql`${mediaJobs.request}->'face_swap'->'candidates' @> ${JSON.stringify([{ reference_file_id: fileId }])}::jsonb`,
+            sql`${mediaJobs.request}->'face_swap'->'candidates' @> ${JSON.stringify([{ file_id: fileId }])}::jsonb`,
+            sql`${mediaJobs.request}->'face_swap'->'candidates' @> ${JSON.stringify([{ composite_file_id: fileId }])}::jsonb`,
           ),
         ),
       )

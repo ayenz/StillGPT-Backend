@@ -1,6 +1,6 @@
 # faceswap sidecar
 
-Internal HTTP service for StillGPT's face swap (engine `swapper`, plus `face-crop`/`face-paste` for `qoder_crop`)
+Internal HTTP service for StillGPT's face swap (engine `swapper`, `head-composite` for `head_swap`, plus `face-crop`/`face-paste` for `qoder_crop`)
 and image upscaling (`/v1/upscale`, x2/x4, see [Upscale](#upscale)).
 Python 3.12 + FastAPI + onnxruntime (CPU). Own minimal implementation of the insightface pipeline (SCRFD detection,
 ArcFace identity, inswapper_128 with the model's `emap` latent projection, arcface-template alignment and inverse-affine
@@ -77,6 +77,27 @@ target's (oriented) pixel size. PNG alpha of the target is preserved for PNG out
   `restorer` codeformer|gfpgan|off, `restore_blend` 0–1 (0.8), `codeformer_fidelity` 0–1 (0.7),
   `output_format` jpeg|png, `jpeg_quality` 50–100 (95). Identity = weighted average (det score × frontalness) of
   normalized ArcFace embeddings of every face in every source (a 3×3 sheet yields 9), cached by source hash.
+- `POST /v1/head-composite` (engine `head_swap`) `{original, generated, sources[1..9], options?}` →
+  `{image, mime_type, width, height (= original), features: {hair_dE, d_expr, identity, aligned, fallback, inliers,
+  method, scale, face_found}, source_faces, device, timings_ms: {decode, detect, align, features, gpu_wait?, load?,
+  identity, swap, restore?, composite, score, encode, total}}`. `generated` is a whole-image regeneration of
+  `original` (Qoder). Steps: main face (det 0.3, largest) in both images (422 `NO_FACE_IN_TARGET` /
+  `NO_FACE_IN_GENERATED`); transform generated → original: same aspect ratio within 1% → uniform scale
+  (`method: "uniform"`), else SIFT (4000) + ratio test + RANSAC similarity on the background, the face rectangle masked
+  (`"sift"`, needs ≥ 30 inliers), else centred uniform scale covering the original (`"fallback"`, `aligned: false`);
+  the swapper on the generated image's face (identity from `sources`, `options.swapper` = `/v1/swap` options, but
+  restorer default `gfpgan`, blend 0.8); `eye_keep` (true): both eye ellipses (0.42 × 0.26 inter-ocular distance,
+  feathered) are taken back from the generated image (the swapper's eyes are often crossed); warp onto the original
+  (Lanczos), head mask = feathered ellipse per face box (original face + warped face) raised for the hair
+  (`head_mask: {up 0.75, side 0.45, down 0.18, feather 0.12}`), `color_match` (true): LAB mean/std transfer at 0.6
+  measured on the ring around the mask; alpha blend, so pixels away from the head stay the original's.
+  Features (for picking the best of several candidates, lower cost = better: `min(hair_dE,40)/10 + d_expr*4 -
+  identity*2`): `hair_dE` = LAB distance of the hair medians (above / beside the face box) between the original and
+  the warped raw generated image (99 when no face is found there), `d_expr` = change of mouth width and mouth height
+  (/ inter-ocular distance), `identity` = ArcFace w600k cosine of the result's face to the source identity (0 when none
+  is found; `face_found: false` in both cases), `inliers`/`scale` of the transform. On CUDA the swapper, restorer and
+  recognizer run on the GPU (one stage on the gpu thread); decoding and SIFT run on the CPU pool first. CPU (i7, 6 ORT
+  threads, 1024×1792): ~4–5 s per call (SIFT 0.5 s, swap 0.9–1.4 s, GFPGAN 1.6–1.8 s, composite 0.3–0.6 s).
 - `POST /v1/face-crop` `{image, det_thresh?, expand? (2.2), size? (1024)}` → `{crop (png), box: [x,y,side,side], faces, width, height}`.
   Box is centred on the largest face, may extend past the image (edge-reflect padding).
 - `POST /v1/face-paste` `{base, patch, box, feather? (0.15), color_match? (true), mask? ("face"|"box", default "face"),
@@ -95,13 +116,14 @@ target's (oriented) pixel size. PNG alpha of the target is preserved for PNG out
 
 - `POST /v1/upscale` — see [Upscale](#upscale).
 
-Error codes: 401 `AUTH_INVALID`, 413 `TOO_LARGE`, 422 `BAD_IMAGE` / `NO_FACE_IN_TARGET` / `NO_FACE_IN_SOURCE` /
+Error codes: 401 `AUTH_INVALID`, 413 `TOO_LARGE`, 422 `BAD_IMAGE` / `NO_FACE_IN_TARGET` / `NO_FACE_IN_GENERATED` /
+`NO_FACE_IN_SOURCE` /
 `BAD_BOX` / `PATCH_MISALIGNED` / `INVALID_REQUEST` (schema, with `errors`), 503 `MODELS_LOADING` / `MODELS_FAILED` /
 `UPSCALE_DISABLED` / `UPSCALE_ONLY`.
 
 ## Face swap on the GPU
 
-With `FACESWAP_DEVICE=cuda` (the GPU box, `Dockerfile.gpu`) `/v1/swap` runs recognizer, swapper and the requested
+With `FACESWAP_DEVICE=cuda` (the GPU box, `Dockerfile.gpu`) `/v1/swap` and `/v1/head-composite` run recognizer, swapper and the requested
 restorer on CUDA; the detector stays on the CPU. Output equals the CPU path (max pixel difference 1/255).
 
 The swap models (all five ~4.7 GB of VRAM; per job recognizer + swapper + one restorer, ~3.6 GB with CodeFormer) and

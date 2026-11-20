@@ -26,7 +26,7 @@ export interface SwapResult extends FaceSwapImage {
   timingsMs: Record<string, number>;
 }
 
-/** The GPU box for `/v1/swap` (the sidecar with FACESWAP_DEVICE=cuda, over ZeroTier). */
+/** The GPU box for `/v1/swap` and `/v1/head-composite` (the sidecar with FACESWAP_DEVICE=cuda, over ZeroTier). */
 export interface FaceSwapGpuConfig {
   baseUrl: string;
   apiKey?: string;
@@ -55,6 +55,36 @@ export interface PasteResult extends FaceSwapImage {
   alignment?: PasteAlignment;
 }
 
+/** What the sidecar measured on a head composite (selection features, see `headSwapCost`). */
+export interface HeadCompositeFeatures {
+  /** LAB distance of the hair colour around the face vs the original. */
+  hair_dE: number;
+  /** Expression change (smile width + mouth height vs inter-ocular distance). */
+  d_expr: number;
+  /** Cosine similarity (w600k) of the final face to the identity. */
+  identity: number;
+  /** SIFT/RANSAC alignment found (false: same aspect ratio → uniform scale, or the centred fallback). */
+  aligned: boolean;
+  fallback: boolean;
+  inliers: number;
+}
+
+/** `POST /v1/head-composite` `options` (sidecar defaults for everything left out). */
+export interface HeadCompositeOptions {
+  swapper?: Partial<SwapperOptions>;
+  eye_keep?: boolean;
+  color_match?: boolean;
+  head_mask?: { up?: number; side?: number; down?: number; feather?: number };
+  output_format?: 'jpeg' | 'png';
+  jpeg_quality?: number;
+}
+
+export interface HeadCompositeResult extends FaceSwapImage {
+  features: HeadCompositeFeatures;
+  backend: 'gpu' | 'cpu';
+  timingsMs: Record<string, number>;
+}
+
 export interface FaceSwapReadiness {
   ready: boolean;
   models?: Record<string, unknown>;
@@ -74,7 +104,7 @@ export interface FaceSwapOptions {
   concurrency?: number;
   /** How long a readiness probe result is reused. Default 30 s. */
   readyCacheMs?: number;
-  /** `/v1/swap` goes here first; crop/paste always use `baseUrl`. */
+  /** `/v1/swap` and `/v1/head-composite` go here first; crop/paste always use `baseUrl`. */
   gpu?: FaceSwapGpuConfig;
 }
 
@@ -85,6 +115,8 @@ export const PATCH_MISALIGNED = 'patch_misaligned';
 const CODES: Record<string, { status: number; code: string; message: string }> = {
   NO_FACE_IN_TARGET: { status: 400, code: 'no_face_in_target', message: 'No face found in the target image' },
   NO_FACE_IN_SOURCE: { status: 400, code: 'no_face_in_source', message: 'No face found in the face image' },
+  // head-composite: Qoder's candidate has no face to swap
+  NO_FACE_IN_GENERATED: { status: 400, code: 'no_face_in_generated', message: 'No face found in the generated image' },
   BAD_IMAGE: { status: 400, code: 'faceswap_failed', message: 'Face swap could not read an image' },
   TOO_LARGE: { status: 400, code: 'faceswap_failed', message: 'Image is too large for face swap (max 25 MB / 40 MP)' },
   // face-paste: the edited close-up does not line up with the base (different framing); callers may retry the edit
@@ -96,7 +128,7 @@ const CODES: Record<string, { status: number; code: string; message: string }> =
 class GpuDown extends Error {}
 
 /** Sidecar codes caused by the inputs themselves: the CPU sidecar would answer the same, so no fallback. */
-const INPUT_ERRORS = new Set(['NO_FACE_IN_TARGET', 'NO_FACE_IN_SOURCE', 'BAD_IMAGE', 'TOO_LARGE', 'INVALID_REQUEST']);
+const INPUT_ERRORS = new Set(['NO_FACE_IN_TARGET', 'NO_FACE_IN_SOURCE', 'NO_FACE_IN_GENERATED', 'BAD_IMAGE', 'TOO_LARGE', 'INVALID_REQUEST']);
 
 /**
  * Client for the faceswap sidecar (Python: InsightFace + inswapper + face restore). Images travel as base64 JSON.
@@ -118,17 +150,54 @@ export class FaceSwapClient {
   }
 
   async swap(target: Buffer, sources: Buffer[], options: Partial<SwapperOptions> = {}): Promise<SwapResult> {
-    const payload = { target: b64(target), sources: sources.map(b64), options };
+    const { body, backend } = await this.gpuFirst<SwapResponse>('/v1/swap', { target: b64(target), sources: sources.map(b64), options });
+    return toSwap(body, backend);
+  }
+
+  /**
+   * Head swap composite (`POST /v1/head-composite`): aligns Qoder's `generated` candidate to the `original`, swaps the
+   * identity of `sources` into it, keeps the candidate's eyes, blends the head into the original and measures it.
+   * Same GPU-first / CPU-fallback policy as `swap`.
+   */
+  async headComposite(original: Buffer, generated: Buffer, sources: Buffer[], options: HeadCompositeOptions = {}): Promise<HeadCompositeResult> {
+    const { body: r, backend } = await this.gpuFirst<HeadCompositeResponse>('/v1/head-composite', {
+      original: b64(original),
+      generated: b64(generated),
+      sources: sources.map(b64),
+      options,
+    });
+    const f = (r.features ?? {}) as Partial<Record<keyof HeadCompositeFeatures, unknown>>;
+    const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+    return {
+      bytes: Buffer.from(r.image, 'base64'),
+      mimeType: r.mime_type,
+      width: r.width,
+      height: r.height,
+      features: {
+        hair_dE: num(f.hair_dE, 99),
+        d_expr: num(f.d_expr, 1),
+        identity: num(f.identity, 0),
+        aligned: f.aligned === true,
+        fallback: f.fallback === true,
+        inliers: num(f.inliers, 0),
+      },
+      backend,
+      timingsMs: r.timings_ms ?? {},
+    };
+  }
+
+  /** The GPU box when its cached probe says ready (falling back to the CPU sidecar when it fails), else the CPU sidecar. */
+  private async gpuFirst<T>(path: string, payload: unknown): Promise<{ body: T; backend: 'gpu' | 'cpu' }> {
     if (this.o.gpu && (await this.gpuReady())) {
       try {
-        return toSwap(await this.gpuRequest<SwapResponse>(this.o.gpu, '/v1/swap', payload), 'gpu');
+        return { body: await this.gpuRequest<T>(this.o.gpu, path, payload), backend: 'gpu' };
       } catch (err) {
         if (!(err instanceof GpuDown)) throw err;
         this.gpuReadyCache = { at: Date.now(), ready: false };
-        this.o.log.warn('faceswap.gpu_fallback', { reason: err.message });
+        this.o.log.warn('faceswap.gpu_fallback', { path, reason: err.message });
       }
     }
-    return toSwap(await this.call<SwapResponse>('/v1/swap', payload), 'cpu');
+    return { body: await this.call<T>(path, payload), backend: 'cpu' };
   }
 
   /** The GPU box is configured and its (cached) `/health/ready` says ready with the swap models on CUDA. */
@@ -271,6 +340,15 @@ interface SwapResponse {
   height: number;
   target_faces: number;
   source_faces: number;
+  timings_ms?: Record<string, number>;
+}
+
+interface HeadCompositeResponse {
+  image: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  features?: Record<string, unknown>;
   timings_ms?: Record<string, number>;
 }
 

@@ -1,4 +1,4 @@
-"""FastAPI app: /health/ready, /v1/swap, /v1/face-crop, /v1/face-paste, /v1/upscale (see faceswap/README.md)."""
+"""FastAPI app: /health/ready, /v1/swap, /v1/head-composite, /v1/face-crop, /v1/face-paste, /v1/upscale (see faceswap/README.md)."""
 
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import gpugate, imaging, upscale
+from . import gpugate, headswap, imaging, upscale
 from .engine import estimate_alignment, pick_face
 from .logs import setup_logging
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 log = logging.getLogger("faceswap")
 
 
@@ -287,6 +287,38 @@ class SwapRequest(BaseModel):
     options: SwapOptions = Field(default_factory=SwapOptions)
 
 
+class HeadSwapperOptions(SwapOptions):
+    """/v1/swap options for the swapper pass of /v1/head-composite (always the largest face; restorer GFPGAN by
+    default). target_faces / output_format / jpeg_quality are ignored there."""
+
+    restorer: Literal["codeformer", "gfpgan", "off"] = "gfpgan"
+
+
+class HeadMaskOptions(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    up: float = Field(0.75, ge=0.0, le=3.0)
+    side: float = Field(0.45, ge=0.0, le=3.0)
+    down: float = Field(0.18, ge=0.0, le=3.0)
+    feather: float = Field(0.12, ge=0.01, le=1.0)
+
+
+class HeadCompositeOptions(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    swapper: HeadSwapperOptions = Field(default_factory=HeadSwapperOptions)
+    eye_keep: bool = True
+    color_match: bool = True
+    head_mask: HeadMaskOptions = Field(default_factory=HeadMaskOptions)
+    output_format: Literal["png", "jpeg"] = "jpeg"
+    jpeg_quality: int = Field(95, ge=50, le=100)
+
+
+class HeadCompositeRequest(BaseModel):
+    original: str = Field(min_length=1)
+    generated: str = Field(min_length=1)
+    sources: list[str] = Field(min_length=1, max_length=9)
+    options: HeadCompositeOptions = Field(default_factory=HeadCompositeOptions)
+
+
 class CropRequest(BaseModel):
     image: str = Field(min_length=1)
     det_thresh: float = Field(0.5, ge=0.1, le=0.95)
@@ -380,6 +412,120 @@ def do_swap(eng, req: SwapRequest) -> dict:
         "device": device,
         "timings_ms": timings,
     }
+
+
+# ---- /v1/head-composite: prepare (CPU) -> swap + composite (CPU, or the gpu thread on CUDA) -> encode (CPU)
+
+
+def head_prepare(eng, req: HeadCompositeRequest) -> dict:
+    """Decode, find both faces, align generated -> original (SIFT on the CPU) and measure hair/expression."""
+    timings: dict[str, int] = {}
+    t_all = t = time.perf_counter()
+    orig = imaging.decode_image(req.original)
+    gen = imaging.decode_image(req.generated)
+    sources = [imaging.decode_image(s) for s in req.sources]
+    timings["decode"] = _ms(t)
+
+    t = time.perf_counter()
+    of = headswap.main_face(eng.detector, orig.bgr)
+    if of is None:
+        raise imaging.ImageError("NO_FACE_IN_TARGET")
+    gf = headswap.main_face(eng.detector, gen.bgr)
+    if gf is None:
+        raise imaging.ImageError("NO_FACE_IN_GENERATED")
+    timings["detect"] = _ms(t)
+
+    t = time.perf_counter()
+    M, info = headswap.transform(orig.bgr, gen.bgr, of)
+    timings["align"] = _ms(t)
+
+    t = time.perf_counter()
+    feats = headswap.expression_features(eng.detector, orig.bgr, of, gen.bgr, M)
+    timings["features"] = _ms(t)
+    return {"t_all": t_all, "timings": timings, "orig": orig, "gen": gen, "sources": sources, "of": of, "gf": gf,
+            "M": M, "align": info, "features": feats}
+
+
+def head_swap_composite(eng, req: HeadCompositeRequest, ctx: dict) -> dict:
+    """Swapper on the generated image (identity from sources), eyes back from the generated image, warp + head blend
+    onto the original, identity of the result."""
+    o, so = req.options, req.options.swapper
+    timings = ctx["timings"]
+    gen, gf, of, orig = ctx["gen"].bgr, ctx["gf"], ctx["of"], ctx["orig"].bgr
+    restore = so.restorer != "off" and so.restore_blend > 0
+    device = getattr(eng, "device", "cpu")
+    with gpu_job("swap", timings) if device == "cuda" else nullcontext():
+        if device == "cuda":
+            t = time.perf_counter()
+            eng.ensure(["recognizer", "swapper"] + ([so.restorer] if restore else []))
+            timings["load"] = _ms(t)
+
+        t = time.perf_counter()
+        emb, used = eng.identity(ctx["sources"], so.identity_mode, so.det_thresh)
+        latent = eng.swapper.latent(emb)
+        timings["identity"] = _ms(t)
+
+        t = time.perf_counter()
+        swapped = eng.swapper.swap(gen, gf, latent)
+        timings["swap"] = _ms(t)
+        if restore:
+            t = time.perf_counter()
+            swapped = eng.restorer(so.restorer).restore(swapped, gf, so.restore_blend, so.codeformer_fidelity)
+            timings["restore"] = _ms(t)
+
+        t = time.perf_counter()
+        if o.eye_keep:
+            swapped = headswap.keep_eyes(swapped, gen, gf)
+        out, _ = headswap.composite(
+            eng.detector, orig, swapped, of, ctx["M"], color=o.color_match, **o.head_mask.model_dump()
+        )
+        timings["composite"] = _ms(t)
+
+        t = time.perf_counter()
+        ff = headswap.main_face(eng.detector, out, of)
+        identity = float(eng.recognizer.embed(out, ff) @ emb) if ff is not None else 0.0
+        timings["score"] = _ms(t)
+    ctx.update(out=out, identity=identity, source_faces=used, final_face=ff is not None, device=device)
+    return ctx
+
+
+def head_finish(req: HeadCompositeRequest, ctx: dict) -> dict:
+    o = req.options
+    timings = ctx["timings"]
+    t = time.perf_counter()
+    out = ctx["out"]
+    b64, mime = imaging.encode_image(out, o.output_format, o.jpeg_quality, ctx["orig"].alpha)
+    timings["encode"] = _ms(t)
+    timings["total"] = _ms(ctx["t_all"])
+    al, ft = ctx["align"], ctx["features"]
+    features = {
+        "hair_dE": round(float(ft["hair_dE"]), 2),
+        "d_expr": round(float(ft["d_expr"]), 4),
+        "identity": round(float(ctx["identity"]), 4),
+        "aligned": bool(al["aligned"]),
+        "fallback": bool(al["fallback"]),
+        "inliers": int(al["inliers"]),
+        "method": al["method"],
+        "scale": round(float(al["scale"]), 4),
+        "face_found": bool(ft["face_found"] and ctx["final_face"]),
+    }
+    log.info("head-composite", extra={"features": features, "source_faces": ctx["source_faces"], "device": ctx["device"],
+                                      "timings_ms": timings})
+    return {
+        "image": b64,
+        "mime_type": mime,
+        "width": int(out.shape[1]),
+        "height": int(out.shape[0]),
+        "features": features,
+        "source_faces": ctx["source_faces"],
+        "device": ctx["device"],
+        "timings_ms": timings,
+    }
+
+
+def do_head_composite(eng, req: HeadCompositeRequest) -> dict:
+    """All stages in one call (CPU device)."""
+    return head_finish(req, head_swap_composite(eng, req, head_prepare(eng, req)))
 
 
 def do_crop(eng, req: CropRequest) -> dict:
@@ -605,6 +751,17 @@ async def swap(req: SwapRequest):
     if getattr(eng, "device", "cpu") == "cuda":  # in turn with the upscales on the one GPU
         return await asyncio.get_running_loop().run_in_executor(state.gpu_executor, do_swap, eng, req)
     return await run_cpu(do_swap, eng, req)
+
+
+@app.post("/v1/head-composite", dependencies=[Depends(require_key)])
+async def head_composite(req: HeadCompositeRequest):
+    eng = engine()
+    if getattr(eng, "device", "cpu") != "cuda":
+        return await run_cpu(do_head_composite, eng, req)
+    # CUDA: SIFT + decoding on the CPU pool, only the swap/composite stage on the shared gpu thread
+    ctx = await run_cpu(head_prepare, eng, req)
+    ctx = await asyncio.get_running_loop().run_in_executor(state.gpu_executor, head_swap_composite, eng, req, ctx)
+    return await run_cpu(head_finish, req, ctx)
 
 
 @app.post("/v1/face-crop", dependencies=[Depends(require_key)])

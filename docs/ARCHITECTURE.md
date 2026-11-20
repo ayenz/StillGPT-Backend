@@ -351,7 +351,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` (+ `VAPID_SUBJECT`, default `PUBLIC_BASE_URL`; Web Push "creation ready" notifications, `core/push.ts`, off when unset),
 `FCM_SERVICE_ACCOUNT_B64` (base64 Firebase service-account JSON; FCM "creation ready" notifications to the Android app, `core/fcm.ts`, off when unset),
-`FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`, `FACESWAP_GPU_URL` + `FACESWAP_GPU_API_KEY` (optional GPU box for `/v1/swap`), `FACESWAP_GPU_TIMEOUT_MS=90000`,
+`FACESWAP_CONCURRENCY=2`, `FACESWAP_TIMEOUT_MS=120000`, `HEAD_SWAP_TURN_CONCURRENCY=6` (head swap candidate Qoder turns in flight), `FACESWAP_GPU_URL` + `FACESWAP_GPU_API_KEY` (optional GPU box for `/v1/swap` and `/v1/head-composite`), `FACESWAP_GPU_TIMEOUT_MS=90000`,
 `UPSCALE_GPU_URL` + `UPSCALE_GPU_API_KEY` (optional GPU upscaler; upscale is available when it or `FACESWAP_URL` is set),
 `UPSCALE_GPU_TIMEOUT_MS=240000`, `UPSCALE_CPU_TIMEOUT_MS=600000`,
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),

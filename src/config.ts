@@ -112,6 +112,8 @@ const schema = z
     FACESWAP_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
     /** Per sidecar call. */
     FACESWAP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+    /** Head swap candidate Qoder turns in flight at once (all head swap jobs together; more wait in FIFO order). */
+    HEAD_SWAP_TURN_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(6),
     /** Web Push (VAPID) for "your creation is ready" notifications in the PWA; off when the keys are unset. Generate with `npx web-push generate-vapid-keys`. */
     VAPID_PUBLIC_KEY: optionalString(z.string().min(20)),
     VAPID_PRIVATE_KEY: optionalString(z.string().min(20)),

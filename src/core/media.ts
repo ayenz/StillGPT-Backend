@@ -14,7 +14,21 @@ import type { QoderClient } from '../qoder/client.js';
 import type { QoderEvent } from '../qoder/types.js';
 import { ATTACHMENT_DIR } from './attachments.js';
 import type { EventBus } from './bus.js';
-import { applyPatch, type FaceSwapEngine, type FaceSwapSettingsPatch, type FaceSwapSettingsService } from './faceSwap.js';
+import {
+  applyPatch,
+  DEFAULT_HEAD_SWAP_SETTINGS,
+  type FaceSwapEngine,
+  type FaceSwapSettingsPatch,
+  type FaceSwapSettingsService,
+  fillHeadSwapTemplate,
+  type HeadSwapCandidateSpec,
+  type HeadSwapReference,
+  headSwapCost,
+  type HeadTraits,
+} from './faceSwap.js';
+import type { HeadCompositeFeatures } from '../providers/faceswap.js';
+import type { ReferenceReader } from './references.js';
+import { Semaphore } from './runs/semaphore.js';
 import type { ConversationService } from './conversations.js';
 import type { PromptEnhancer } from './enhancer.js';
 import { MAX_VARIATIONS, type PromptVariator, VARIATION_AXES, type VariationAxis } from './variations.js';
@@ -137,9 +151,19 @@ export interface UpscaleJobInfo {
 export interface FaceSwapRequest {
   userId: string;
   targetFileId: string;
-  face: { id: string; name: string; fileId: string };
+  face: {
+    id: string;
+    name: string;
+    fileId: string;
+    /** The face's optional front portrait (head swap references `portrait` / `combo`). */
+    portraitFileId?: string | null;
+    /** Builds (or returns the cached) head swap `combo` reference of the face; null without a portrait. */
+    combo?: () => Promise<string | null>;
+  };
   /** Default: the admin setting `default_engine`. */
   engine?: FaceSwapEngine;
+  /** `head_swap`: every successful candidate becomes an output (best first), not only the best. */
+  allCandidates?: boolean;
   /** 1–MAX_FACE_SWAP_BATCH, default 1; always 1 for `swapper` (deterministic). */
   n?: number;
   callbackUrl?: string;
@@ -179,6 +203,51 @@ export interface FaceSwapJobInfo {
   alignment?: PasteAlignment;
   /** `swapper_polish`: set when every polish attempt was misaligned; the output is then the plain swapper result. */
   polish_failed?: 'misaligned';
+  /** `head_swap`: the face's portrait at creation (an extra identity source for the sidecar). */
+  portrait_file_id?: string;
+  /** `head_swap`: settings snapshot (candidate templates + references, describe prompt, eye_keep; swapper → `options`). */
+  head_swap?: { candidates: HeadSwapCandidateSpec[]; describe_prompt: string; eye_keep: boolean };
+  /** `head_swap`: all successful candidates are outputs (best first) instead of only the best. */
+  all_candidates?: boolean;
+  /** `head_swap`: the target's description (null: the describe step failed; missing: not described yet). */
+  traits?: HeadTraits | null;
+  /** `head_swap`: credits of the describe turn paid by this job (0 when the description was cached). */
+  describe_credits?: number;
+  /** `head_swap`: per-candidate state, stored as it progresses (a resumed job only redoes what is missing). */
+  candidates?: HeadSwapCandidate[];
+  /** `head_swap`: index of the auto-selected best candidate (lowest cost). */
+  chosen?: number;
+}
+
+/** One Qoder candidate of a `head_swap` job (`request.face_swap.candidates[i]`). */
+export interface HeadSwapCandidate {
+  /** Index into `face_swap.head_swap.candidates` (the template + reference it was made from). */
+  template_index: number;
+  /** As configured. */
+  reference: HeadSwapReference;
+  /** After the fallback (`portrait`/`combo` → `primary` without a portrait). */
+  reference_used: HeadSwapReference;
+  /** Image 2 of the Qoder edit. */
+  reference_file_id: string;
+  /** The filled template sent to Qoder. */
+  prompt?: string;
+  /** Hidden conversation + upstream session of the candidate's Qoder turn (restart recovery). */
+  conversation_id?: string | null;
+  job_qoder_session?: string | null;
+  last_event_id?: string | null;
+  /** Credits of this candidate's Qoder turn(s), once finished. */
+  credits?: number | null;
+  /** Qoder's raw whole-photo candidate (not an output). */
+  file_id?: string;
+  /** The sidecar's head composite of this candidate (an output when chosen, or with `all_candidates`). */
+  composite_file_id?: string;
+  features?: HeadCompositeFeatures;
+  /** Selection cost (lower is better). */
+  cost?: number;
+  /** Where the composite ran. */
+  backend?: 'gpu' | 'cpu';
+  /** Set when the Qoder turn or the composite failed; the candidate is skipped. */
+  error?: { code: string; message: string } | null;
 }
 
 export interface VideoRequest {
@@ -375,6 +444,10 @@ export interface MediaServiceDeps {
   faceswap?: FaceSwapClient | null;
   /** Face swap settings (engine default, prompts, swapper options). Needed for face swaps. */
   faceSwapSettings?: FaceSwapSettingsService;
+  /** Vision describe step of `head_swap` (cached per target file); without it the templates use neutral wording. */
+  references?: ReferenceReader;
+  /** Head swap candidate Qoder turns in flight at once in this process (FIFO; each turn holds a slot only while it runs). Default 6. */
+  headSwapConcurrency?: number;
   /** Image upscaler; null/absent when no upscale backend is configured. */
   upscaler?: UpscaleClient | null;
   /** Web Push to the owner's browsers when a job finishes; absent/disabled = no notifications. */
@@ -402,7 +475,7 @@ const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
-const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_video: 150_000, faceswap: 15_000, upscale: 60_000 } as const;
+const EXPECTED_MS = { head_swap: 150_000, image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_video: 150_000, faceswap: 15_000, upscale: 60_000 } as const;
 /** A Folax video is given up after this long (the adapter's own job timeout is 15 min). */
 const FOLAX_VIDEO_MAX_MS = 20 * 60_000;
 /** Consecutive failed status polls (adapter unreachable, upstream hiccups) before a Folax video job fails. */
@@ -519,9 +592,12 @@ export class MediaService {
   private readonly timers = new Set<NodeJS.Timeout>();
   private readonly degradedAt = new Map<string, number>();
   private stopped = false;
+  /** Slots for head swap candidate turns (acquired per turn, never while holding another, so jobs cannot deadlock). */
+  private readonly headSlots: Semaphore;
 
   constructor(private readonly d: MediaServiceDeps) {
     this.pollMs = d.pollIntervalMs ?? 5000;
+    this.headSlots = new Semaphore(Math.max(1, d.headSwapConcurrency ?? 6));
   }
 
   /** Synchronous image generation (~30 s). Resolves when the job finished (completed or failed). */
@@ -613,6 +689,9 @@ export class MediaService {
    *   `qoder_crop_prompt`, then pastes it back into the original photo (sidecar).
    * - `swapper_polish`: n jobs; each runs the swapper (sidecar), then the `qoder_crop` flow on the swapped photo with
    *   `polish_prompt`. Every job does its own (cheap, deterministic) swapper step, so each job is self-contained.
+   * - `head_swap`: n jobs; each describes the target (cached per file), runs K whole-photo Qoder candidates in parallel
+   *   (`head_swap.candidates`), composites every finished candidate on the sidecar and outputs the lowest-cost one
+   *   (all successful ones, best first, with `allCandidates`).
    * Close-up engines retry the Qoder edit (new turn) when the sidecar rejects it as misaligned.
    * The engine defaults to the admin setting (falling back to `qoder` when that default is unavailable); an explicitly
    * requested engine that is not available is a 400 `engine_unavailable`.
@@ -639,7 +718,7 @@ export class MediaService {
       face_name: req.face.name,
       engine,
       face_file_id: req.face.fileId,
-      ...(engine !== 'qoder' ? { options: settings.swapper } : {}),
+      ...(engine !== 'qoder' ? { options: engine === 'head_swap' ? settings.head_swap.swapper : settings.swapper } : {}),
       ...(isCloseUpEngine(engine) ? { crop_expand: settings.crop_expand } : {}),
       ...(req.tag ? { tag: req.tag } : {}),
     };
@@ -654,6 +733,29 @@ export class MediaService {
         { ...base, prompt: `Face swap: ${req.face.name}`, size: '1024x1024', provider: 'qoder', extra: { face_swap: info, provider: 'faceswap', provider_used: 'faceswap' } },
         1,
       );
+    if (engine === 'head_swap') {
+      const hs = settings.head_swap;
+      const portrait = req.face.portraitFileId ?? null;
+      const combo = portrait && req.face.combo && hs.candidates.some((c) => c.reference === 'combo') ? await req.face.combo() : null;
+      const refOf = (r: HeadSwapReference): { used: HeadSwapReference; id: string } =>
+        r === 'portrait' && portrait ? { used: 'portrait', id: portrait } : r === 'combo' && combo ? { used: 'combo', id: combo } : { used: 'primary', id: req.face.fileId };
+      const candidates = hs.candidates.map((c, i): HeadSwapCandidate => {
+        const ref = refOf(c.reference);
+        return { template_index: i, reference: c.reference, reference_used: ref.used, reference_file_id: ref.id };
+      });
+      const { width, height } = await imageSizeOf(this.d.store.pathOf(target!.file));
+      const headInfo: FaceSwapJobInfo = {
+        ...info,
+        ...(portrait ? { portrait_file_id: portrait } : {}),
+        head_swap: { candidates: hs.candidates, describe_prompt: hs.describe_prompt, eye_keep: hs.eye_keep },
+        ...(req.allCandidates ? { all_candidates: true } : {}),
+        candidates,
+      };
+      return this.createImageBatch(
+        { ...base, prompt: `Face swap: ${req.face.name}`, size: largestImageSize(width, height), provider: 'qoder', extra: { face_swap: headInfo } },
+        n,
+      );
+    }
     if (isCloseUpEngine(engine)) {
       const prompt = engine === 'swapper_polish' ? settings.polish_prompt : settings.qoder_crop_prompt;
       return this.createImageBatch({ ...base, prompt, size: '1024x1024', provider: 'qoder', extra: { face_swap: info } }, n);
@@ -990,6 +1092,7 @@ export class MediaService {
       let current = job;
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
+      if (engine === 'head_swap') return await this.finish(job.id, await this.runHeadSwap(job));
       if (isCloseUpEngine(engine)) current = await this.prepareFaceCrop(job);
       if (usesFolaxVideo(job)) {
         const outcome = await this.runFolaxVideo(job);
@@ -1009,6 +1112,8 @@ export class MediaService {
       const outcome = await this.runQoderWithRetry(current);
       await this.finish(job.id, isCloseUpEngine(engine) ? await this.completeFaceCrop(current, outcome) : outcome);
     } catch (err) {
+      // the server is stopping mid-job: it stays in_progress and resumes after the restart
+      if (err instanceof ServerStopping) return;
       const e = toAppError(err);
       log.error('media.job_failed', { code: e.code, err: e.message });
       await this.finish(job.id, { fileIds: [], credits: null, error: { code: e.code, message: e.message } }).catch((e2) =>
@@ -1047,19 +1152,23 @@ export class MediaService {
    * Each kind has its own retry schedule.
    */
   private async runQoderWithRetry(job: MediaJob): Promise<Outcome> {
+    return this.withQoderRetry(job.id, () => this.runQoder(job));
+  }
+
+  private async withQoderRetry(jobId: string, runOnce: () => Promise<Outcome>): Promise<Outcome> {
     const schedules: Record<string, number[]> = {
       upstream_queue_full: this.d.queueRetryDelaysMs ?? DEFAULT_QUEUE_RETRY_DELAYS_MS,
       upstream_draining: this.d.drainingRetryDelaysMs ?? DEFAULT_DRAINING_RETRY_DELAYS_MS,
     };
     const attempts: Record<string, number> = {};
     for (;;) {
-      const outcome = await this.runQoder(job);
+      const outcome = await runOnce();
       const code = outcome.error?.code;
       const delays = code ? schedules[code] : undefined;
       const attempt = code ? (attempts[code] ?? 0) : 0;
       if (!code || !delays || attempt >= delays.length || this.stopped) return outcome;
       attempts[code] = attempt + 1;
-      this.d.log.warn(code === 'upstream_draining' ? 'media.draining_retry' : 'media.queue_full_retry', { jobId: job.id, attempt: attempt + 1, waitMs: delays[attempt] });
+      this.d.log.warn(code === 'upstream_draining' ? 'media.draining_retry' : 'media.queue_full_retry', { jobId, attempt: attempt + 1, waitMs: delays[attempt] });
       await new Promise((r) => setTimeout(r, delays[attempt]));
     }
   }
@@ -1388,6 +1497,220 @@ export class MediaService {
     }
   }
 
+  // ── head swap ───────────────────────────────────────────────────────────
+
+  /**
+   * `head_swap`: describe → K Qoder candidates in parallel → one sidecar head composite per finished candidate → select.
+   * Every step is stored on the job as it finishes (`face_swap.traits`, `face_swap.candidates[i]`), so a job re-run after
+   * a restart skips finished work: a candidate whose Qoder turn was cut off is recovered from its session's events
+   * (never paid twice), one whose turn never reached Qoder starts again. Candidates that fail are skipped; the job fails
+   * (`head_swap_failed`) only when none produced a composite. Credits = describe turn (if this job paid it) + every
+   * candidate turn.
+   */
+  private async runHeadSwap(job: MediaJob): Promise<Outcome> {
+    if (!this.d.faceswap) throw new AppError(503, 'faceswap_unavailable', 'The face swap service is not configured');
+    let fs = job.request.face_swap as FaceSwapJobInfo;
+    const hs = fs.head_swap ?? DEFAULT_HEAD_SWAP_SETTINGS;
+    if (fs.traits === undefined) {
+      const d = this.d.references
+        ? await this.d.references.describeHead(fs.source_file_id, job.userId, { prompt: hs.describe_prompt, jobId: job.id })
+        : { traits: null, cached: false, credits: 0 };
+      await this.patchFaceSwap(job.id, { traits: d.traits, describe_credits: d.credits });
+      fs = { ...fs, traits: d.traits, describe_credits: d.credits };
+    }
+    const [target] = await this.loadInputs(job.userId, [fs.source_file_id]);
+    const original = await this.d.store.read(target!.file);
+    const identity = await this.loadInputs(job.userId, [faceFileIdOf(job), ...(fs.portrait_file_id ? [fs.portrait_file_id] : [])]);
+    const sources = await Promise.all(identity.map((i) => this.d.store.read(i.file)));
+    const ctx = { job, fs, hs, original, sources, targetName: target!.file.filename };
+    await Promise.all((fs.candidates ?? []).map((c, i) => this.runHeadCandidate(ctx, i, c)));
+    if (this.stopped) throw new ServerStopping();
+    return this.selectHeadSwap(job.id);
+  }
+
+  /** One candidate: its Qoder turn (new or recovered), then its head composite. Failures end up on the candidate. */
+  private async runHeadCandidate(
+    x: { job: MediaJob; fs: FaceSwapJobInfo; hs: NonNullable<FaceSwapJobInfo['head_swap']>; original: Buffer; sources: Buffer[]; targetName: string },
+    i: number,
+    c: HeadSwapCandidate,
+  ): Promise<void> {
+    const { job } = x;
+    if (c.error || c.composite_file_id) return;
+    let cand = c;
+    const fail = async (err: unknown) => {
+      const e = toAppError(err);
+      this.d.log.warn('media.head_swap_candidate_failed', { jobId: job.id, candidate: i, code: e.code, err: e.message });
+      await this.patchCandidate(job.id, i, { error: { code: e.code, message: e.message } });
+    };
+    if (!cand.file_id) {
+      const spec = x.hs.candidates[cand.template_index] ?? x.hs.candidates[0]!;
+      const prompt = cand.prompt ?? fillHeadSwapTemplate(spec.template, x.fs.traits);
+      if (!cand.prompt) cand = { ...cand, ...(await this.patchCandidate(job.id, i, { prompt })) };
+      let outcome: Outcome;
+      try {
+        outcome = await this.headCandidateTurn(job, i, cand, prompt);
+      } catch (err) {
+        if (err instanceof ServerStopping) return;
+        return fail(err);
+      }
+      const outputs = outcome.fileIds.length ? await this.d.db.select().from(files).where(inArray(files.id, outcome.fileIds)) : [];
+      const raw = outcome.fileIds.map((id) => outputs.find((f) => f.id === id)).find((f) => f?.mimeType.startsWith('image/'));
+      if (outcome.error || !raw) {
+        const error = outcome.error ?? { code: 'no_output', message: 'Qoder did not deliver a candidate' };
+        this.d.log.warn('media.head_swap_candidate_failed', { jobId: job.id, candidate: i, code: error.code });
+        await this.patchCandidate(job.id, i, { credits: outcome.credits, error });
+        return;
+      }
+      cand = { ...cand, ...(await this.patchCandidate(job.id, i, { credits: outcome.credits, file_id: raw.id })) };
+    }
+    try {
+      const raw = await this.d.store.get(cand.file_id!, job.userId);
+      const r = await this.d.faceswap!.headComposite(x.original, await this.d.store.read(raw), x.sources, { swapper: x.fs.options, eye_keep: x.hs.eye_keep });
+      this.d.log.info('faceswap.head_composite', { jobId: job.id, candidate: i, backend: r.backend, features: r.features, timings_ms: r.timingsMs });
+      const file = await this.d.store.save({
+        userId: job.userId,
+        kind: 'artifact',
+        filename: `faceswap-${baseName(x.targetName)}-${i + 1}.${extOf(r.mimeType)}`,
+        mimeType: r.mimeType,
+        bytes: r.bytes,
+        jobId: job.id,
+      });
+      await this.patchCandidate(job.id, i, { composite_file_id: file.id, features: r.features, cost: Math.round(headSwapCost(r.features) * 10000) / 10000, backend: r.backend });
+    } catch (err) {
+      await fail(err);
+    }
+  }
+
+  /**
+   * The candidate's Qoder turn: recovered from its session when a restart cut it off, else a new turn (with the usual
+   * queue-full/draining re-submits; each attempt holds a head swap slot only while it runs). Credits add up over attempts.
+   */
+  private async headCandidateTurn(job: MediaJob, i: number, cand: HeadSwapCandidate, prompt: string): Promise<Outcome> {
+    if (cand.job_qoder_session) {
+      const recovered = await this.recoverHeadCandidate(job, i, cand);
+      if (recovered) return recovered;
+    }
+    let spent: number | null = null;
+    const outcome = await this.withQoderRetry(job.id, async () => {
+      if (this.stopped) throw new ServerStopping();
+      const release = await this.headSlots.acquire();
+      try {
+        const o = await this.startHeadCandidateTurn(job, i, cand, prompt);
+        if (o.credits !== null) spent = (spent ?? 0) + o.credits;
+        return o;
+      } finally {
+        release();
+      }
+    });
+    return { ...outcome, credits: spent };
+  }
+
+  private async startHeadCandidateTurn(job: MediaJob, i: number, cand: HeadSwapCandidate, prompt: string): Promise<Outcome> {
+    const fs = job.request.face_swap as FaceSwapJobInfo;
+    const inputs = await this.loadInputs(job.userId, [fs.source_file_id, cand.reference_file_id]);
+    const conv = await this.d.conversations.create({
+      userId: job.userId,
+      profile: 'image',
+      model: 'default',
+      title: `image: head swap candidate ${i + 1}`,
+      metadata: { hidden: true, job_id: job.id, head_swap_candidate: i },
+    });
+    await this.patchCandidate(job.id, i, { conversation_id: conv.id, job_qoder_session: null, last_event_id: null });
+    const content: ContentBlock[] = [
+      { type: 'text', text: imageInstruction({ size: job.request.size, prompt }, inputs) },
+      ...inputs.map((x): ContentBlock => ({ type: 'document', fileId: x.file.id, filename: x.file.filename, mimeType: x.file.mimeType })),
+    ];
+    const handle = await this.d.turns.start({ conversationId: conv.id, userId: job.userId, content, kind: 'image', jobId: job.id, oneShot: true });
+    void (async () => {
+      for await (const e of handle.iterate()) {
+        if (e.type !== 'turn.started') continue;
+        const c = await this.d.conversations.get(conv.id).catch(() => null);
+        if (c?.qoderSessionId) await this.patchCandidate(job.id, i, { job_qoder_session: c.qoderSessionId }).catch(() => {});
+        return;
+      }
+    })();
+    const result = await handle.done;
+    return outcomeOf(result, generatorErrors(handle.events));
+  }
+
+  /**
+   * A candidate turn cut off by a restart: read its session's events (from the candidate's cursor) until the session is
+   * idle, saving delivered artifacts. null when the turn never reached Qoder (start a new one).
+   */
+  private async recoverHeadCandidate(job: MediaJob, i: number, cand: HeadSwapCandidate): Promise<Outcome | null> {
+    const sessionId = cand.job_qoder_session!;
+    const conversationId = cand.conversation_id ?? null;
+    this.d.log.info('media.head_swap_candidate_resume', { jobId: job.id, candidate: i, sessionId });
+    const st: ResumeState = { cursor: cand.last_event_id ?? null, sawMessage: !!cand.last_event_id, fileIds: [], credits: null, error: null };
+    const deadline = Date.now() + MAX_RECOVERY_MS;
+    for (;;) {
+      if (this.stopped) throw new ServerStopping();
+      let done = false;
+      for (;;) {
+        const page = await this.d.qoder.listEvents(sessionId, { limit: 100, afterId: st.cursor ?? undefined });
+        for (const ev of page.data) {
+          if (ev.id) st.cursor = ev.id;
+          if (await this.applyEvent(job, conversationId, ev, st)) {
+            done = true;
+            break;
+          }
+        }
+        if (st.cursor) await this.patchCandidate(job.id, i, { last_event_id: st.cursor });
+        if (done || !page.has_more || !page.data.length) break;
+      }
+      if (done) break;
+      if (!st.sawMessage && (await this.sessionIdle(sessionId))) {
+        await this.patchCandidate(job.id, i, { job_qoder_session: null, last_event_id: null });
+        return null;
+      }
+      if (Date.now() > deadline) {
+        st.error = { code: 'timeout', message: 'The candidate did not finish in time' };
+        break;
+      }
+      await new Promise((r) => setTimeout(r, this.pollMs));
+    }
+    if (st.credits) await this.d.usage.record({ userId: job.userId, kind: 'image', conversationId: conversationId ?? undefined, jobId: job.id, credits: st.credits });
+    await this.releaseSession(sessionId, conversationId);
+    return { fileIds: st.fileIds, credits: st.credits?.total ?? null, error: st.error };
+  }
+
+  /** Pick the lowest-cost composite; outputs = it (or every composite, best first, with `all_candidates`). */
+  private async selectHeadSwap(jobId: string): Promise<Outcome> {
+    const [row] = await this.d.db.select().from(mediaJobs).where(eq(mediaJobs.id, jobId));
+    const fs = row!.request.face_swap as FaceSwapJobInfo;
+    const cands = fs.candidates ?? [];
+    const paid = cands.flatMap((c) => (typeof c.credits === 'number' ? [c.credits] : []));
+    const credits = paid.length || fs.describe_credits ? Math.round(((fs.describe_credits ?? 0) + paid.reduce((a, b) => a + b, 0)) * 1e6) / 1e6 : null;
+    const ok = cands
+      .map((c, i) => ({ c, i }))
+      .filter((x) => x.c.composite_file_id && typeof x.c.cost === 'number')
+      .sort((a, b) => a.c.cost! - b.c.cost! || a.i - b.i);
+    if (!ok.length) {
+      const reasons = [...new Set(cands.map((c) => c.error?.code ?? 'unknown'))].join(', ');
+      return { fileIds: [], credits, error: { code: 'head_swap_failed', message: `All ${cands.length} head swap candidates failed (${reasons})` } };
+    }
+    await this.patchFaceSwap(jobId, { chosen: ok[0]!.i });
+    return { fileIds: fs.all_candidates ? ok.map((x) => x.c.composite_file_id!) : [ok[0]!.c.composite_file_id!], credits, error: null };
+  }
+
+  /** Merge fields into `request.face_swap` atomically (parallel candidates write the same row). */
+  private async patchFaceSwap(jobId: string, patch: Partial<FaceSwapJobInfo>) {
+    await this.d.db
+      .update(mediaJobs)
+      .set({ request: sql`jsonb_set(${mediaJobs.request}, '{face_swap}', coalesce(${mediaJobs.request}->'face_swap', '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb)` })
+      .where(eq(mediaJobs.id, jobId));
+  }
+
+  /** Merge fields into `request.face_swap.candidates[i]` atomically; returns the patch. */
+  private async patchCandidate<T extends Partial<HeadSwapCandidate>>(jobId: string, i: number, patch: T): Promise<T> {
+    const path = `{face_swap,candidates,${i}}`;
+    await this.d.db
+      .update(mediaJobs)
+      .set({ request: sql`jsonb_set(${mediaJobs.request}, ${path}::text[], coalesce(${mediaJobs.request} #> ${path}::text[], '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb)` })
+      .where(eq(mediaJobs.id, jobId));
+    return patch;
+  }
+
   /** Folax failed: tell admins about auth problems; `auto` jobs continue on Qoder, explicit `folax` jobs fail. */
   private async fallBackFromFolax(job: MediaJob, err: AppError): Promise<MediaJob> {
     this.d.log.warn('media.folax_failed', { jobId: job.id, code: err.code, err: err.message });
@@ -1420,7 +1743,7 @@ export class MediaService {
   /** Time-based progress estimate (upstream reports none), capped at 95 until the job is done. */
   private trackProgress(job: MediaJob, startedAt: Date): () => void {
     const edit = folaxEditOf(job);
-    const base = edit ? EXPECTED_MS.folax_edit : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : upscaleOf(job) ? EXPECTED_MS.upscale : EXPECTED_MS[job.kind];
+    const base = faceSwapEngineOf(job) === 'head_swap' ? EXPECTED_MS.head_swap : edit ? EXPECTED_MS.folax_edit : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : upscaleOf(job) ? EXPECTED_MS.upscale : EXPECTED_MS[job.kind];
     const expected = base * (job.kind === 'video' && !usesFolaxVideo(job) ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
     let last = 0;
     const timer = setInterval(() => {
@@ -1504,6 +1827,8 @@ export class MediaService {
       if (this.stopped) return;
       if (this.active.has(job.id) || this.queue.includes(job.id) || this.runningVideos.has(job.id)) continue;
       if (job.status === 'queued') this.schedule(job);
+      // head swap keeps per-candidate state (sessions, cursors): re-running it recovers or redoes only what is missing
+      else if (faceSwapEngineOf(job) === 'head_swap') void this.run(job);
       else void this.resumeInProgress(job);
     }
   }
@@ -1716,6 +2041,13 @@ export class MediaService {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/** Thrown inside a job when the server stops: the job stays in_progress and resumes after the restart. */
+class ServerStopping extends Error {
+  constructor() {
+    super('server stopping');
+  }
+}
 
 interface Outcome {
   fileIds: string[];

@@ -14,8 +14,11 @@ import type { FaceSwapClient, SwapperOptions } from '../providers/faceswap.js';
  *   the sidecar blends it back into the original photo.
  * - `swapper_polish`: `swapper` first (kept as an internal file), then the `qoder_crop` flow on the swapped photo with
  *   `polish_prompt` (Qoder retouches the close-up for realism, the sidecar pastes it back onto the swapped photo).
+ * - `head_swap`: a vision model describes the target's hair/expression/angle, K whole-photo Qoder candidates rebuild the
+ *   head like the face, the sidecar (`/v1/head-composite`) aligns each one, runs the swapper on it, keeps Qoder's eyes and
+ *   blends the head into the untouched original; the candidate with the lowest cost wins.
  */
-export const FACE_SWAP_ENGINES = ['swapper_polish', 'swapper', 'qoder', 'qoder_crop'] as const;
+export const FACE_SWAP_ENGINES = ['head_swap', 'swapper_polish', 'swapper', 'qoder', 'qoder_crop'] as const;
 export type FaceSwapEngine = (typeof FACE_SWAP_ENGINES)[number];
 
 const KEEP_FROM_TARGET =
@@ -52,6 +55,83 @@ export const FACE_SWAP_POLISH_PROMPT =
   'expression, head pose, hair strands, hair ornaments, clothing, lighting, colours, background and the exact framing of image 1. ' +
   'Output one square photo.';
 
+/** Which image of the face a head swap candidate shows Qoder as image 2. */
+export const HEAD_SWAP_REFERENCES = ['primary', 'portrait', 'combo'] as const;
+export type HeadSwapReference = (typeof HEAD_SWAP_REFERENCES)[number];
+/** Placeholders a head swap candidate template may use; filled from the target's description. */
+export const HEAD_SWAP_PLACEHOLDERS = ['hair', 'expression', 'angle'] as const;
+export type HeadTraits = Record<(typeof HEAD_SWAP_PLACEHOLDERS)[number], string>;
+
+/** Head swap template "Q5": keeps the described hair, expression and angle of image 1, takes face and bangs of image 2. */
+export const HEAD_SWAP_Q5_TEMPLATE =
+  'Swap the face of the person in image 1 with the face of the person in image 2, so she looks exactly like the person in image 2: ' +
+  'the same eyes, eyebrows, nose, mouth, face shape and bangs/fringe. ' +
+  'Keep her head size, neck and the natural proportions of a real face: do not squash, widen or shrink the face. ' +
+  'In image 1 she has {hair}: keep exactly that hair colour and the rest of that hairstyle, only give her the bangs of image 2. ' +
+  'Her expression in image 1 is: {expression}. Keep that same expression. ' +
+  'Keep everything else in image 1 exactly the same: head angle ({angle}), pose, clothes, background and lighting. ' +
+  'Return one photo with the same composition as image 1, never a grid or collage.';
+
+/** Head swap template "Q4" (no placeholders): image 2 is the identity reference. */
+export const HEAD_SWAP_Q4_PROMPT =
+  'Make the person in image 1 the same person as in image 2. Image 2 is the identity reference: copy her exact face (eyes, eyebrows, ' +
+  'nose, mouth, cheeks, jaw, face shape), her skin and her bangs/fringe, so friends would recognise her instantly. Fit the new face ' +
+  'naturally to the head in image 1 with real, unsquashed proportions. From image 1 keep: head angle and gaze, a similar expression, ' +
+  'original hair colour, hairstyle and hair accessories, body, clothes, background, lighting and framing. Photorealistic, one single ' +
+  'photo with the same composition as image 1, never a grid or collage.';
+
+/** Vision prompt of the head swap describe step (one image: the target). */
+export const HEAD_SWAP_DESCRIBE_PROMPT =
+  'Look at the person in the attached photo and describe them for a photo editor, in short English phrases. ' +
+  "hair: exact hair colour and how it is styled; expression: the facial expression precisely (e.g. 'wide open-mouth smile showing upper teeth'); " +
+  'angle: head angle in a few words. Reply with JSON only, no code fences: {"hair": "…", "expression": "…", "angle": "…"}';
+
+export interface HeadSwapCandidateSpec {
+  /** Qoder prompt; `{hair}`, `{expression}` and `{angle}` are filled from the target's description. */
+  template: string;
+  /** `portrait`/`combo` fall back to `primary` when the face has no portrait. */
+  reference: HeadSwapReference;
+}
+
+export interface HeadSwapSettings {
+  /** One Qoder candidate per entry (1–6), all run in parallel per output image. */
+  candidates: HeadSwapCandidateSpec[];
+  describe_prompt: string;
+  /** Swapper options of the sidecar's head composite (it swaps the identity into each Qoder candidate). */
+  swapper: SwapperOptions;
+  /** Blend the eyes of Qoder's candidate back over the swapper's result. */
+  eye_keep: boolean;
+}
+
+export const HEAD_SWAP_MAX_CANDIDATES = 6;
+
+export const DEFAULT_HEAD_SWAP_SETTINGS: HeadSwapSettings = {
+  candidates: [
+    { template: HEAD_SWAP_Q5_TEMPLATE, reference: 'portrait' },
+    { template: HEAD_SWAP_Q5_TEMPLATE, reference: 'combo' },
+    { template: HEAD_SWAP_Q4_PROMPT, reference: 'portrait' },
+  ],
+  describe_prompt: HEAD_SWAP_DESCRIBE_PROMPT,
+  swapper: { target_faces: 'largest', identity_mode: 'average', det_thresh: 0.5, restorer: 'gfpgan', restore_blend: 0.8, codeformer_fidelity: 0.7 },
+  eye_keep: true,
+};
+
+/** Unknown description values (the describe step failed): the templates still read naturally. */
+const UNKNOWN_TRAITS: HeadTraits = { hair: 'the hair shown in image 1', expression: 'the expression shown in image 1', angle: 'as in image 1' };
+
+/** A candidate template with its placeholders filled (`traits` null = the describe step failed). */
+export function fillHeadSwapTemplate(template: string, traits: Partial<HeadTraits> | null | undefined): string {
+  return template.replace(/\{(hair|expression|angle)\}/g, (_, k: keyof HeadTraits) => {
+    const v = traits?.[k]?.replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
+    return v || UNKNOWN_TRAITS[k];
+  });
+}
+
+/** Selection cost of a head swap candidate (lower is better): hair colour kept, expression kept, identity strong. */
+export function headSwapCost(f: { hair_dE: number; d_expr: number; identity: number }): number {
+  return Math.min(f.hair_dE, 40) / 10 + f.d_expr * 4 - f.identity * 2;
+}
+
 export interface FaceSwapSettings {
   default_engine: FaceSwapEngine;
   qoder_prompt: string;
@@ -60,15 +140,17 @@ export interface FaceSwapSettings {
   /** Crop side = crop_expand × the face's larger side. */
   crop_expand: number;
   swapper: SwapperOptions;
+  head_swap: HeadSwapSettings;
 }
 
 export const DEFAULT_FACE_SWAP_SETTINGS: FaceSwapSettings = {
-  default_engine: 'swapper_polish',
+  default_engine: 'head_swap',
   qoder_prompt: FACE_SWAP_PROMPT,
   qoder_crop_prompt: FACE_SWAP_CROP_PROMPT,
   polish_prompt: FACE_SWAP_POLISH_PROMPT,
   crop_expand: 2.2,
   swapper: { target_faces: 'largest', identity_mode: 'average', det_thresh: 0.5, restorer: 'codeformer', restore_blend: 0.8, codeformer_fidelity: 0.7 },
+  head_swap: DEFAULT_HEAD_SWAP_SETTINGS,
 };
 
 export const FACE_SWAP_PROMPT_MAX = 4000;
@@ -91,27 +173,67 @@ const settingsFields = {
   crop_expand: z.number().min(1.2).max(4),
 };
 
+const headTemplate = prompt.refine((t) => [...t.matchAll(/\{([A-Za-z_]+)\}/g)].every((m) => (HEAD_SWAP_PLACEHOLDERS as readonly string[]).includes(m[1]!)), {
+  message: `placeholders must be one of ${HEAD_SWAP_PLACEHOLDERS.map((p) => `{${p}}`).join(', ')}`,
+});
+const headSwapCandidate = z.object({ template: headTemplate, reference: z.enum(HEAD_SWAP_REFERENCES) }).strict();
+
 const nullable = <T extends Record<string, z.ZodType>>(fields: T) =>
   Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.nullable().optional()])) as { [K in keyof T]: z.ZodOptional<z.ZodNullable<T[K]>> };
 
-/** `PUT /admin/face-swap/settings`: any subset; `null` resets a field (or the whole `swapper` block) to its default. */
+const swapperPatch = z.object(nullable(swapperFields)).strict();
+const headSwapPatch = z
+  .object({
+    candidates: z.array(headSwapCandidate).min(1).max(HEAD_SWAP_MAX_CANDIDATES).nullable().optional(),
+    describe_prompt: prompt.nullable().optional(),
+    swapper: swapperPatch.nullable().optional(),
+    eye_keep: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+/**
+ * `PUT /admin/face-swap/settings`: any subset; `null` resets a field (or the whole `swapper` / `head_swap` block, or a
+ * field inside `head_swap`) to its default. `head_swap.candidates` is replaced as a whole list.
+ */
 export const faceSwapSettingsPatch = z
-  .object({ ...nullable(settingsFields), swapper: z.object(nullable(swapperFields)).strict().nullable().optional() })
+  .object({ ...nullable(settingsFields), swapper: swapperPatch.nullable().optional(), head_swap: headSwapPatch.nullable().optional() })
   .strict();
 export type FaceSwapSettingsPatch = z.infer<typeof faceSwapSettingsPatch>;
 
 /** Overrides as stored in `kv` (only what differs from the built-in defaults, so new defaults apply to untouched fields). */
-type Overrides = Partial<Omit<FaceSwapSettings, 'swapper'>> & { swapper?: Partial<SwapperOptions> };
+type HeadSwapOverrides = Partial<Omit<HeadSwapSettings, 'swapper'>> & { swapper?: Partial<SwapperOptions> };
+type Overrides = Partial<Omit<FaceSwapSettings, 'swapper' | 'head_swap'>> & { swapper?: Partial<SwapperOptions>; head_swap?: HeadSwapOverrides };
 
 /** Effective settings = defaults + a patch (without nulls, e.g. a test's `settings_override`). */
 export function applyPatch(base: FaceSwapSettings, patch: FaceSwapSettingsPatch | undefined): FaceSwapSettings {
   if (!patch) return base;
-  const { swapper, ...top } = patch;
+  const { swapper, head_swap, ...top } = patch;
+  const hs = head_swap ? stripNulls(head_swap) : {};
   return {
     ...base,
     ...stripNulls(top),
     swapper: { ...base.swapper, ...(swapper ? stripNulls(swapper) : {}) },
+    head_swap: {
+      ...base.head_swap,
+      ...hs,
+      swapper: { ...base.head_swap.swapper, ...(head_swap?.swapper ? stripNulls(head_swap.swapper) : {}) },
+    },
   } as FaceSwapSettings;
+}
+
+/** Merge a patch into stored overrides: `null` deletes an override, nested objects merge, empty objects disappear. */
+function mergeOverrides(current: Record<string, unknown>, patch: Record<string, unknown>, nested: string[]): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    if (v === null) delete next[k];
+    else if (nested.includes(k) && typeof v === 'object' && !Array.isArray(v)) {
+      const merged = mergeOverrides((next[k] as Record<string, unknown> | undefined) ?? {}, v as Record<string, unknown>, k === 'head_swap' ? ['swapper'] : []);
+      if (Object.keys(merged).length) next[k] = merged;
+      else delete next[k];
+    } else next[k] = v;
+  }
+  return next;
 }
 
 const stripNulls = <T extends Record<string, unknown>>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined)) as Partial<T>;
@@ -124,7 +246,7 @@ export interface FaceSwapSidecarStatus {
 
 /**
  * Admin-editable face swap settings (`kv` key `face_swap.settings`), cached in memory, plus engine availability.
- * `swapper`, `swapper_polish` and `qoder_crop` need the faceswap sidecar (configured and ready); `qoder` is always available.
+ * `head_swap`, `swapper`, `swapper_polish` and `qoder_crop` need the faceswap sidecar (configured and ready); `qoder` is always available.
  */
 export class FaceSwapSettingsService {
   private overrides: Overrides = {};
@@ -149,22 +271,7 @@ export class FaceSwapSettingsService {
       const issues = r.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message }));
       throw badRequest(issues.map((i) => (i.path ? `${i.path}: ${i.message}` : i.message)).join('; '), 'validation_error', { issues });
     }
-    const { swapper, ...top } = r.data;
-    const next: Overrides = { ...this.overrides };
-    for (const [k, v] of Object.entries(top) as [keyof typeof top, unknown][]) {
-      if (v === null) delete next[k];
-      else if (v !== undefined) (next as Record<string, unknown>)[k] = v;
-    }
-    if (swapper === null) delete next.swapper;
-    else if (swapper) {
-      const s: Partial<SwapperOptions> = { ...next.swapper };
-      for (const [k, v] of Object.entries(swapper) as [keyof SwapperOptions, unknown][]) {
-        if (v === null) delete s[k];
-        else if (v !== undefined) (s as Record<string, unknown>)[k] = v;
-      }
-      if (Object.keys(s).length) next.swapper = s;
-      else delete next.swapper;
-    }
+    const next = mergeOverrides(this.overrides as Record<string, unknown>, r.data as Record<string, unknown>, ['swapper', 'head_swap']) as Overrides;
     if (Object.keys(next).length) {
       await this.d.db
         .insert(kv)
@@ -195,6 +302,12 @@ export class FaceSwapSettingsService {
 
   async engines(): Promise<Record<FaceSwapEngine, { available: boolean }>> {
     const sidecar = await this.available('swapper');
-    return { swapper_polish: { available: sidecar }, swapper: { available: sidecar }, qoder: { available: true }, qoder_crop: { available: sidecar } };
+    return {
+      head_swap: { available: sidecar },
+      swapper_polish: { available: sidecar },
+      swapper: { available: sidecar },
+      qoder: { available: true },
+      qoder_crop: { available: sidecar },
+    };
   }
 }

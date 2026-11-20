@@ -77,6 +77,25 @@ describe('FaceSwapClient GPU first', () => {
     expect(s.calls.some((c) => c.startsWith(`POST ${CPU}`))).toBe(false);
   });
 
+  it('head composite: GPU first, CPU fallback when the GPU fails, no fallback on NO_FACE_IN_GENERATED', async () => {
+    const composite = (device: string) => ({
+      status: 200,
+      body: { image: Buffer.from(device).toString('base64'), mime_type: 'image/jpeg', width: 4, height: 3, features: { hair_dE: 5, d_expr: 0.1, identity: 0.6, aligned: true, fallback: false, inliers: 42 }, timings_ms: { total: 3 } },
+    });
+    const ok = stub({ [`${GPU} /health/ready`]: [gpuReady], [`${GPU} /v1/head-composite`]: [composite('cuda')] });
+    const r = await client(ok.fetchImpl).headComposite(IMG, IMG, [IMG], { eye_keep: true });
+    expect(r).toMatchObject({ backend: 'gpu', width: 4, features: { hair_dE: 5, d_expr: 0.1, identity: 0.6, aligned: true, fallback: false, inliers: 42 } });
+    expect(r.bytes.toString()).toBe('cuda');
+
+    const down = stub({ [`${GPU} /health/ready`]: [gpuReady], [`${GPU} /v1/head-composite`]: ['throw'], [`${CPU} /v1/head-composite`]: [composite('cpu')] });
+    expect((await client(down.fetchImpl).headComposite(IMG, IMG, [IMG])).backend).toBe('cpu');
+
+    const noFace = stub({ [`${GPU} /health/ready`]: [gpuReady], [`${GPU} /v1/head-composite`]: [{ status: 422, body: { detail: 'NO_FACE_IN_GENERATED' } }] });
+    const err = await client(noFace.fetchImpl).headComposite(IMG, IMG, [IMG]).catch((e) => e);
+    expect((err as AppError).code).toBe('no_face_in_generated');
+    expect(noFace.calls.some((c) => c.startsWith(`POST ${CPU}`))).toBe(false);
+  });
+
   it('keeps crop and paste on the CPU sidecar, and works without a GPU configured', async () => {
     const s = stub({ [`${CPU} /v1/face-crop`]: [{ status: 200, body: { crop: 'eA==', box: [1, 2, 3, 3], faces: 1 } }], [`${CPU} /v1/swap`]: [swapped('cpu')] });
     await client(s.fetchImpl).crop(IMG);

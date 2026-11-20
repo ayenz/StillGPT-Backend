@@ -234,6 +234,8 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     folax,
     faceswap,
     faceSwapSettings,
+    references,
+    headSwapConcurrency: config.HEAD_SWAP_TURN_CONCURRENCY,
     upscaler,
     push,
     fcm,

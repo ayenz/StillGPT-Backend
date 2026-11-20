@@ -130,8 +130,14 @@ describe('GET /face-swap/config', () => {
     const r = await json(await h.api('/api/v1/face-swap/config'));
     expect(r.status).toBe(200);
     expect(r.body).toEqual({
-      default_engine: 'swapper_polish',
-      engines: { swapper_polish: { available: true }, swapper: { available: true }, qoder: { available: true }, qoder_crop: { available: true } },
+      default_engine: 'head_swap',
+      engines: {
+        head_swap: { available: true },
+        swapper_polish: { available: true },
+        swapper: { available: true },
+        qoder: { available: true },
+        qoder_crop: { available: true },
+      },
       max_n: 4,
     });
   });
@@ -140,10 +146,16 @@ describe('GET /face-swap/config', () => {
     sidecar.setReady(false);
     await h.ctx.faceswap!.readiness(true);
     const r = await json(await h.api('/api/v1/face-swap/config'));
-    expect(r.body.engines).toEqual({ swapper_polish: { available: false }, swapper: { available: false }, qoder: { available: true }, qoder_crop: { available: false } });
+    expect(r.body.engines).toEqual({
+      head_swap: { available: false },
+      swapper_polish: { available: false },
+      swapper: { available: false },
+      qoder: { available: true },
+      qoder_crop: { available: false },
+    });
 
     const { target, face } = await setup();
-    // no engine given: the unavailable default (swapper_polish) falls back to whole-image qoder
+    // no engine given: the unavailable default (head_swap) falls back to whole-image qoder
     const def = await json(await swap(target.id, { face_id: face.id }));
     expect(def.status).toBe(202);
     expect(def.body.jobs[0].request.face_swap.engine).toBe('qoder');
@@ -151,6 +163,7 @@ describe('GET /face-swap/config', () => {
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'swapper' }))).body.error.code).toBe('engine_unavailable');
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'qoder_crop' }))).body.error.code).toBe('engine_unavailable');
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.error.code).toBe('engine_unavailable');
+    expect((await json(await swap(target.id, { face_id: face.id, engine: 'head_swap' }))).body.error.code).toBe('engine_unavailable');
     const q = await json(await swap(target.id, { face_id: face.id, engine: 'qoder' }));
     expect(q.status).toBe(202);
     await finished(q.body.id);
@@ -306,9 +319,9 @@ const qoderCredits = async (jobId: string) =>
   (await usageOf(jobId)).filter((u) => u.model !== 'faceswap').reduce((sum, u) => sum + u.creditsTotal, 0);
 
 describe('swapper_polish and misaligned close-ups', () => {
-  it('swapper_polish (default): swapper → crop of the swapped photo → Qoder polish → pasted onto the swapped photo', async () => {
+  it('swapper_polish: swapper → crop of the swapped photo → Qoder polish → pasted onto the swapped photo', async () => {
     const { target, faceFile, face, targetBytes, faceBytes } = await setup();
-    const r = await json(await swap(target.id, { face_id: face.id, n: 2 }));
+    const r = await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish', n: 2 }));
     expect(r.status).toBe(202);
     expect(r.body.n).toBe(2);
     expect(r.body.jobs[0].request).toMatchObject({
@@ -430,7 +443,7 @@ describe('swapper_polish and misaligned close-ups', () => {
 
   it('swapper_polish: a job picked up again after a restart reuses the swapped photo and crop', async () => {
     const { target, face } = await setup();
-    const first = (await finished((await json(await swap(target.id, { face_id: face.id }))).body.id)).jobs[0];
+    const first = (await finished((await json(await swap(target.id, { face_id: face.id, engine: 'swapper_polish' }))).body.id)).jobs[0];
     const fs = { ...first.request.face_swap };
     delete fs.qoder_output_file_id;
     delete fs.alignment;
@@ -578,8 +591,8 @@ describe('face swap settings: stored overrides from before swapper_polish', () =
     }
   });
 
-  it('defaults: swapper_polish engine, neutral close-up prompt without bangs changes, the polish prompt', () => {
-    expect(DEFAULT_FACE_SWAP_SETTINGS.default_engine).toBe('swapper_polish');
+  it('defaults: head_swap engine, neutral close-up prompt without bangs changes, the polish prompt', () => {
+    expect(DEFAULT_FACE_SWAP_SETTINGS.default_engine).toBe('head_swap');
     expect(DEFAULT_FACE_SWAP_SETTINGS.polish_prompt).toBe(FACE_SWAP_POLISH_PROMPT);
     expect(FACE_SWAP_CROP_PROMPT).toMatch(/^Make the person in image 1 look exactly like the person in image 2\./);
     expect(FACE_SWAP_CROP_PROMPT).toContain('Do not add, remove or restyle bangs/fringe; keep the hairline and every hair strand of image 1 exactly.');

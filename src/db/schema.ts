@@ -195,6 +195,8 @@ export const files = pgTable(
     jobId: text('job_id'),
     /** What a vision model saw in this image (outfit, palette, background…), cached for prompt variations. */
     traits: jsonb('traits').$type<Record<string, string>>(),
+    /** Head swap: the person's hair, expression and head angle as a vision model read them (`{hair, expression, angle}`), cached per target. */
+    headTraits: jsonb('head_traits').$type<Record<string, string>>(),
     createdAt: createdAt(),
     /** Set while the file's job is in the trash: hidden from users (404), still served to admins via trash URLs. */
     deletedAt: ts('deleted_at'),
@@ -245,6 +247,10 @@ export const faces = pgTable(
     name: text('name').notNull(),
     /** Kept alive by media housekeeping while a face uses it; a face disappears with its file. */
     fileId: text('file_id').notNull().references(() => files.id, { onDelete: 'cascade' }),
+    /** Optional clear front-facing portrait of the same person (head swap reference `portrait`). */
+    portraitFileId: text('portrait_file_id').references(() => files.id, { onDelete: 'set null' }),
+    /** Cached head swap reference `combo` (portrait left + main image right); cleared when either image changes. */
+    comboFileId: text('combo_file_id').references(() => files.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
   },
   (t) => [index('faces_user_idx').on(t.userId)],
