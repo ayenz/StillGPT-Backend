@@ -22,6 +22,7 @@ export interface UpscaleResult {
   device: string;
   faces: number;
   facesEnhanced: number;
+  eyesFixed: number;
   timingsMs: Record<string, number>;
 }
 
@@ -134,6 +135,7 @@ class UpscaleTarget {
       device?: string;
       faces?: number;
       faces_enhanced?: number;
+      eyes_fixed?: number;
       timings_ms?: Record<string, number>;
     };
     return {
@@ -146,6 +148,7 @@ class UpscaleTarget {
       device: r.device ?? '',
       faces: r.faces ?? 0,
       facesEnhanced: r.faces_enhanced ?? 0,
+      eyesFixed: r.eyes_fixed ?? 0,
       timingsMs: r.timings_ms ?? {},
     };
   }

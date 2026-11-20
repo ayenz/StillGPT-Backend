@@ -991,10 +991,11 @@ The result is always a JPEG.
   { "prompt": "Upscale 4x (Natural)", "enhance": false, "input_file_ids": ["file_…"],
     "provider": "upscale", "provider_used": "upscale",
     "upscale": { "source_file_id": "file_…", "scale": 4, "mode": "natural",
-                 "backend": "gpu", "pipeline": "P5", "device": "cuda", "width": 3584, "height": 4800, "faces_enhanced": 0 } }
+                 "backend": "gpu", "pipeline": "P5", "device": "cuda", "width": 3584, "height": 4800, "faces_enhanced": 0, "eyes_fixed": 1 } }
   ```
   `backend` (`gpu` | `cpu`), `pipeline` (`P1` sharp, `P4` natural on CPU, `P5` natural on GPU), `device`, `width`, `height`
-  (of the result) and `faces_enhanced` are filled in when the job completes. Label it e.g. "Upscale 4x · Natural".
+  (of the result), `faces_enhanced` and `eyes_fixed` (faces whose eyes were redrawn by the eye fix, both modes) are
+  filled in when the job completes. Label it e.g. "Upscale 4x · Natural".
 - The only output is `upscale-<scale>x-<source name>.jpg` (`kind: image`). `credits: 0`; usage is recorded as free
   (`model: "upscale"`).
 - Request errors: `400 image_too_large` (the source has more than 4,200,000 pixels; `details` has `width`, `height`,

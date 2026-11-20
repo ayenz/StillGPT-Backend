@@ -125,7 +125,7 @@ def test_ready_has_upscale_block(client):
     assert body["ready"] is True and body["upscale"]["ready"] is False
     main.state.upscaler = fake_upscaler()
     body = client.get("/health/ready").json()
-    assert body["upscale"] == {"ready": True, "device": "cpu", "pipelines": {"natural": "P4", "sharp": "P1"}}
+    assert body["upscale"] == {"ready": True, "device": "cpu", "pipelines": {"natural": "P4", "sharp": "P1"}, "eye_fix": 0.8}
 
 
 def test_upscale_only_mode(client, monkeypatch):
@@ -135,7 +135,7 @@ def test_upscale_only_mode(client, monkeypatch):
     main.state.upscaler = fake_upscaler("cuda")
     r = client.get("/health/ready")
     assert r.status_code == 200
-    assert r.json()["upscale"] == {"ready": True, "device": "cuda", "pipelines": {"natural": "P5", "sharp": "P1"}}
+    assert r.json()["upscale"] == {"ready": True, "device": "cuda", "pipelines": {"natural": "P5", "sharp": "P1"}, "eye_fix": 0.8}
     for path in ("/v1/swap", "/v1/face-crop", "/v1/face-paste"):
         r = client.post(path, json={"target": "x", "sources": ["y"], "image": "x", "base": "x", "patch": "x", "box": [0, 0, 9, 9]}, headers=H)
         assert r.status_code == 503 and r.json()["detail"] == "UPSCALE_ONLY", path

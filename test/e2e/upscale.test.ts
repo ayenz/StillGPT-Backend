@@ -50,6 +50,7 @@ async function startFakeUpscaler(o: { key: string; device: 'cuda' | 'cpu'; jpeg:
           device: o.device,
           faces: 1,
           faces_enhanced: pipeline === 'P4' ? 1 : 0,
+          eyes_fixed: 1,
           timings_ms: { total: 10 },
         });
       }
@@ -139,7 +140,7 @@ describe('POST /images/:fileId/upscale', () => {
     const job = await finished(r.body.id);
     expect(job.status).toBe('completed');
     expect(job.credits).toBe(0);
-    expect(job.request.upscale).toEqual({ source_file_id: src.id, scale: 4, mode: 'natural', backend: 'gpu', pipeline: 'P5', device: 'cuda', width: 120, height: 160, faces_enhanced: 0 });
+    expect(job.request.upscale).toEqual({ source_file_id: src.id, scale: 4, mode: 'natural', backend: 'gpu', pipeline: 'P5', device: 'cuda', width: 120, height: 160, faces_enhanced: 0, eyes_fixed: 1 });
     expect(job.outputs).toHaveLength(1);
     expect(job.outputs[0]).toMatchObject({ name: 'upscale-4x-holiday.jpg', mime_type: 'image/jpeg', kind: 'image' });
     expect((await download(job.outputs[0].url)).equals(GPU_JPEG)).toBe(true);

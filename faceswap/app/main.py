@@ -25,7 +25,7 @@ from . import gpugate, imaging, upscale
 from .engine import estimate_alignment, pick_face
 from .logs import setup_logging
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 log = logging.getLogger("faceswap")
 
 
@@ -55,6 +55,8 @@ def _float_env(name: str, default: float) -> float:
 
 
 UPSCALE_BIG_FACE_MP = _float_env("UPSCALE_BIG_FACE_MP", 0.15)
+# Eye fix (GFPGAN on the eyes only, luminance only); 0 disables it and skips the GFPGAN download in upscale-only mode.
+UPSCALE_EYE_STRENGTH = min(1.0, max(0.0, _float_env("UPSCALE_EYE_STRENGTH", 0.8)))
 
 
 class State:
@@ -104,12 +106,17 @@ def _load_upscaler(detector=None) -> None:
     try:
         if UPSCALE_DEVICE not in ("cpu", "cuda"):
             raise RuntimeError(f"invalid UPSCALE_DEVICE {UPSCALE_DEVICE!r} (cpu | cuda | off)")
-        paths = ensure_models(MODEL_DIR, UPSCALE_KEYS)
+        paths = ensure_models(MODEL_DIR, UPSCALE_KEYS + (("gfpgan",) if UPSCALE_EYE_STRENGTH > 0 else ()))
         upscale.prepare_device(UPSCALE_DEVICE)
         if detector is None:
             detector = Detector(paths["detector"], ORT_THREADS)
         up = upscale.Upscaler(
-            upscale.ort_factory(paths, UPSCALE_DEVICE, ORT_THREADS), detector, UPSCALE_DEVICE, UPSCALE_BIG_FACE_MP, eager=False
+            upscale.ort_factory(paths, UPSCALE_DEVICE, ORT_THREADS),
+            detector,
+            UPSCALE_DEVICE,
+            UPSCALE_BIG_FACE_MP,
+            eager=False,
+            eye_strength=UPSCALE_EYE_STRENGTH,
         )
         upscale.self_test(up)
         if UPSCALE_DEVICE == "cuda":
@@ -458,6 +465,7 @@ def do_upscale(up: upscale.Upscaler, req: UpscaleRequest) -> dict:
             "size": [w, h],
             "faces": info["faces"],
             "faces_enhanced": info["faces_enhanced"],
+            "eyes_fixed": info["eyes_fixed"],
             "timings_ms": timings,
         },
     )
@@ -472,6 +480,7 @@ def do_upscale(up: upscale.Upscaler, req: UpscaleRequest) -> dict:
         "device": up.device,
         "faces": info["faces"],
         "faces_enhanced": info["faces_enhanced"],
+        "eyes_fixed": info["eyes_fixed"],
         "timings_ms": timings,
     }
 
@@ -482,7 +491,7 @@ def do_upscale(up: upscale.Upscaler, req: UpscaleRequest) -> dict:
 def _upscale_status() -> dict:
     up = state.upscaler
     if up is not None:
-        return {"ready": True, "device": up.device, "pipelines": up.pipelines}
+        return {"ready": True, "device": up.device, "pipelines": up.pipelines, "eye_fix": UPSCALE_EYE_STRENGTH}
     return {
         "ready": False,
         "device": UPSCALE_DEVICE,

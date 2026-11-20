@@ -134,6 +134,8 @@ export interface UpscaleJobInfo {
   width?: number;
   height?: number;
   faces_enhanced?: number;
+  /** faces whose eyes were redrawn (GFPGAN eye fix) */
+  eyes_fixed?: number;
 }
 
 /** A face swap: target image (`:fileId`) + a saved face. */
@@ -1104,6 +1106,7 @@ export class MediaService {
       width: r.width,
       height: r.height,
       faces_enhanced: r.facesEnhanced,
+      eyes_fixed: r.eyesFixed,
     };
     await this.d.db.update(mediaJobs).set({ request: { ...job.request, upscale: done } }).where(eq(mediaJobs.id, job.id));
     await this.d.usage.record({ userId: job.userId, kind: 'image', model: 'upscale', jobId: job.id, credits: { model: 0, sandbox: 0, total: 0 }, free: true });

@@ -232,3 +232,91 @@ def test_encode_jpeg_444():
     im = Image.open(io.BytesIO(data))
     assert im.format == "JPEG" and im.size == (48, 32)
     assert JpegImagePlugin.get_sampling(im) == 0  # 4:4:4
+
+
+# ---------------------------------------------------------------- eye fix
+
+
+def face_kps(cx, cy, d):
+    """Frontal face with eye distance d (input px)."""
+    kps = np.array([[cx - d / 2, cy], [cx + d / 2, cy], [cx, cy + 0.55 * d], [cx - 0.4 * d, cy + d], [cx + 0.4 * d, cy + d]], np.float32)
+    return Face(box=np.array([cx - d, cy - d, cx + d, cy + 1.6 * d], np.float32), score=0.9, kps=kps)
+
+
+def const_restore(v: float):
+    """Fake GFPGAN: constant output in [-1, 1]."""
+    return lambda x: np.full_like(x, v)
+
+
+def test_eye_dose():
+    assert upscale.eye_dose(100) == 1.0 and upscale.eye_dose(240) == 1.0
+    assert upscale.eye_dose(300) == pytest.approx(0.5)
+    assert upscale.eye_dose(360) == 0.0 and upscale.eye_dose(1000) == 0.0
+
+
+def test_fix_eyes_luma_only_on_the_eyes():
+    out = np.zeros((800, 800, 3), np.uint8)
+    out[:] = (60, 100, 140)  # BGR, coloured skin
+    before = out.copy()
+    n = upscale.fix_eyes(out, [face_kps(100, 90, 40)], const_restore(0.5), 0.8, 4)  # GFPGAN says luma 191
+    assert n == 1
+    ex, ey = int(80 * 4 + 1.5), int(90 * 4 + 1.5)  # left eye centre at 4x
+    luma_before = 0.114 * 60 + 0.587 * 100 + 0.299 * 140
+    shift = out[ey, ex].astype(int) - before[ey, ex].astype(int)
+    assert abs(shift[0] - shift[1]) <= 1 and abs(shift[1] - shift[2]) <= 1  # same shift on every channel: colour kept
+    assert shift[0] == pytest.approx(0.8 * (191.25 - luma_before), abs=3)  # strength 0.8 at the centre
+    assert (out[600:, :] == before[600:, :]).all() and (out[:, 600:] == before[:, 600:]).all()  # far away untouched
+    mouth_y = int(130 * 4)
+    assert (out[mouth_y, 360:440] == before[mouth_y, 360:440]).all()  # only the eyes
+
+
+def test_fix_eyes_skips_big_faces_and_scales_with_output():
+    base = np.full((1600, 1600, 3), 100, np.uint8)
+    out = base.copy()
+    assert upscale.fix_eyes(out, [face_kps(200, 200, 100)], const_restore(0.5), 0.8, 4) == 0  # 400 px at 4x
+    assert (out == base).all()
+    # 70 px eyes: 280 px at 4x (dose 2/3), 140 px at 2x (full)
+    o4, o2 = base.copy(), base.copy()
+    f = face_kps(200, 200, 70)
+    upscale.fix_eyes(o4, [f], const_restore(0.5), 0.8, 4)
+    upscale.fix_eyes(o2, [f], const_restore(0.5), 0.8, 2)
+    ex, ey = int(165 * 4 + 1.5), int(200 * 4 + 1.5)
+    assert int(o4[ey, ex, 0]) - 100 == pytest.approx(0.8 * (2 / 3) * 91.25, abs=3)
+    assert int(o2[ey, ex, 0]) - 100 == pytest.approx(0.8 * 91.25, abs=3)
+
+
+def test_upscaler_eye_fix_in_every_pipeline(monkeypatch):
+    monkeypatch.setattr(upscale, "grain_inplace", lambda img, seed: img)
+    img = np.full((200, 200, 3), 100, np.uint8)
+    values = {"clear": 0.4, "span": 0.4, "nomos": 0.4}
+
+    def factory():
+        m = {k: const_model(v) for k, v in values.items()}
+        m["restore"] = const_restore(0.5)
+        return m
+
+    for device, mode, pipeline in [("cpu", "sharp", "P1"), ("cpu", "natural", "P4"), ("cuda", "natural", "P5")]:
+        up = upscale.Upscaler(factory, FakeDetector([face_kps(100, 90, 30)]), device)
+        out, info = up.upscale(img, 4, mode, 1)
+        assert info["pipeline"] == pipeline and info["faces"] == 1 and info["eyes_fixed"] == 1, (device, mode)
+        assert out[int(90 * 4 + 1.5), int(85 * 4 + 1.5), 0] > round(0.4 * 255) + 20  # eye brightened
+        assert out[10, 10, 0] == round(0.4 * 255)
+    up = upscale.Upscaler(factory, FakeDetector([face_kps(100, 90, 30)]), "cuda", eye_strength=0)
+    out, info = up.upscale(img, 4, "natural", 1)
+    assert info["eyes_fixed"] == 0 and (out == round(0.4 * 255)).all()
+
+
+def test_upscaler_without_restore_model_has_no_eye_fix():
+    out, info = fake_upscaler("cuda", faces=[face_kps(100, 90, 30)]).upscale(np.full((200, 200, 3), 100, np.uint8), 4, "natural", 1)
+    assert info["eyes_fixed"] == 0 and info["faces"] == 0  # no detection needed without the eye fix
+
+
+def test_eye_fix_failure_keeps_the_upscale(monkeypatch):
+    monkeypatch.setattr(upscale, "grain_inplace", lambda img, seed: img)
+
+    def broken(x):
+        raise RuntimeError("boom")
+
+    up = upscale.Upscaler(lambda: {"clear": const_model(0.4), "span": const_model(0.4), "restore": broken}, FakeDetector([face_kps(100, 90, 30)]), "cpu")
+    out, info = up.upscale(np.full((200, 200, 3), 100, np.uint8), 4, "sharp", 1)
+    assert info["eyes_fixed"] == 0 and (out == round(0.4 * 255)).all()

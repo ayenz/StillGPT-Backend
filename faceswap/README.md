@@ -51,6 +51,7 @@ before commercial use.
 | `UPSCALE_WORKERS` | 1 | parallel upscale jobs, in their own thread pool (never takes the face-swap workers) |
 | `UPSCALE_MAX_PIXELS` | 4200000 | input limit (413 `TOO_LARGE`) |
 | `UPSCALE_BIG_FACE_MP` | 0.15 | CPU only: faces whose box + context exceed this many input megapixels keep the base (no nomos pass) |
+| `UPSCALE_EYE_STRENGTH` | 0.8 | eye fix strength (0..1); 0 = off (and no GFPGAN download in upscale-only mode) |
 | `UPSCALE_JPEG_QUALITY` | 97 | default output quality (request `jpeg_quality` overrides) |
 | `UPSCALE_GPU_IDLE_S` | 150 | CUDA only: idle seconds before the GPU sessions are released and paused containers are started again |
 | `UPSCALE_PAUSE_CONTAINERS` | empty | CUDA only: comma list of containers to stop (if running) during GPU work |
@@ -99,11 +100,11 @@ Error codes: 401 `AUTH_INVALID`, 413 `TOO_LARGE`, 422 `BAD_IMAGE` / `NO_FACE_IN_
 ## Upscale
 
 `POST /v1/upscale` `{image, scale?: 2|4 (4), mode?: "natural"|"sharp" ("natural"), jpeg_quality?: 50–100 (env, 97)}` →
-`{image (base64 JPEG, 4:4:4), mime_type, width, height, scale, mode, pipeline, device, faces, faces_enhanced,
-timings_ms: {decode, base, faces?, resize?, gpu_wait?, grain, encode, total}}`.
+`{image (base64 JPEG, 4:4:4), mime_type, width, height, scale, mode, pipeline, device, faces, faces_enhanced, eyes_fixed,
+timings_ms: {decode, detect?, base, faces?, eyes?, resize?, gpu_wait?, grain, encode, total}}`.
 Input ≤ `UPSCALE_MAX_PIXELS` (4.2 MP) and ≤ 25 MB, else 413 `TOO_LARGE`. EXIF orientation applied, alpha dropped.
 503 `MODELS_LOADING` / `MODELS_FAILED` while the upscaler is not loaded, `UPSCALE_DISABLED` with `UPSCALE_DEVICE=off`.
-`GET /health/ready` contains `upscale: {ready, device, pipelines: {natural: "P4"|"P5", sharp: "P1"}}`
+`GET /health/ready` contains `upscale: {ready, device, pipelines: {natural: "P4"|"P5", sharp: "P1"}, eye_fix}`
 (not ready: `{ready: false, device, disabled, loading, error}`); in upscale-only mode the status code follows the
 upscaler instead of the face-swap engine.
 
@@ -113,11 +114,20 @@ Pipelines (CR = clear_reality, SP = span_kendata, NO = nomos8k_sc, all x4, outpu
 |---|---|---|
 | P1 | `sharp` | 0.7·CR + 0.3·SP |
 | P4 | `natural` on CPU | P1 base; every detected face (SCRFD 0.5, ≥ 24×24 px): square box 1.7× the face, NO on box + 16 px context, face patch 0.6·NO + 0.4·CR pasted with an ellipse (0.40 w / 0.44 h) feathered by σ = 0.06·side. Faces whose box + context is > `UPSCALE_BIG_FACE_MP` keep the base (`faces_enhanced` counts replaced faces) |
-| P5 | `natural` on CUDA | 0.6·NO + 0.4·CR on the whole image (`faces` = 0, no face step) |
+| P5 | `natural` on CUDA | 0.6·NO + 0.4·CR on the whole image (no face replacement) |
 
 Then grain: monochrome gaussian noise blurred with σ 0.7, std 2.5, weighted by clip(4L(1−L), 0.15, 1)·1.25
 (L = luma/255), seeded from the input bytes (same input → same output). `scale: 2` = the 4x result without grain,
-`INTER_AREA` to exactly 2× the input, then grain. `faces`/`faces_enhanced` are only counted by P4.
+`INTER_AREA` to exactly 2× the input, then grain. `faces_enhanced` is only counted by P4.
+
+Eye fix (all pipelines, before the 2x resize and the grain; off with `UPSCALE_EYE_STRENGTH=0`): for every detected
+face, GFPGAN 1.4 runs on the FFHQ-aligned 512 crop of the 4x result; only the eyes (one ellipse per eye, semi-axes
+0.36·d / 0.22·d along the eye line, feathered σ 0.07·d, d = eye distance) and only the luminance are taken over
+(GFPGAN shifts iris colours), at `UPSCALE_EYE_STRENGTH`. Strength fades with face size: full while the eye distance
+in the final image is ≤ 240 px, zero at ≥ 360 px (above that GFPGAN's 512 crop is softer than the upscaler).
+`faces` = detected faces, `eyes_fixed` = faces whose eyes were changed. GFPGAN always runs on the CPU, also on the GPU box
+(next to nomos it made the following upscales run out of VRAM on a 6 GB card): ~3 s per face at 4 threads, ~6 s at 2. Benchmark: AI-generated portraits often have malformed eyes (a few pixels wide in the source) that
+every upscaler just magnifies.
 
 Tiling: CPU 256 px tiles (16 px real/reflect context), CUDA 512 px; regions ≤ 640 px (CPU) / 512 px (CUDA) run in
 one pass padded to a multiple of 16. All models of a pipeline run on the same tile and are accumulated into one

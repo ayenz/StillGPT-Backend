@@ -6,9 +6,15 @@ Pipelines (benchmarked, see README):
   P5 (natural, CUDA)    grain(0.6*nomos8k_sc + 0.4*clear_reality) on the whole image
 scale 2 = the 4x result (no grain) downscaled with INTER_AREA, then grain. Grain is always applied at the final size.
 
+Eye fix (every pipeline, when a "restore" model = GFPGAN 1.4 is loaded): the eyes of each detected face are redrawn
+from a GFPGAN pass over the FFHQ-aligned 512 crop of the 4x result. Only the eyes (a feathered ellipse per eye) and
+only the luminance are taken (colour stays from the upscaler, GFPGAN shifts iris colours), at UPSCALE_EYE_STRENGTH
+(0.8). Big faces fade out: full strength while the eye distance in the final image is <= 240 px, none at >= 360 px
+(GFPGAN works at 512 px; above that it would be softer than the upscaler). Runs before the 2x resize and the grain.
+
 Memory: the 4x result is accumulated directly into one uint8 buffer tile by tile (all models of a pipeline run on the
 same tile), grain is added in horizontal bands, so a 4.2 MP input (67 MP output) needs ~200 MB for the result plus
-small per-tile / per-band temporaries instead of several 800 MB float32 copies.
+small per-tile / per-band temporaries instead of several 800 MB float32 copies. GFPGAN always runs on the CPU.
 """
 
 from __future__ import annotations
@@ -44,6 +50,18 @@ WEIGHTS = {
     "P5": (("nomos", 0.6), ("clear", 0.4)),
 }
 FACE_NOMOS_WEIGHT = 0.6  # face patch = 0.6*nomos + 0.4*clear_reality
+
+EYE_STRENGTH = 0.8
+EYE_FULL_PX = 240.0  # eye distance in the final image up to which the eye fix runs at full strength
+EYE_ZERO_PX = 360.0  # ... and from which it is off (linear in between)
+EYE_AXES = (0.36, 0.22)  # ellipse semi-axes per eye, x eye distance
+EYE_FEATHER = 0.07  # gaussian sigma, x eye distance
+EYE_ROI = 0.7  # margin around both eyes, x eye distance
+# FFHQ alignment template of GFPGAN for a 512x512 crop (same as engine.FFHQ_512).
+FFHQ_512 = np.array(
+    [[192.98138, 239.94708], [318.90277, 240.1936], [256.63416, 314.01935], [201.26117, 371.41043], [313.08905, 371.15118]],
+    dtype=np.float32,
+)
 
 Model = Callable[[np.ndarray], np.ndarray]  # NCHW float32 0..1 -> NCHW x4
 
@@ -224,17 +242,85 @@ def paste_face(base: np.ndarray, patch: np.ndarray, box: tuple[int, int, int, in
     base[Y:Y2, X:X2] = np.clip(m * patch + (1.0 - m) * region + 0.5, 0, 255).astype(np.uint8)
 
 
+# ---------------------------------------------------------------- eyes
+
+
+def eye_dose(final_eye_dist: float) -> float:
+    """1 for small faces, 0 for big ones (eye distance in the final image), linear in between."""
+    return float(np.clip((EYE_ZERO_PX - final_eye_dist) / (EYE_ZERO_PX - EYE_FULL_PX), 0.0, 1.0))
+
+
+def eye_mask(eyes: np.ndarray, d: float, h: int, w: int) -> np.ndarray:
+    """Feathered ellipse around each eye (eyes in ROI coordinates), rotated with the eye line. h x w float32."""
+    m = np.zeros((h, w), np.float32)
+    angle = float(np.degrees(np.arctan2(eyes[1][1] - eyes[0][1], eyes[1][0] - eyes[0][0])))
+    axes = (max(1, int(EYE_AXES[0] * d)), max(1, int(EYE_AXES[1] * d)))
+    for e in eyes:
+        cv2.ellipse(m, (int(round(e[0])), int(round(e[1]))), axes, angle, 0, 360, 1.0, -1)
+    return cv2.GaussianBlur(m, (0, 0), max(0.5, EYE_FEATHER * d))
+
+
+def gfpgan_run(model: Model, crop_bgr: np.ndarray) -> np.ndarray:
+    """512x512 uint8 BGR -> float32 BGR 0..255 (GFPGAN: RGB in/out in [-1, 1])."""
+    x = crop_bgr[:, :, ::-1].astype(np.float32) * (2.0 / 255.0) - 1.0
+    y = model(np.ascontiguousarray(x.transpose(2, 0, 1)[None]))[0]
+    return ((np.clip(y, -1.0, 1.0) + 1.0) * 127.5).transpose(1, 2, 0)[:, :, ::-1]
+
+
+def fix_eyes(out: np.ndarray, faces: list, model: Model, strength: float, scale: int) -> int:
+    """Eye fix on the 4x uint8 BGR result in place (faces detected on the input). Returns the number of faces changed."""
+    from .engine import umeyama
+
+    H, W = out.shape[:2]
+    fixed = 0
+    for f in faces:
+        kps = np.asarray(f.kps, np.float32) * S + (S - 1) / 2.0  # input px -> 4x px (pixel centres)
+        d = float(np.linalg.norm(kps[1] - kps[0]))
+        a = strength * eye_dose(d * scale / S)
+        if a <= 0.01 or d < 4:
+            continue
+        x1, y1 = (int(v) for v in np.maximum(kps[:2].min(0) - EYE_ROI * d, 0))
+        x2, y2 = int(min(W, kps[:2, 0].max() + EYE_ROI * d)), int(min(H, kps[:2, 1].max() + EYE_ROI * d))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            continue
+        M = umeyama(kps, FFHQ_512)
+        crop = cv2.warpAffine(out, M, (512, 512), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        restored = gfpgan_run(model, crop)
+        Mi = cv2.invertAffineTransform(M)
+        Mi[:, 2] -= (x1, y1)
+        warped = cv2.warpAffine(restored, Mi, (x2 - x1, y2 - y1), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        m = eye_mask(kps[:2] - (x1, y1), d, y2 - y1, x2 - x1) * a
+        region = out[y1:y2, x1:x2]
+        rf = region.astype(np.float32)
+        # luminance only: shift all channels by the luma difference (keeps the upscaler's colours)
+        luma = np.array([0.114, 0.587, 0.299], np.float32)  # BGR
+        delta = (warped @ luma - rf @ luma) * m
+        region[:] = np.clip(rf + delta[:, :, None] + 0.5, 0, 255).astype(np.uint8)
+        fixed += 1
+    return fixed
+
+
 # ---------------------------------------------------------------- upscaler
 
 
 class Upscaler:
     """Holds the 3 upscaler models (created by `factory`, lazily re-created after `release()`) and runs a pipeline.
-    `factory()` returns {"clear", "span", "nomos"} -> Model. On CUDA the natural mode is P5, on CPU P4."""
+    `factory()` returns {"clear", "span", "nomos"} -> Model, plus optionally "restore" (GFPGAN, enables the eye fix).
+    On CUDA the natural mode is P5, on CPU P4."""
 
-    def __init__(self, factory: Callable[[], dict[str, Model]], detector, device: str, big_face_mp: float = 0.15, eager: bool = True):
+    def __init__(
+        self,
+        factory: Callable[[], dict[str, Model]],
+        detector,
+        device: str,
+        big_face_mp: float = 0.15,
+        eager: bool = True,
+        eye_strength: float = EYE_STRENGTH,
+    ):
         self.factory = factory
         self.detector = detector
         self.device = device
+        self.eye_strength = eye_strength
         self.tile_in = 512 if device == "cuda" else 256
         self.single_max = 512 if device == "cuda" else 640
         self.big_face_px = None if device == "cuda" else big_face_mp * 1e6
@@ -274,11 +360,18 @@ class Upscaler:
         H, W = bgr.shape[:2]
         rgb = bgr[:, :, ::-1].astype(np.float32) * (1.0 / 255.0)
         weighted = [(models[k], wt) for k, wt in WEIGHTS[pipeline]]
-        faces = enhanced = 0
+        faces = enhanced = eyes = 0
+        restore = models.get("restore") if self.eye_strength > 0 else None
+        detected: list = []
+        if pipeline == "P4" or restore is not None:
+            t = time.perf_counter()
+            detected = [f for f in self.detector.detect(bgr, FACE_DET_THRESH) if f.area >= FACE_MIN_AREA]
+            faces = len(detected)
+            timings["detect"] = _ms(t)
 
         if pipeline == "P4":
             t = time.perf_counter()
-            plans = plan_faces(self.detector.detect(bgr, FACE_DET_THRESH), W, H, self.big_face_px)
+            plans = plan_faces(detected, W, H, self.big_face_px)
             faces = len(plans)
             todo = [p for p in plans if p.enhance]
             crops = {i: np.empty(((p.box[3] - p.box[1]) * S, (p.box[2] - p.box[0]) * S, 3), np.uint8) for i, p in enumerate(todo)}
@@ -313,6 +406,14 @@ class Upscaler:
             timings["base"] = _ms(t)
         del rgb
 
+        if restore is not None and detected:
+            t = time.perf_counter()
+            try:
+                eyes = fix_eyes(out, detected, restore, self.eye_strength, scale)
+            except Exception:  # noqa: BLE001 - the eye fix is an extra, never fail the upscale for it
+                log.exception("eye fix failed, result kept without it")
+            timings["eyes"] = _ms(t)
+
         if scale == 2:
             t = time.perf_counter()
             out = cv2.resize(out, (W * 2, H * 2), interpolation=cv2.INTER_AREA)
@@ -320,7 +421,7 @@ class Upscaler:
         t = time.perf_counter()
         grain_inplace(out, seed)
         timings["grain"] = _ms(t)
-        return out, {"pipeline": pipeline, "faces": faces, "faces_enhanced": enhanced, "timings_ms": timings}
+        return out, {"pipeline": pipeline, "faces": faces, "faces_enhanced": enhanced, "eyes_fixed": eyes, "timings_ms": timings}
 
 
 def _ms(t0: float) -> int:
@@ -349,12 +450,19 @@ class OrtModel:
 
 
 def ort_factory(paths: dict[str, Path], device: str, threads: int) -> Callable[[], dict[str, Model]]:
+    """The "restore" model (GFPGAN, eye fix) is created only when its path is given."""
+
     def make() -> dict[str, Model]:
-        return {
+        models: dict[str, Model] = {
             "clear": OrtModel(paths["upscale_clear"], device, threads),
             "span": OrtModel(paths["upscale_span"], device, threads),
             "nomos": OrtModel(paths["upscale_nomos"], device, threads),
         }
+        if "gfpgan" in paths:
+            # always on CPU (~3 s per face): next to nomos' arena on a 6 GB card GFPGAN made later upscales run out
+            # of VRAM, and it only runs once per face
+            models["restore"] = OrtModel(paths["gfpgan"], "cpu", threads)
+        return models
 
     return make
 
@@ -376,6 +484,11 @@ def self_test(up: Upscaler) -> None:
     t0 = time.monotonic()
     x = np.full((1, 3, 32, 32), 0.5, np.float32)
     for name, m in up.models().items():
+        if name == "restore":
+            y = m(np.zeros((1, 3, 512, 512), np.float32))
+            if y.shape != (1, 3, 512, 512):
+                raise RuntimeError(f"face restorer: unexpected output shape {y.shape}")
+            continue
         y = m(x)
         if y.shape != (1, 3, 32 * S, 32 * S):
             raise RuntimeError(f"upscaler {name}: unexpected output shape {y.shape}")
