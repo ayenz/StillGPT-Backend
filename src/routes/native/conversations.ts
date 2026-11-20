@@ -83,6 +83,16 @@ export function conversationRoutes(ctx: AppContext) {
     return c.json({ data: page.data.map(conversationView), has_more: page.hasMore, next_cursor: page.hasMore && last ? last.updatedAt.toISOString() : null });
   });
 
+  /** Title + message-text search over all the user's conversations (`q` ≥ 2 chars), newest first, with a snippet. */
+  app.get('/conversations/search', async (c) => {
+    const q = (c.req.query('q') ?? '').trim();
+    if (q.length < 2 || q.length > 200) throw new AppError(400, 'validation_error', 'q must be 2–200 characters', { param: 'q' });
+    const hits = await ctx.conversations.search(c.get('user').id, q, { limit: limitParam(c.req.query('limit'), 30, 50) });
+    return c.json({
+      data: hits.map((h) => ({ conversation: conversationView(h.conversation), match: h.match, snippet: h.snippet, message_id: h.messageId })),
+    });
+  });
+
   app.post('/conversations', async (c) => {
     const b = await body(c, createSchema);
     if (b.model) ctx.models.resolve(b.model); // rejects media models early; unknown ids fall back at turn time

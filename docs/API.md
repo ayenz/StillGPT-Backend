@@ -343,9 +343,16 @@ Conversation object:
 |---|---|---|---|
 | GET | `/conversations` | `?limit=20` (max 100) `&before=<next_cursor>` | `{data: [conversation], has_more, next_cursor}` (newest first) |
 | POST | `/conversations` | `{title?, model? = "default", profile? = "assistant", system_prompt?}` | `201 conversation` |
+| GET | `/conversations/search?q=…&limit=30` | – | `{data: [{conversation, match: "title" \| "message", snippet, message_id}]}` |
 | GET | `/conversations/:id` | – | conversation |
 | PATCH | `/conversations/:id` | any of `{title, model, profile, system_prompt}` | conversation |
 | DELETE | `/conversations/:id` | – | `204` (archived; it no longer appears) |
+
+**Search.** `GET /conversations/search?q=` finds your conversations whose title or message text contains `q`
+(case-insensitive, 2–200 characters, otherwise `400 validation_error`), newest first, at most `limit` (default 30,
+max 50). Only the text of messages is searched, not attachments. For a message match, `snippet` is ~120 characters of
+the newest matching message around the match (`…` where it was cut) and `message_id` is that message; for a title-only
+match both are `null`. Archived conversations are not included.
 
 **Auto title (ChatGPT style).** When a conversation has no title, its first message is named by a fast model
 (alias `titler`) in parallel with the reply, in the language of the message, e.g. "Resep Nasi Goreng Kampung".

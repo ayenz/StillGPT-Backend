@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
 import { type ContentBlock, compatThreads, conversations, messages } from '../db/schema.js';
 import { notFound } from '../errors.js';
@@ -7,6 +7,30 @@ import type { ProfileName } from './profiles.js';
 
 export type ConversationRow = typeof conversations.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
+
+export interface SearchHit {
+  conversation: ConversationRow;
+  match: 'title' | 'message';
+  snippet: string | null;
+  messageId: string | null;
+}
+
+const SNIPPET_CHARS = 120;
+
+/** ~120 chars of `text` around the first case-insensitive match of `q`, on one line, "…" where it was cut. */
+export function snippetAround(text: string, q: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  const at = flat.toLowerCase().indexOf(q.toLowerCase());
+  if (at < 0) return flat.length > SNIPPET_CHARS ? `${flat.slice(0, SNIPPET_CHARS - 1).trimEnd()}…` : flat;
+  let start = Math.max(0, at - Math.floor((SNIPPET_CHARS - q.length) / 3));
+  const end = Math.min(flat.length, start + SNIPPET_CHARS);
+  start = Math.max(0, end - SNIPPET_CHARS);
+  // don't cut words in half at the edges
+  if (start > 0) start = flat.indexOf(' ', start) + 1 || start;
+  let cut = flat.slice(start, end);
+  if (end < flat.length) cut = cut.replace(/\s+\S*$/, '');
+  return `${start > 0 ? '…' : ''}${cut.trim()}${end < flat.length ? '…' : ''}`;
+}
 
 export interface CreateConversation {
   userId: string;
@@ -56,15 +80,59 @@ export class ConversationService {
   /** Newest first, cursor = updated_at ISO of the last item. Hidden (media-job) conversations are excluded. */
   async list(userId: string, opts: { limit?: number; before?: string } = {}) {
     const limit = Math.min(opts.limit ?? 20, 100);
-    const conds = [
+    const conds = this.visible(userId);
+    if (opts.before) conds.push(lt(conversations.updatedAt, new Date(opts.before)));
+    const rows = await this.db.select().from(conversations).where(and(...conds)).orderBy(desc(conversations.updatedAt)).limit(limit + 1);
+    return { data: rows.slice(0, limit), hasMore: rows.length > limit };
+  }
+
+  /** The user's visible conversations: native, not archived, not hidden helpers (titler, enhancer…). */
+  private visible(userId: string) {
+    return [
       eq(conversations.userId, userId),
       isNull(conversations.archivedAt),
       eq(conversations.source, 'native'),
       sql`coalesce(${conversations.metadata}->>'hidden', 'false') <> 'true'`,
     ];
-    if (opts.before) conds.push(lt(conversations.updatedAt, new Date(opts.before)));
-    const rows = await this.db.select().from(conversations).where(and(...conds)).orderBy(desc(conversations.updatedAt)).limit(limit + 1);
-    return { data: rows.slice(0, limit), hasMore: rows.length > limit };
+  }
+
+  /**
+   * Conversations whose title or message text contains `q` (case-insensitive substring), newest first. Only text blocks
+   * are searched (not file ids, artifacts or JSON keys). For a message match, the newest matching message gives the
+   * snippet.
+   */
+  async search(userId: string, q: string, opts: { limit?: number } = {}): Promise<SearchHit[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 30, 1), 50);
+    const pattern = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    const text = sql<string | null>`(select string_agg(b->>'text', ' ') from jsonb_array_elements(${messages.content}) as b where b->>'type' = 'text')`;
+    const hits = await this.db
+      .select({ conversationId: messages.conversationId, messageId: messages.id, text })
+      .from(messages)
+      .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+      .where(and(...this.visible(userId), sql`${text} ilike ${pattern}`))
+      .orderBy(desc(messages.createdAt))
+      .limit(500);
+    const byConversation = new Map<string, { messageId: string; text: string }>();
+    for (const h of hits) if (h.text && !byConversation.has(h.conversationId)) byConversation.set(h.conversationId, { messageId: h.messageId, text: h.text });
+
+    const titleMatch = ilike(conversations.title, pattern);
+    const rows = await this.db
+      .select()
+      .from(conversations)
+      .where(and(...this.visible(userId), byConversation.size ? or(titleMatch, inArray(conversations.id, [...byConversation.keys()])) : titleMatch))
+      .orderBy(desc(conversations.updatedAt))
+      .limit(limit);
+    const needle = q.toLowerCase();
+    return rows.map((conversation) => {
+      const hit = byConversation.get(conversation.id);
+      const inTitle = (conversation.title ?? '').toLowerCase().includes(needle);
+      return {
+        conversation,
+        match: inTitle ? 'title' : 'message',
+        snippet: hit ? snippetAround(hit.text, q) : null,
+        messageId: hit?.messageId ?? null,
+      };
+    });
   }
 
   async update(id: string, userId: string, patch: Partial<Pick<ConversationRow, 'title' | 'model' | 'systemPrompt' | 'profile' | 'metadata'>>) {
