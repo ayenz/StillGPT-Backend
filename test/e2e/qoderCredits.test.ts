@@ -37,8 +37,21 @@ const HISTORY = {
   page_result: { prev_page: 0, current_page: 1, next_page: 2, last_page: 187, page_size: 2, total_size: 373, next_token: 'x' },
 };
 
+const ORG_USAGE = {
+  user_id: 'u1',
+  organization_id: 'o1',
+  quota_key: 'big_model_credits',
+  shared_quota: {
+    quota_summary: { used_value: 23, limit_value: -1, remaining_value: 195631, usage_percentage: 0, unit: 'credits' },
+    quota_detail: [
+      { id: 'p1', limit_value: 195631, used_value: 0, remaining_value: 195631, unit: 'credits', is_active: true, usage_percentage: 0, expires_at: 1826700050206, source: 'ORGANIZATION_RESOURCE_PACKAGE', status: 'ACTIVE' },
+    ],
+  },
+  organization_pool: { used_value: 14369, limit_value: 210000, remaining_value: 195631, usage_percentage: 7, unit: 'credits' },
+};
+
 /** Fake qoder.com: accepts the cookies in `valid`, counts hits. */
-const web = { valid: new Set([ENV_COOKIE]), hits: 0, used: 92, lastCookie: '', lastQuery: new URLSearchParams() };
+const web = { valid: new Set([ENV_COOKIE]), org: true, hits: 0, used: 92, lastCookie: '', lastQuery: new URLSearchParams() };
 let server: Server;
 let h: Harness;
 
@@ -48,10 +61,15 @@ beforeAll(async () => {
     web.lastCookie = String(req.headers.cookie ?? '');
     const m = /qoder_session_cookie=([^;]+)/.exec(web.lastCookie);
     const url = new URL(req.url!, 'http://x');
-    const known = ['/api/v2/me/usages/big_model_credits', '/api/v1/me/usages/big_model_credits/histories'];
+    const known = ['/api/v2/me/usages/big_model_credits', '/api/v1/me/usages/big_model_credits/histories', '/api/v1/me/organization-shared-usages/big_model_credits'];
     if (!known.includes(url.pathname)) return void res.writeHead(404).end();
     if (!m || !web.valid.has(m[1]!)) {
       res.writeHead(401, { 'content-type': 'application/json' }).end('{"errorCode":"Unauthorized","errorMessage":"User not authenticated"}');
+      return;
+    }
+    if (url.pathname.includes('organization-shared')) {
+      if (!web.org) return void res.writeHead(404).end();
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(ORG_USAGE));
       return;
     }
     if (url.pathname.endsWith('/histories')) {
@@ -97,17 +115,27 @@ describe('qoder credits (admin)', () => {
         plan: { remaining: 2488 },
         resource_package: { limit: 0 },
         next_reset_at: new Date(1797059301000).toISOString(),
+        add_on: {
+          used: 23,
+          cap: null,
+          remaining: 195631,
+          pool: { used: 14369, limit: 210000, remaining: 195631, usage_percentage: 7 },
+          expires_at: new Date(1826700050206).toISOString(),
+        },
       },
       session: { configured: true, source: 'env', issued_at: new Date(1794820410 * 1000).toISOString(), updated_at: null },
     });
     expect(web.lastCookie).toBe(`qoder_session_cookie=${ENV_COOKIE}`);
 
-    // Cached: no second upstream hit; refresh=true forces one.
+    // Cached: no second upstream hit; refresh=true forces one. No organization → add_on null, rest still ok.
     const hits = web.hits;
     web.used = 100;
+    web.org = false;
     expect(((await (await admin('/credits')).json()) as any).credits.used).toBe(92);
     expect(web.hits).toBe(hits);
-    expect(((await (await admin('/credits?refresh=true')).json()) as any).credits.used).toBe(100);
+    const noOrg = (await (await admin('/credits?refresh=true')).json()) as any;
+    expect(noOrg).toMatchObject({ status: 'ok', credits: { used: 100, add_on: null } });
+    web.org = true;
 
     // Session expires upstream: last reading stays, marked stale.
     web.valid.clear();

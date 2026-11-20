@@ -1376,8 +1376,12 @@ All of them return HTTP 200; branch on `status`:
 | `session_expired` | Qoder rejected the cookie | ask for a new cookie; `credits` may still hold the last reading (`stale: true`) |
 | `error` | Qoder unreachable or answered unexpectedly; `error` says why | retry later; `credits` may be stale |
 
-- `credits`: `null` or `{used, limit, remaining, usage_percentage, unit, plan, resource_package, dedicated_resource_package, last_reset_at, next_reset_at}`.
+- `credits`: `null` or `{used, limit, remaining, usage_percentage, unit, plan, resource_package, dedicated_resource_package, last_reset_at, next_reset_at, add_on}`.
   The top-level numbers are the total over all sources. `plan` and both packages are `{used, limit, remaining, usage_percentage}`.
+- `credits.add_on`: the organization's shared add-on credits, or `null` (account not in an organization, or Qoder could not say).
+  `{used, cap, remaining, pool, expires_at}`: `used` = what this account used from the pool this cycle, `cap` = the per-member
+  cap (`null` = no cap), `remaining` = what this account can still use, `pool` = the whole organization pool
+  `{used, limit, remaining, usage_percentage}`, `expires_at` = earliest expiry of the active add-on packages.
 - `fetched_at`: when `credits` was read from Qoder.
 - `session`: `{configured, source: "env"|"admin"|null, issued_at, updated_at}`. `issued_at` is when Qoder issued the cookie
   (read from the cookie itself, `null` if unreadable). `updated_at` is when an admin last pasted it. The cookie value is never returned.

@@ -413,6 +413,9 @@ function creditsView(s: QoderCreditsStatus) {
           dedicated_resource_package: quotaView(c.dedicatedResourcePackage),
           last_reset_at: c.lastResetAt,
           next_reset_at: c.nextResetAt,
+          add_on: c.addOn
+            ? { used: c.addOn.used, cap: c.addOn.cap, remaining: c.addOn.remaining, pool: quotaView(c.addOn.pool), expires_at: c.addOn.expiresAt }
+            : null,
         }
       : null,
     stale: s.stale,

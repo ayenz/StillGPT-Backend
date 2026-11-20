@@ -8,6 +8,7 @@ const CACHE_MS = 5 * 60_000;
 const TIMEOUT_MS = 15_000;
 const USAGE_PATH = '/api/v2/me/usages/big_model_credits';
 const HISTORY_PATH = '/api/v1/me/usages/big_model_credits/histories';
+const ORG_USAGE_PATH = '/api/v1/me/organization-shared-usages/big_model_credits';
 export const HISTORY_PAGE_SIZE_MAX = 100;
 
 export interface QuotaSummary {
@@ -24,6 +25,21 @@ export interface QoderCredits extends QuotaSummary {
   dedicatedResourcePackage: QuotaSummary;
   lastResetAt: string | null;
   nextResetAt: string | null;
+  /** Organization add-on credits (shared pool); null when the account has none or they could not be read. */
+  addOn: AddOnCredits | null;
+}
+
+export interface AddOnCredits {
+  /** What this account used from the shared pool in the current cycle. */
+  used: number;
+  /** Per-member cap set by the organization; null = no cap. */
+  cap: number | null;
+  /** What this account can still use (pool remaining, or less when capped). */
+  remaining: number;
+  /** The organization's whole pool. */
+  pool: QuotaSummary;
+  /** Earliest expiry of the active add-on packages. */
+  expiresAt: string | null;
 }
 
 export type CreditsState = 'ok' | 'not_configured' | 'session_expired' | 'error';
@@ -151,7 +167,7 @@ export class QoderCreditsService {
 
     if (!s) return done({ ...base, status: 'not_configured', credits: null, stale: false, fetchedAt: null, error: null });
 
-    const r = await this.get(s.cookie, USAGE_PATH);
+    const [r, org] = await Promise.all([this.get(s.cookie, USAGE_PATH), this.get(s.cookie, ORG_USAGE_PATH)]);
     if (!r.ok) return failed(r.state, r.error);
     let credits: QoderCredits;
     try {
@@ -159,6 +175,14 @@ export class QoderCreditsService {
     } catch (err) {
       this.d.log.warn('qoder_credits.parse_failed', { err });
       return failed('error', 'Unexpected response from Qoder');
+    }
+    // Add-on credits are optional: accounts outside an organization have none.
+    if (org.ok) {
+      try {
+        credits.addOn = parseAddOn(org.body);
+      } catch (err) {
+        this.d.log.warn('qoder_credits.parse_failed', { err, what: 'add_on' });
+      }
     }
     this.lastGood = { credits, fetchedAt: new Date().toISOString() };
     return done({ ...base, status: 'ok', credits, stale: false, fetchedAt: this.lastGood.fetchedAt, error: null });
@@ -246,6 +270,33 @@ function parseUsage(body: unknown): QoderCredits {
     dedicatedResourcePackage: sum(b.dedicated_resource_package_quota?.quota_summary),
     lastResetAt: ms(b.lastResetAt),
     nextResetAt: ms(b.nextResetAt),
+    addOn: null,
+  };
+}
+
+function parseAddOn(body: unknown): AddOnCredits | null {
+  const b = body as Record<string, any>;
+  const mine = b?.shared_quota?.quota_summary;
+  const pool = b?.organization_pool;
+  if (!mine && !pool) return null;
+  if (typeof mine?.used_value !== 'number' && typeof pool?.limit_value !== 'number') throw new Error('missing shared_quota / organization_pool');
+  const poolSum: QuotaSummary = {
+    used: num(pool?.used_value),
+    limit: num(pool?.limit_value),
+    remaining: num(pool?.remaining_value),
+    usagePercentage: num(pool?.usage_percentage),
+  };
+  if (poolSum.limit <= 0 && num(mine?.used_value) === 0) return null;
+  const cap = typeof mine?.limit_value === 'number' && mine.limit_value >= 0 ? mine.limit_value : null;
+  const expiries = (Array.isArray(b.shared_quota?.quota_detail) ? b.shared_quota.quota_detail : [])
+    .filter((d: any) => d?.is_active !== false && typeof d?.expires_at === 'number' && d.expires_at > 0)
+    .map((d: any) => d.expires_at as number);
+  return {
+    used: num(mine?.used_value),
+    cap,
+    remaining: typeof mine?.remaining_value === 'number' ? mine.remaining_value : poolSum.remaining,
+    pool: poolSum,
+    expiresAt: expiries.length ? new Date(Math.min(...expiries)).toISOString() : null,
   };
 }
 
