@@ -145,28 +145,19 @@ export function conversationRoutes(ctx: AppContext) {
     const conv = await ownConversation(ctx, c);
     const input = await body(c, messageSchema);
     const content = await toContentBlocks(ctx, conv.userId, input);
-    // ChatGPT-style auto title: generated in parallel with the first reply, announced as `conversation.title`
-    let titling: Promise<string | null> | null = null;
+    // ChatGPT-style auto title: generated in parallel with the first reply and announced as `conversation.title` the
+    // moment it exists, mid-reply. Neither waits for the other; a title that comes after the reply is only saved
+    // (clients re-read the conversation).
     const autoTitle = !!ctx.titler && !conv.title;
-    const handle = await ctx.turns.start({
-      conversationId: conv.id,
-      userId: conv.userId,
-      content,
-      kind: 'chat',
-      ...(autoTitle
-        ? {
-            beforeComplete: async () => {
-              const title = titling ? await withTimeout(titling, ctx.config.AUTO_TITLE_WAIT_MS) : null;
-              return title ? [{ type: 'conversation.title' as const, conversationId: conv.id, title }] : [];
-            },
-          }
-        : {}),
-    });
-    if (autoTitle) titling = ctx.titler!.generate(conv.id, conv.userId, content);
+    const handle = await ctx.turns.start({ conversationId: conv.id, userId: conv.userId, content, kind: 'chat' });
+    const titling = autoTitle ? ctx.titler!.generate(conv.id, conv.userId, content) : null;
+    void titling?.then((title) => title && handle.announce({ type: 'conversation.title', conversationId: conv.id, title }));
     c.header('X-StillGPT-Conversation', conv.id);
     if (wantsStream(c)) return sse(c, (signal) => replay(handle, 0, signal));
 
     const result = await handle.done;
+    // non-streaming: the response carries the title if it comes shortly after the reply
+    if (titling) await withTimeout(titling, ctx.config.AUTO_TITLE_WAIT_MS);
     const [msg] = await ctx.database.db.select().from(messages).where(eq(messages.id, result.messageId));
     if (!msg) throw new AppError(500, 'internal_error', 'Assistant message was not persisted');
     c.header('X-StillGPT-Model', result.model);

@@ -1,5 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { cleanTitle, titleSource } from '../../src/core/titler.js';
+import { ConversationTitler, cleanTitle, titleSource } from '../../src/core/titler.js';
+import type { TurnRunner } from '../../src/core/turns.js';
+import { silentLogger } from '../../src/log.js';
+import { FolaxClient } from '../../src/providers/folax.js';
+import { type FakeFolax, startFakeFolax } from '../fake-folax/index.js';
 import { type Harness, startHarness } from './harness.js';
 import { readSse } from './native-sse.js';
 
@@ -106,5 +110,98 @@ describe('auto conversation titles', () => {
     } finally {
       await h2.close();
     }
+  });
+});
+
+describe('title and reply run side by side', () => {
+  it('sends the title mid-reply, as soon as it exists', async () => {
+    const original = h.ctx.titler!.generate.bind(h.ctx.titler!);
+    h.ctx.titler!.generate = async () => 'Judul Cepat';
+    try {
+      const conv = await newConversation();
+      // [[slow]]: the mock answers after ~1 s, the title is ready at once
+      const frames = await readSse(await send(conv.id, '[[slow]] ceritain sejarah kopi', true));
+      const events = frames.map((f) => f.event);
+      const titleAt = events.indexOf('conversation.title');
+      expect(titleAt).toBeGreaterThan(-1);
+      expect(titleAt).toBeLessThan(events.indexOf('text.completed'));
+      expect(frames[titleAt]!.data).toMatchObject({ title: 'Judul Cepat' });
+    } finally {
+      h.ctx.titler!.generate = original;
+    }
+  });
+
+  it('the reply never waits for a slow title', async () => {
+    const original = h.ctx.titler!.generate.bind(h.ctx.titler!);
+    let release!: (t: string | null) => void;
+    h.ctx.titler!.generate = () => new Promise((r) => (release = r));
+    try {
+      const conv = await newConversation();
+      const started = Date.now();
+      const frames = await readSse(await send(conv.id, 'halo', true));
+      expect(Date.now() - started).toBeLessThan(2000); // used to hold turn.completed for up to AUTO_TITLE_WAIT_MS (5 s)
+      expect(frames.at(-1)!.event).toBe('turn.completed');
+      expect(frames.some((f) => f.event === 'conversation.title')).toBe(false);
+    } finally {
+      release(null);
+      h.ctx.titler!.generate = original;
+    }
+  });
+});
+
+describe('Folax fallback for titles', () => {
+  let folax: FakeFolax;
+  beforeAll(async () => {
+    folax = await startFakeFolax();
+  });
+  afterEach(() => folax.reset());
+  afterAll(() => folax?.close());
+
+  /** A titler whose Qoder turn is `turns` (a stub) and whose Folax is the fake adapter. */
+  const titler = (turns: Partial<TurnRunner>, o: { folax?: boolean; waitMs?: number } = {}) =>
+    new ConversationTitler({
+      db: h.ctx.database.db,
+      conversations: h.ctx.conversations,
+      turns: { interrupt: async () => true, ...turns } as TurnRunner,
+      log: silentLogger,
+      model: 'titler',
+      folax: o.folax === false ? null : new FolaxClient({ baseUrl: folax.url, apiKey: folax.key, log: silentLogger }),
+      qoderWaitMs: o.waitMs ?? 200,
+    });
+  const chats = () => folax.callsTo('POST /v1/chat/completions');
+  const content = [{ type: 'text' as const, text: 'gimana cara bikin nasi goreng kampung?' }];
+
+  it('names the chat with folax/gemini when the Qoder turn fails', async () => {
+    folax.state.chatReply = '"Resep nasi goreng kampung"';
+    const conv = await newConversation();
+    const t = titler({ start: async () => { throw new Error('qoder down'); } });
+    expect(await t.generate(conv.id, h.userId, content)).toBe('Resep nasi goreng kampung');
+    expect(await titleOf(conv.id)).toBe('Resep nasi goreng kampung');
+    expect(chats()[0]!.body).toMatchObject({ model: 'gemini' });
+    expect(JSON.stringify(chats()[0]!.body)).toContain('nasi goreng kampung');
+  });
+
+  it('and when Qoder answers with an error or takes too long (the slow turn is interrupted)', async () => {
+    folax.state.chatReply = 'Judul dari Folax';
+    const errored = titler({ start: async () => ({ done: Promise.resolve({ stopReason: 'error', text: '' }) }) as any });
+    expect(await errored.generate((await newConversation()).id, h.userId, content)).toBe('Judul dari Folax');
+
+    let interrupted = false;
+    const slow = titler({ start: async () => ({ done: new Promise(() => {}) }) as any, interrupt: async () => ((interrupted = true), true) });
+    expect(await slow.generate((await newConversation()).id, h.userId, content)).toBe('Judul dari Folax');
+    expect(interrupted).toBe(true);
+  });
+
+  it('a good Qoder title never asks Folax', async () => {
+    const t = titler({ start: async () => ({ done: Promise.resolve({ stopReason: 'end_turn', text: 'Judul Qoder' }) }) as any });
+    expect(await t.generate((await newConversation()).id, h.userId, content)).toBe('Judul Qoder');
+    expect(chats()).toHaveLength(0);
+  });
+
+  it('no title (and no throw) when both fail or Folax is not configured', async () => {
+    const failing = { start: async () => { throw new Error('qoder down'); } };
+    folax.failNext('POST /v1/chat/completions', 502, 'upstream_error');
+    expect(await titler(failing).generate((await newConversation()).id, h.userId, content)).toBeNull();
+    expect(await titler(failing, { folax: false }).generate((await newConversation()).id, h.userId, content)).toBeNull();
   });
 });

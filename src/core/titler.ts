@@ -2,6 +2,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { DB } from '../db/client.js';
 import { type ContentBlock, conversations } from '../db/schema.js';
 import type { Logger } from '../log.js';
+import type { FolaxClient } from '../providers/folax.js';
 import type { ConversationService } from './conversations.js';
 import type { TurnRunner } from './turns.js';
 
@@ -54,13 +55,28 @@ export function titleSource(content: ContentBlock[]): string | null {
   return src ? src.slice(0, SOURCE_TEXT_MAX) : null;
 }
 
+/** Folax model for the fallback: fastest and steadiest on titles in the 2026-11-20 benchmark (~3.4 s, follows the rules). */
+const FOLAX_TITLE_MODEL = 'gemini';
+const FOLAX_TIMEOUT_MS = 30_000;
+
 /**
  * Auto-names conversations from their first message (ChatGPT style). Runs one short turn with the `titler` model alias
- * on a hidden one-shot conversation, in parallel with the real reply. Never overwrites a title the user set.
+ * on a hidden one-shot conversation, in parallel with the real reply. When Qoder fails or has not answered within
+ * `qoderWaitMs`, Folax (`folax/gemini`, stateless, free) names it instead, if configured and not known down. Never
+ * overwrites a title the user set.
  */
 export class ConversationTitler {
   constructor(
-    private readonly d: { db: DB; conversations: ConversationService; turns: TurnRunner; log: Logger; model: string },
+    private readonly d: {
+      db: DB;
+      conversations: ConversationService;
+      turns: TurnRunner;
+      log: Logger;
+      model: string;
+      folax?: FolaxClient | null;
+      /** How long the Qoder turn may take before Folax is asked instead. */
+      qoderWaitMs: number;
+    },
   ) {}
 
   /** Resolves to the new title, or null when nothing was generated/saved. Never throws. */
@@ -68,20 +84,8 @@ export class ConversationTitler {
     try {
       const source = titleSource(content);
       if (!source) return null;
-      const conv = await this.d.conversations.create({
-        userId,
-        profile: 'chat',
-        model: this.d.model,
-        title: 'conversation titler',
-        metadata: { hidden: true, purpose: 'conversation_titler', for: conversationId },
-      });
-      const handle = await this.d.turns.start({ conversationId: conv.id, userId, content: [{ type: 'text', text: instructions(source) }], oneShot: true });
-      const result = await handle.done;
-      const title = result.stopReason === 'error' ? null : cleanTitle(result.text);
-      if (!title) {
-        this.d.log.warn('titler.unusable_reply', { conversationId, stopReason: result.stopReason, text: result.text.slice(0, 120) });
-        return null;
-      }
+      const title = (await this.viaQoder(conversationId, userId, source)) ?? (await this.viaFolax(conversationId, source));
+      if (!title) return null;
       const rows = await this.d.db
         .update(conversations)
         .set({ title, metadata: sql`coalesce(${conversations.metadata}, '{}'::jsonb) || '{"title_source":"auto"}'::jsonb` })
@@ -90,6 +94,56 @@ export class ConversationTitler {
       return rows.length ? title : null;
     } catch (err) {
       this.d.log.warn('titler.failed', { conversationId, err: (err as Error).message });
+      return null;
+    }
+  }
+
+  /** The title from a hidden Qoder one-shot turn, or null when it failed, was unusable or took over `qoderWaitMs`. */
+  private async viaQoder(conversationId: string, userId: string, source: string): Promise<string | null> {
+    let hiddenId: string | null = null;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const conv = await this.d.conversations.create({
+        userId,
+        profile: 'chat',
+        model: this.d.model,
+        title: 'conversation titler',
+        metadata: { hidden: true, purpose: 'conversation_titler', for: conversationId },
+      });
+      hiddenId = conv.id;
+      const handle = await this.d.turns.start({ conversationId: conv.id, userId, content: [{ type: 'text', text: instructions(source) }], oneShot: true });
+      const timeout = new Promise<'timeout'>((r) => (timer = setTimeout(() => r('timeout'), this.d.qoderWaitMs)));
+      const result = await Promise.race([handle.done, timeout]);
+      if (result === 'timeout') {
+        this.d.log.warn('titler.qoder_slow', { conversationId, waitedMs: this.d.qoderWaitMs });
+        void this.d.turns.interrupt(conv.id, userId).catch(() => {});
+        return null;
+      }
+      const title = result.stopReason === 'error' ? null : cleanTitle(result.text);
+      if (!title) this.d.log.warn('titler.unusable_reply', { conversationId, stopReason: result.stopReason, text: result.text.slice(0, 120) });
+      return title;
+    } catch (err) {
+      this.d.log.warn('titler.qoder_failed', { conversationId, hiddenId, err: (err as Error).message });
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The title from Folax, or null (not configured, known down, failed or unusable). */
+  private async viaFolax(conversationId: string, source: string): Promise<string | null> {
+    const folax = this.d.folax;
+    if (!folax || folax.knownDown()) return null;
+    const started = Date.now();
+    try {
+      let text = '';
+      const pieces = await folax.chat({ model: FOLAX_TITLE_MODEL, messages: [{ role: 'user', content: instructions(source) }], timeoutMs: FOLAX_TIMEOUT_MS });
+      for await (const piece of pieces) text += piece;
+      const title = cleanTitle(text);
+      this.d.log.info('titler.folax_fallback', { conversationId, ok: !!title, ms: Date.now() - started });
+      return title;
+    } catch (err) {
+      this.d.log.warn('titler.folax_failed', { conversationId, err: (err as Error).message });
       return null;
     }
   }

@@ -176,7 +176,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const references = new ReferenceReader({ conversations, turns, store, log: log.child({ mod: 'references' }) });
   const enhancer = new PromptEnhancer({ conversations, turns, log: log.child({ mod: 'enhancer' }), instructions: enhancerInstructions, references });
   const variator = new PromptVariator({ conversations, turns, references, log: log.child({ mod: 'variations' }), instructions: enhancerInstructions });
-  const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler' }) : null;
+  const titler = config.AUTO_TITLE ? new ConversationTitler({ db, conversations, turns, log: log.child({ mod: 'titler' }), model: 'titler', folax, qoderWaitMs: config.AUTO_TITLE_QODER_MS }) : null;
   const faceswap = config.FACESWAP_URL
     ? new FaceSwapClient({
         baseUrl: config.FACESWAP_URL,

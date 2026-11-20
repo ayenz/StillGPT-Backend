@@ -78,6 +78,13 @@ export class TurnHandle {
     this.wake();
   }
 
+  /** Adds an event while the turn still runs (e.g. `conversation.title` as soon as it exists); false once it finished. */
+  announce(e: TurnEvent): boolean {
+    if (this.finished) return false;
+    this.push(e);
+    return true;
+  }
+
   finish(result: TurnResult) {
     this.finished = true;
     this.resolveDone(result);

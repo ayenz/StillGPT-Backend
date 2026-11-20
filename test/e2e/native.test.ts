@@ -135,8 +135,9 @@ describe('conversations', () => {
     const types = frames.map((f) => f.event);
     expect(types[0]).toBe('turn.started');
     expect(types.at(-1)).toBe('turn.completed');
-    expect(types.at(-2)).toBe('conversation.title'); // auto title arrives right before the turn completes
-    expect(frames.at(-2)!.data).toEqual({ type: 'conversation.title', conversation_id: conv.id, title: 'Sapaan Halo Dunia' });
+    // the auto title is sent the moment it exists (mid-reply), or only saved when it comes after the reply
+    const title = frames.find((f) => f.event === 'conversation.title');
+    if (title) expect(title.data).toEqual({ type: 'conversation.title', conversation_id: conv.id, title: 'Sapaan Halo Dunia' });
     expect(types.indexOf('text.delta')).toBeLessThan(types.indexOf('text.completed'));
     expect(frames.map((f) => Number(f.id))).toEqual(frames.map((_, i) => i + 1));
     expect(frames[0]!.data).toMatchObject({ type: 'turn.started', conversation_id: conv.id, model: 'auto' });
@@ -149,7 +150,7 @@ describe('conversations', () => {
     expect(msgs.body.data.map((m: any) => m.role)).toEqual(['user', 'assistant']);
     expect(msgs.body.data[1]).toMatchObject({ id: done.message_id, content: [{ type: 'text', text }], stop_reason: 'end_turn' });
     expect(msgs.body.running_turn).toBeNull();
-    expect(msgs.body.conversation.title).toBe('Sapaan Halo Dunia');
+    await expect.poll(async () => (await json(await h.api(`/api/v1/conversations/${conv.id}`))).body.title).toBe('Sapaan Halo Dunia');
   });
 
   it('returns JSON when not streaming (?stream=false) and supports content blocks', async () => {

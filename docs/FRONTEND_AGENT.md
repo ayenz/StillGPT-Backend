@@ -25,8 +25,8 @@ The app should feel like a mainstream AI chat app. UI language: **Bahasa Indones
    current password), credit usage this month (`GET /me`).
 2. **Chat**
    - Sidebar with conversations (newest first, infinite scroll via `next_cursor`), new chat, rename, delete.
-     New chats are auto-titled (ChatGPT style): apply the `conversation.title` SSE event to the sidebar/header; if it
-     did not arrive, refetch the list a few seconds after the first `turn.completed`. Manual rename = `PATCH title`.
+     New chats are auto-titled (ChatGPT style): apply the `conversation.title` SSE event (it can come mid-reply) to the
+     sidebar/header; if it did not arrive before `turn.completed`, refetch the list a few times in the next minute. Manual rename = `PATCH title`.
    - Message view with Markdown rendering (code blocks with copy button, tables, links), streaming replies,
      a "thinking…" indicator, tool chips from `tool.started`/`tool.completed` (e.g. "Mencari di web…", "Membaca dokumen…",
      "Membuat gambar…"), and inline artifacts (images, videos, files) from `artifact` events.

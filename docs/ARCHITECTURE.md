@@ -305,8 +305,10 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `UPSCALE_GPU_URL` + `UPSCALE_GPU_API_KEY` (optional GPU upscaler; upscale is available when it or `FACESWAP_URL` is set),
 `UPSCALE_GPU_TIMEOUT_MS=240000`, `UPSCALE_CPU_TIMEOUT_MS=600000`,
 `IMAGE_PROVIDER_DEFAULT=auto` (`auto|qoder|folax`; `folax` requires the Folax variables),
-`AUTO_TITLE=true` + `AUTO_TITLE_WAIT_MS=5000` (ChatGPT-style chat titles, `core/titler.ts`, model alias `titler`;
-runs on a hidden conversation in parallel with the first native turn; `metadata.title_source` = `auto` | `user`, a user rename pins it).
+`AUTO_TITLE=true` + `AUTO_TITLE_WAIT_MS=5000` (non-streaming replies only) + `AUTO_TITLE_QODER_MS=45000` (ChatGPT-style
+chat titles, `core/titler.ts`, model alias `titler`; runs on a hidden conversation in parallel with the first native
+turn and is announced mid-stream as soon as it exists; Folax `gemini` names it when Qoder fails or is slower than
+`AUTO_TITLE_QODER_MS`; `metadata.title_source` = `auto` | `user`, a user rename pins it).
 
 ## 12. Testing
 

@@ -115,8 +115,13 @@ const schema = z
     IMAGE_PROVIDER_DEFAULT: z.enum(IMAGE_PROVIDERS).default('auto'),
     /** Auto-name native conversations from their first message (ChatGPT style). */
     AUTO_TITLE: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
-    /** How long the first reply's `turn.completed` waits for the title before finishing without it. */
+    /**
+     * Non-streaming first replies only: how long the JSON response waits for the title so it can carry it. Streams never
+     * wait: the title is sent as soon as it exists, while the reply is still running.
+     */
     AUTO_TITLE_WAIT_MS: z.coerce.number().int().min(0).default(5000),
+    /** How long the Qoder title turn may take before Folax (`folax/gemini`) names the conversation instead. */
+    AUTO_TITLE_QODER_MS: z.coerce.number().int().min(1000).default(45_000),
     CORS_ORIGINS: z
       .string()
       .default('*')

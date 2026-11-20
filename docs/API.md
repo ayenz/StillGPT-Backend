@@ -349,9 +349,11 @@ Conversation object:
 
 **Auto title (ChatGPT style).** When a conversation has no title, its first message is named by a fast model
 (alias `titler`) in parallel with the reply, in the language of the message, e.g. "Resep Nasi Goreng Kampung".
-The stream announces it with a `conversation.title` event right before `turn.completed`, and the non-streaming
-response already contains it in `conversation.title`. Until then, and if naming fails or takes longer than ~5 s,
-the title is the first 80 characters of the message; a late generated title is still saved, so refetch the list.
+Neither waits for the other: the stream sends a `conversation.title` event the moment the title exists (usually a few
+seconds in, while the reply is still running), and the non-streaming response contains it in `conversation.title` if
+it comes within ~5 s of the reply. If Qoder fails or takes over 45 s, Folax (`folax/gemini`) names it instead, when
+Folax is configured. Until then, and if naming fails, the title is the first 80 characters of the message; a title
+that comes after the reply has finished is only saved, so refetch the list (e.g. a few times within the first minute).
 A title given at creation or set with `PATCH` (rename) is never overwritten. Only the first message is used.
 `model` and `system_prompt` can be changed between turns, and the context is kept.
 Media models (`qoder-image`, `qoder-video`, `folax-image`, `folax-video`) are rejected here with `400 model_not_supported`.
