@@ -765,22 +765,15 @@ Response (`200` when synchronous, `202` with `async: true`):
   the outputs) and, after a fallback, `fallback_reason` (e.g. `folax_auth_invalid`).
 
 #### Folax edits
-Folax can edit one image in two ways. Both are always explicit and never fall back to Qoder.
+Folax can edit one image with a prompt. It is always explicit and never falls back to Qoder.
 
 - **Prompt edit:** `POST /images` with `provider: "folax"`, exactly **1** `input_file_ids` and a `prompt` that
   describes the change. Folax uses the first 1500 characters. It takes ~10–25 s and returns **one** image.
   - Each edit uses one of the **shared weekly edits** (§8 "Folax status").
   - `n` above 1 is `400 validation_error`.
   - `size` is ignored: Folax decides the size of the result.
-- **Remove people:**
-  ```
-  POST /images/:fileId/remove-people   {"async"?: false, "callback_url"?: "…"}
-  → 200 job (202 with async: true)
-  ```
-  It takes no prompt, ~5 s, and uses **no** weekly quota. `:fileId` is one of your files or outputs; another user's
-  file is `404`.
-- Both create a normal image job with `credits: 0`, `request.provider_used: "folax"` and `request.folax_edit.mode`
-  (`instruction` or `remove_people`). The job shows up in the gallery as usual. The results have no watermark.
+- It creates a normal image job with `credits: 0`, `request.provider_used: "folax"` and
+  `request.folax_edit.mode: "instruction"`. The job shows up in the gallery as usual. The results have no watermark.
 - **Failures** fail the job with a Folax error code (see the table in "Folax status" below), e.g.
   `folax_quota_exceeded`, `content_rejected` or `provider_unavailable`.
   - A synchronous call still answers `200` with `status: "failed"`.
@@ -790,7 +783,7 @@ Folax can edit one image in two ways. Both are always explicit and never fall ba
 
 #### Folax status and the shared quota
 Folax is an optional, nice-to-have provider. Qoder stays the default everywhere. The Folax-only features (Folax chat
-models, Folax image-to-video, Folax edit and remove people) are added in stages. When Folax is down they fail;
+models, Folax image-to-video, Folax prompt edit) are added in stages. When Folax is down they fail;
 they never fall back to Qoder.
 
 ```
@@ -807,8 +800,7 @@ GET /folax/status
   - `down`: unusable. `available` is then `false`, so disable the Folax options. `error.code` is `auth_invalid` (the
     shared Folax login was rejected), `not_configured`, or `unreachable` (the adapter does not answer).
 - The result is cached for about 60 s. A server without Folax returns `configured: false, available: false` and `usage: null`.
-- **The quota is shared by all users.** It is one Folax account, with 20 videos and 20 prompt edits per week; remove
-  people does not count.
+- **The quota is shared by all users.** It is one Folax account, with 20 videos and 20 prompt edits per week.
   - The quota resets **Monday 00:00 UTC** (07:00 WIB). There is no per-user limit: first come, first served.
   - `remaining` is the last value Folax reported. Treat it as an upper bound, because the same account is also used
     outside StillGPT.
@@ -1287,15 +1279,15 @@ fields an admin never changed.
 GET /admin/folax/status
 → 200 {…same fields as GET /folax/status…, "latency_ms": 2140,
        "token": {"accepted": true, "jwt_expires_at": "2026-11-09T02:59:33Z", "jwt_expired": true},
-       "stillgpt_usage": {"since": "2026-11-16T00:00:00.000Z", "videos": 1, "edits": 2, "remove_people": 3, "chat_turns": 14,
-                          "by_user": [{"user_id": "usr_…", "email": "…", "videos": 1, "edits": 2, "remove_people": 3, "chat_turns": 14}]},
+       "stillgpt_usage": {"since": "2026-11-16T00:00:00.000Z", "videos": 1, "edits": 2, "chat_turns": 14,
+                          "by_user": [{"user_id": "usr_…", "email": "…", "videos": 1, "edits": 2, "chat_turns": 14}]},
        "outside_usage": {"videos": 0, "edits": 1}}
 ```
 - `stillgpt_usage` counts what StillGPT itself used in the current quota cycle (`since` = last Monday 00:00 UTC). The
   numbers come from our own database, so they are exact:
   - `videos` and `edits` (prompt edits) are the finished jobs that use the shared weekly quota. Failed jobs use none,
     and deleted jobs still count.
-  - `remove_people` and `chat_turns` are free; they are listed for information.
+  - `chat_turns` are free; they are listed for information.
   - `by_user` gives the same counts per user, most quota first.
 - `outside_usage` is the quota used outside StillGPT this cycle (the Folax app on the account owner's phone, earlier
   tests): `total − remaining` as Folax last reported it, minus `stillgpt_usage`.

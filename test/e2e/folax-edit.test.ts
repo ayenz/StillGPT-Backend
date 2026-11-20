@@ -6,7 +6,7 @@ import { FAKE_JPEG, type FakeFolax, startFakeFolax } from '../fake-folax/index.j
 import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 
-/** Folax edits: prompt edit via POST /images (provider folax + 1 input) and POST /images/:fileId/remove-people. */
+/** Folax edits: prompt edit via POST /images (provider folax + 1 input). */
 
 let folax: FakeFolax;
 let h: Harness;
@@ -24,8 +24,6 @@ afterAll(async () => {
 
 const json = async (res: Response) => ({ status: res.status, body: (await res.json()) as any });
 const createImage = async (payload: Record<string, unknown>) => json(await h.api('/api/v1/images', { method: 'POST', json: payload }));
-const removePeople = async (fileId: string, payload: Record<string, unknown> = {}, key?: string) =>
-  json(await h.api(`/api/v1/images/${fileId}/remove-people`, { method: 'POST', json: payload, key }));
 const edits = () => folax.callsTo('POST /v1/images/edits');
 
 async function upload(bytes: Buffer, key?: string) {
@@ -112,31 +110,9 @@ describe('Folax prompt edit (POST /images, provider folax)', () => {
 });
 
 describe('POST /images/:fileId/remove-people', () => {
-  it('runs synchronously without a prompt', async () => {
-    const png = makePng();
-    const input = await upload(png);
-    const r = await removePeople(input.id);
-    expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ status: 'completed', credits: 0, request: { provider_used: 'folax', folax_edit: { mode: 'remove_people' }, input_file_ids: [input.id] } });
-    expect(r.body.outputs).toHaveLength(1);
-    expect(edits()[0]!.body).toEqual({ mode: 'remove_people', image: png.toString('base64') });
-    expect(edits()[0]!.headers['idempotency-key']).toBe(r.body.id);
-  });
-
-  it('async returns 202 and completes', async () => {
+  it('is gone (the feature was removed)', async () => {
     const input = await upload(makePng());
-    const r = await removePeople(input.id, { async: true });
-    expect(r.status).toBe(202);
-    const done = await waitFor(
-      async () => (await json(await h.api(`/api/v1/jobs/${r.body.id}`))).body,
-      (j) => j.status === 'completed',
-    );
-    expect(done.outputs).toHaveLength(1);
-  });
-
-  it("is 404 for someone else's file", async () => {
-    const mine = await upload(makePng(), h.admin.apiKey);
-    const r = await removePeople(mine.id);
+    const r = await json(await h.api(`/api/v1/images/${input.id}/remove-people`, { method: 'POST', json: {} }));
     expect(r.status).toBe(404);
     expect(edits()).toHaveLength(0);
   });
@@ -146,7 +122,7 @@ describe('FolaxClient.edit', () => {
   it('retries once with the same Idempotency-Key when our side times out', async () => {
     const c = new FolaxClient({ baseUrl: folax.url, apiKey: folax.key, log: silentLogger, timeoutMs: 150 });
     folax.state.editDelayMs = 400;
-    const r = await c.edit({ mode: 'remove_people', image: makePng(), idempotencyKey: 'img_retry1' });
+    const r = await c.edit({ mode: 'instruction', prompt: 'x', image: makePng(), idempotencyKey: 'img_retry1' });
     expect(r.mimeType).toBe('image/jpeg');
     expect(edits().map((x) => x.headers['idempotency-key'])).toEqual(['img_retry1', 'img_retry1']);
   });
@@ -168,8 +144,6 @@ describe('Folax down', () => {
     const r = await createImage({ prompt: 'x', input_file_ids: [input.id], provider: 'folax' });
     expect(r.body).toMatchObject({ status: 'failed', error: { code: 'provider_unavailable' } });
 
-    const again = await removePeople(input.id);
-    expect(again).toMatchObject({ status: 503, body: { error: { code: 'provider_unavailable' } } });
     const edit = await createImage({ prompt: 'x', input_file_ids: [input.id], provider: 'folax' });
     expect(edit.status).toBe(503);
     expect(edits()).toHaveLength(1);

@@ -29,11 +29,6 @@ const imageBody = z.object({
   callback_url: z.unknown().optional(),
 });
 
-const removePeopleBody = z.object({
-  async: z.boolean().optional(),
-  callback_url: z.string().optional(),
-});
-
 const upscaleBody = z.object({
   scale: z.union(UPSCALE_SCALES.map((n) => z.literal(n))).optional(),
   mode: z.enum(UPSCALE_MODES).optional(),
@@ -125,13 +120,6 @@ export function mediaJobRoutes(ctx: AppContext) {
     }
     if (b.async) return c.json(mediaJobJson(await ctx.media.createImageJob(req)), 202);
     return c.json(mediaJobJson(await ctx.media.generateImage(req)));
-  });
-
-  /** Folax "remove people" on one image (~5 s, free, no weekly quota). Sync by default; `async: true` → 202. */
-  app.post('/images/:fileId/remove-people', async (c) => {
-    const b = await body(c, removePeopleBody);
-    const job = await ctx.media.removePeople({ userId: c.get('user').id, fileId: c.req.param('fileId'), callbackUrl: b.callback_url }, { wait: !b.async });
-    return c.json(mediaJobJson(job), b.async ? 202 : 200);
   });
 
   /** Upscale 2x/4x on the upscale sidecar (GPU, CPU fallback; ~30–90 s). Free, no limits. Always async: 202. */

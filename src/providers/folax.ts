@@ -55,7 +55,7 @@ export interface FolaxUsage {
 }
 
 /** Edit modes StillGPT uses (the adapter's `style`/`portrait`/`expand`/`instruction_ids` are not part of the product). */
-export const FOLAX_EDIT_MODES = ['instruction', 'remove_people'] as const;
+export const FOLAX_EDIT_MODES = ['instruction'] as const;
 export type FolaxEditMode = (typeof FOLAX_EDIT_MODES)[number];
 
 interface FolaxEditResponse {
@@ -249,8 +249,8 @@ export class FolaxClient {
   }
 
   /**
-   * `POST /v1/images/edits`, synchronous (~5–25 s): `instruction` = free-prompt edit (weekly quota), `remove_people`
-   * (no prompt, no quota). One image in, one out, no watermark. `idempotencyKey` makes a retry return the same result
+   * `POST /v1/images/edits`, synchronous (~5–25 s): `instruction` = free-prompt edit (weekly quota). One image
+   * in, one out, no watermark. `idempotencyKey` makes a retry return the same result
    * without using quota again; a timeout on our side (504 without `folax_code`) is retried once with the same key.
    */
   async edit(o: { mode: FolaxEditMode; image: Buffer; prompt?: string; idempotencyKey: string; signal?: AbortSignal }): Promise<FolaxEditResult> {

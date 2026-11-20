@@ -6,7 +6,7 @@ import type { Env } from '../../http.js';
 import type { FolaxQuota, FolaxUsage } from '../../providers/folax.js';
 
 /**
- * Folax status for the UI: whether the optional Folax features (chat models, image-to-video, edit, remove people) can
+ * Folax status for the UI: whether the optional Folax features (chat models, image-to-video, prompt edit) can
  * run now, and the shared weekly quota. Folax is a nice-to-have provider: when it is down its features fail, nothing
  * falls back to Qoder.
  */
@@ -37,7 +37,7 @@ export function cycleStart(usage: FolaxUsage | null, now = new Date()): Date {
 
 /**
  * What StillGPT itself used this cycle, from our own DB (exact): finished Folax videos and prompt edits (the two that
- * use the shared quota), remove-people jobs and Folax chat turns (free), in total and per user. Failed jobs use no
+ * use the shared quota) and Folax chat turns (free), in total and per user. Failed jobs use no
  * quota upstream, so only completed ones count; deleted ones still do.
  */
 async function stillgptUsage(ctx: AppContext, since: Date) {
@@ -56,19 +56,18 @@ async function stillgptUsage(ctx: AppContext, since: Date) {
     .where(and(eq(usageEvents.kind, 'chat'), like(usageEvents.model, 'folax/%'), gte(usageEvents.createdAt, since)))
     .groupBy(usageEvents.userId, users.email);
 
-  type Row = { user_id: string; email: string; videos: number; edits: number; remove_people: number; chat_turns: number };
+  type Row = { user_id: string; email: string; videos: number; edits: number; chat_turns: number };
   const byUser = new Map<string, Row>();
   const row = (userId: string, email: string) => {
     let r = byUser.get(userId);
-    if (!r) byUser.set(userId, (r = { user_id: userId, email, videos: 0, edits: 0, remove_people: 0, chat_turns: 0 }));
+    if (!r) byUser.set(userId, (r = { user_id: userId, email, videos: 0, edits: 0, chat_turns: 0 }));
     return r;
   };
   for (const j of jobs) {
     const r = row(j.userId, j.email);
     if (j.kind === 'video') r.videos += j.n;
     else if (j.mode === 'instruction') r.edits += j.n;
-    else if (j.mode === 'remove_people') r.remove_people += j.n;
-    // text-to-image (generate-all) uses no weekly quota and is not listed here
+    // text-to-image (generate-all) and old remove-people jobs use no weekly quota and are not listed here
   }
   for (const c of chats) row(c.userId, c.email).chat_turns += c.n;
   const users_ = [...byUser.values()].sort((a, b) => b.videos + b.edits - (a.videos + a.edits) || a.email.localeCompare(b.email));
@@ -77,7 +76,6 @@ async function stillgptUsage(ctx: AppContext, since: Date) {
     since: since.toISOString(),
     videos: sum('videos'),
     edits: sum('edits'),
-    remove_people: sum('remove_people'),
     chat_turns: sum('chat_turns'),
     by_user: users_,
   };

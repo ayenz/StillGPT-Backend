@@ -45,9 +45,8 @@ describe('cycleStart', () => {
 describe('GET /admin/folax/status', () => {
   it('counts StillGPT usage this cycle (per user) and what was used outside StillGPT', async () => {
     const img = await upload();
-    // quota users: one prompt edit and one video; free: remove people and one chat turn; plus a failed edit (not counted)
+    // quota users: one prompt edit and one video; free: one chat turn; plus a failed edit (not counted)
     expect((await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'langit senja', input_file_ids: [img.id], provider: 'folax' } }))).body.status).toBe('completed');
-    expect((await json(await h.api(`/api/v1/images/${img.id}/remove-people`, { method: 'POST', json: {} }))).body.status).toBe('completed');
     folax.failNext('POST /v1/images/edits', 422, 'content_rejected');
     expect((await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'x', input_file_ids: [img.id], provider: 'folax' } }))).body.status).toBe('failed');
     const video = await json(await h.api('/api/v1/videos', { method: 'POST', json: { prompt: 'angin', first_frame_file_id: img.id, provider: 'folax' } }));
@@ -58,8 +57,8 @@ describe('GET /admin/folax/status', () => {
     // Folax says 12 of 20 videos are left: 1 is ours, so 7 went elsewhere; edits were never observed → unknown
     const r = await json(await h.api('/api/v1/admin/folax/status', { key: h.admin.apiKey }));
     expect(r.status).toBe(200);
-    expect(r.body.stillgpt_usage).toMatchObject({ videos: 1, edits: 1, remove_people: 1, chat_turns: 1 });
-    expect(r.body.stillgpt_usage.by_user).toEqual([{ user_id: h.userId, email: 'user@test.local', videos: 1, edits: 1, remove_people: 1, chat_turns: 1 }]);
+    expect(r.body.stillgpt_usage).toMatchObject({ videos: 1, edits: 1, chat_turns: 1 });
+    expect(r.body.stillgpt_usage.by_user).toEqual([{ user_id: h.userId, email: 'user@test.local', videos: 1, edits: 1, chat_turns: 1 }]);
     expect(r.body.stillgpt_usage.since).toBe('2026-11-16T00:00:00.000Z');
     expect(r.body.outside_usage).toEqual({ videos: 7, edits: null });
 

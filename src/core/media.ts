@@ -105,13 +105,6 @@ export interface ImageRequest {
   extra?: Record<string, unknown>;
 }
 
-/** Folax "remove people" on one of the user's images (no prompt, no quota). */
-export interface RemovePeopleRequest {
-  userId: string;
-  fileId: string;
-  callbackUrl?: string;
-}
-
 /** Upscale of one of the user's images (free, no quota). */
 export interface UpscaleRequest {
   userId: string;
@@ -331,7 +324,7 @@ const DRAINING = /instance is draining|"type":"draining"|HTTP 423/i;
 const GENERATOR_TOOLS = new Set(['ImageGen', 'VideoGen']);
 
 /** Typical wall-clock durations, used only to estimate progress. */
-const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_remove_people: 6_000, folax_video: 150_000, faceswap: 15_000, upscale: 60_000 } as const;
+const EXPECTED_MS = { image: 30_000, video: 210_000, folax: 12_000, folax_edit: 18_000, folax_video: 150_000, faceswap: 15_000, upscale: 60_000 } as const;
 /** A Folax video is given up after this long (the adapter's own job timeout is 15 min). */
 const FOLAX_VIDEO_MAX_MS = 20 * 60_000;
 /** Consecutive failed status polls (adapter unreachable, upstream hiccups) before a Folax video job fails. */
@@ -495,29 +488,6 @@ export class MediaService {
     const runs = rows.map((job) => this.run(job));
     if (opts.wait) await Promise.all(runs);
     return this.getBatch(batchId, v.userId);
-  }
-
-  /**
-   * Folax "remove people" on one image: an image job with `provider_used: folax` and `request.folax_edit.mode =
-   * remove_people`. Free, uses no weekly quota, ~5 s. Never falls back to Qoder. `wait` resolves when it finished.
-   */
-  async removePeople(req: RemovePeopleRequest, opts: { wait?: boolean } = {}): Promise<MediaJobView> {
-    this.assertFolaxUsable();
-    const { v, request } = await this.prepareImage({
-      userId: req.userId,
-      prompt: 'Remove people',
-      inputFileIds: [req.fileId],
-      provider: 'folax',
-      callbackUrl: req.callbackUrl,
-      extra: { folax_edit: { mode: 'remove_people' } },
-    });
-    const job = await this.insertJob(v.userId, 'image', request, v.callbackUrl);
-    if (!opts.wait) {
-      void this.run(job);
-      return this.view(job);
-    }
-    await this.run(job);
-    return this.getJob(job.id, v.userId);
   }
 
   /**
@@ -990,7 +960,7 @@ export class MediaService {
   }
 
   /**
-   * Folax edit (`instruction` with the job's prompt, or `remove_people`) of the job's one input image. The job id is the
+   * Folax prompt edit (`instruction` with the job's prompt) of the job's one input image. The job id is the
    * Idempotency-Key, so a re-run after a restart gets the adapter's stored result without using quota again. Free.
    */
   private async runFolaxEdit(job: MediaJob): Promise<Outcome> {
@@ -1331,7 +1301,7 @@ export class MediaService {
   /** Time-based progress estimate (upstream reports none), capped at 95 until the job is done. */
   private trackProgress(job: MediaJob, startedAt: Date): () => void {
     const edit = folaxEditOf(job);
-    const base = edit ? EXPECTED_MS[`folax_${edit === 'instruction' ? 'edit' : edit}`] : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : upscaleOf(job) ? EXPECTED_MS.upscale : EXPECTED_MS[job.kind];
+    const base = edit ? EXPECTED_MS.folax_edit : usesFolaxVideo(job) ? EXPECTED_MS.folax_video : usesFolax(job) ? EXPECTED_MS.folax : faceSwapEngineOf(job) === 'swapper' ? EXPECTED_MS.faceswap : upscaleOf(job) ? EXPECTED_MS.upscale : EXPECTED_MS[job.kind];
     const expected = base * (job.kind === 'video' && !usesFolaxVideo(job) ? Math.max(1, Number(job.request.seconds) / 5) ** 0.5 : 1);
     let last = 0;
     const timer = setInterval(() => {
@@ -1691,7 +1661,7 @@ interface FolaxVideoState {
 /** The Folax edit mode of an image job, or null for any other job. */
 function folaxEditOf(job: MediaJob): FolaxEditMode | null {
   const mode = usesFolax(job) ? (job.request.folax_edit as { mode?: unknown } | undefined)?.mode : undefined;
-  return mode === 'instruction' || mode === 'remove_people' ? mode : null;
+  return mode === 'instruction' ? mode : null;
 }
 
 function inputIds(job: MediaJob): string[] {
