@@ -286,8 +286,8 @@ still refuse `tools` (`400 tools_not_supported`).
   - `file` parts are `400 unsupported_attachment`.
 - **Limits:** 150,000 characters (the tool schemas count) and 500 messages per request.
 - **Errors:** the same as for Folax chat: `429 provider_busy` (all 4 agent slots are busy; retry after `Retry-After`),
-  `503 provider_unavailable`, `504 folax_timeout`, `502 folax_failed`. An invalid `tools` / `tool_choice` gives `502
-  folax_failed` with the adapter's message. Legacy `functions` are `400 invalid_request`.
+  `503 provider_unavailable`, `504 folax_timeout`, `502 folax_failed`. An invalid `tools` / `tool_choice` gives `400
+  invalid_request` with the adapter's message. Legacy `functions` are `400 invalid_request`.
 
 **OpenCode** (`opencode.json`):
 ```json

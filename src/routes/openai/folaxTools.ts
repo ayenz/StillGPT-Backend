@@ -68,7 +68,12 @@ export async function folaxToolsProxy(ctx: AppContext, c: Context<Env>, body: Js
   };
   const abort = new AbortController();
   const res = await folax.send('/v1/chat/completions', { json: upstream, timeoutMs: STEP_TIMEOUT_MS, signal: abort.signal });
-  if (!res.ok) throw await folax.failure('/v1/chat/completions', res);
+  if (!res.ok) {
+    const err = await folax.failure('/v1/chat/completions', res);
+    // the adapter rejected the client's own tools / tool_choice / messages: that is a 400, not a Folax failure
+    if (err.details?.folax_code === 'invalid_request') throw badRequest(err.message.replace(/^Folax: /, ''), 'invalid_request', { param: 'tools' });
+    throw err;
+  }
   const record = () =>
     ctx.usage.record({ userId: user.id, kind: 'chat', model, credits: zeroCredits(), free: true }).catch((err) => ctx.log.warn('folax.tools_usage_failed', { err }));
   c.header('X-StillGPT-Model', model);

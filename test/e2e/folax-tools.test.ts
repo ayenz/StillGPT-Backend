@@ -112,6 +112,11 @@ describe('Folax tool calling', () => {
     expect(chats()).toHaveLength(0);
   });
 
+  it('invalid tools rejected by the adapter are a 400', async () => {
+    folax.failNext('POST /v1/chat/completions', 400, 'invalid_request', undefined, 'tool_choice tidak valid');
+    await expect(openai.chat.completions.create({ model: 'folax/chatgpt', messages: [{ role: 'user', content: 'x' }], tools, tool_choice: 'required' })).rejects.toMatchObject({ status: 400, code: 'invalid_request', message: expect.stringContaining('tool_choice tidak valid') });
+  });
+
   it('a busy adapter is a 429 before the stream opens', async () => {
     folax.failNext('POST /v1/chat/completions', 429, 'queue_timeout', { 'Retry-After': '5' });
     await expect(openai.chat.completions.create({ model: 'folax/chatgpt', stream: true, messages: [{ role: 'user', content: 'x' }], tools })).rejects.toMatchObject({ status: 429, code: 'provider_busy' });
