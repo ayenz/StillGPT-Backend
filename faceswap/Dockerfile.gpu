@@ -9,8 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     FACESWAP_MODEL_DIR=/models \
-    FACESWAP_UPSCALE_ONLY=0 \
-    FACESWAP_DEVICE=cuda \
+    FACESWAP_UPSCALE_ONLY=1 \
     UPSCALE_DEVICE=cuda \
     PORT=8080
 
@@ -19,6 +18,11 @@ COPY requirements-gpu.txt .
 RUN pip install --only-binary=:all: -r requirements-gpu.txt \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin faceswap \
     && mkdir -p /models && chown faceswap:faceswap /models
+# Everything above is the ~3 GB CUDA wheel layer: keep it unchanged (and the ENV above it), add new things below.
+# onnx only extracts inswapper's emap once (first start of face swap).
+RUN pip install --only-binary=:all: onnx==1.23.2
+ENV FACESWAP_UPSCALE_ONLY=0 \
+    FACESWAP_DEVICE=cuda
 
 COPY app ./app
 
