@@ -226,7 +226,7 @@ export function filmKind(d: FilmDeps): RunKind<FilmInput> {
           );
           clips[i] = out.files[0]!.id;
           animated.n++;
-          await rc.setState({ clips: clips.map((c, k) => ({ n: k + 1, file_id: c ?? null })) });
+          await rc.setState({ clips: Array.from(clips, (c, k) => ({ n: k + 1, file_id: c ?? null })) }); // Array.from: no holes (null in JSON)
           await rc.stage('animate', `${animated.n}/${script.scenes.length} scenes animated`, 40 + (48 * animated.n) / script.scenes.length);
         }),
       );
