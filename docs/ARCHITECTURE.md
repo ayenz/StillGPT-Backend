@@ -53,6 +53,7 @@ See `docs/QODER_API_NOTES.md` for payload shapes. Key facts that drive the desig
 | `assistant` | Read Bash Glob Grep WebFetch WebSearch ImageSearch ImageGen VideoGen DeliverArtifacts | PWA default ("ChatGPT-like") |
 | `image` | ImageGen DeliverArtifacts (+Read Glob for edits) | image endpoints |
 | `video` | VideoGen DeliverArtifacts Read Glob | video endpoints |
+| `research` | WebSearch WebFetch Bash Read Glob Grep DeliverArtifacts | deep research agents, report rendering |
 
 Agents are created lazily by `AgentPool` (one per profile, default model `efficient`) and cached in table `qoder_agents`.
 Per-conversation model/system differences are applied with a session patch, so we never need an agent per model.
@@ -219,7 +220,7 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 
 ## 7b. Runs: multi-agent jobs (core/runs/)
 
-Design and roadmap (deep research, short film): `docs/DESIGN_RUNS.md`. Implemented: the engine and the council.
+Design and roadmap (short film): `docs/DESIGN_RUNS.md`. Implemented: the engine, the council and deep research.
 
 - Tables `runs` (kind, status `queued|running|awaiting_input|completed|failed|cancelled`, input, state, result, credits,
   optional `conversation_id`/`message_id`) and `run_steps` (unique `(run_id, key)`, output, hidden conversation, credits).
@@ -243,6 +244,13 @@ Design and roadmap (deep research, short film): `docs/DESIGN_RUNS.md`. Implement
   (`COUNCIL_JUDGES`, Qoder only) get the answers shuffled per judge (deterministic seed) and labelled A, B, …, reply JSON
   (`judge:<i>:<model>`) → Borda count, ties by mean score → synthesizer (`COUNCIL_SYNTHESIZER`) merges the top 3
   (falls back to the winner) → `council_results` rows (`stats`) for `GET /admin/council/leaderboard`.
+- **Deep research** (`research.ts`, virtual models `research`/`research-deep`): `plan` (JSON: sub-questions + outline;
+  optional `plan_review` input) → `research:<qid>` agents on the `research` profile (WebSearch/WebFetch sandbox) reply
+  JSON findings with URLs → `gap:<round>` adds follow-up questions → (`deep`) `verify:<i>` re-checks medium/low claims →
+  sources deduplicated and numbered in question order (stable on resume) → `section:<i>` writers in parallel (only the
+  findings/sources they cover) → `edit` merges (streamed) + a code-built "Sources" list → `save_md` (MediaStore) →
+  `render` (sandbox pandoc/LibreOffice → PDF/DOCX via DeliverArtifacts; `TurnStepOutput.files`). `result.files` become
+  the chat reply's artifacts. `notify: true` → push/FCM when done.
 
 ## 8. Webhooks / n8n (core/webhooks.ts)
 
@@ -327,7 +335,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`; the PAT may also be left empty and set by an admin via `/admin/qoder/credential`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `RUN_CONCURRENCY=4`, `RUN_TURN_CONCURRENCY=12`, `RUN_RETRY_BASE_MS=1000`,
-`COUNCIL_JUDGES=smart,kmodel_latest,gmodel`, `COUNCIL_SYNTHESIZER=smart`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
+`COUNCIL_JUDGES=smart,kmodel_latest,gmodel`, `COUNCIL_SYNTHESIZER=smart`, `RESEARCH_PLANNER=smart`, `RESEARCH_WORKER=default`, `RESEARCH_WRITER=smart`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` (+ `VAPID_SUBJECT`, default `PUBLIC_BASE_URL`; Web Push "creation ready" notifications, `core/push.ts`, off when unset),

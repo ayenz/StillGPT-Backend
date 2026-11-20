@@ -18,7 +18,7 @@ StillGPT also serves OpenAI- and Anthropic-compatible endpoints for existing too
 - [12. Limits and latencies](#12-limits-and-latencies)
 - [13. OpenAI- and Anthropic-compatible endpoints](#13-openai--and-anthropic-compatible-endpoints)
 - [14. n8n recipes](#14-n8n-recipes)
-- [15. Runs (multi-agent jobs: council)](#15-runs-multi-agent-jobs-council)
+- [15. Runs (multi-agent jobs: council, deep research)](#15-runs-multi-agent-jobs-council-deep-research)
 
 ---
 
@@ -318,20 +318,23 @@ models:
 ```
 Then use Continue's **Agent** mode.
 
-#### Council (virtual models `council`, `council-debate`)
+#### Virtual models: council and deep research
 
-`GET /models` also lists two models StillGPT runs itself, with `provider: "stillgpt"`:
+`GET /models` also lists models StillGPT runs itself, with `provider: "stillgpt"`:
 
 | id | what happens on each message |
 |---|---|
 | `council` | every active Qoder model (and the Folax chat models, when configured and the message has no documents and ≤ 4 images) answers in parallel → 2–3 judge models rank the answers blind → a synthesizer writes the final reply from the best three |
 | `council-debate` | the same, plus one round where every model reads the others' answers (anonymised) and revises its own before judging |
+| `research` | deep research (`depth: standard`): plan → 8 web research agents → one follow-up round → cited sections → edited report. The reply is the report in Markdown with a numbered source list; `.md`, `.pdf` and `.docx` files come as artifacts. ~5–15 min |
+| `research-deep` | the same with `depth: deep`: 14 agents, 3 rounds and re-checks of shaky claims. ~15–30 min |
 
 Use them like any chat model: `model: "council"` on a conversation (native API) or in `/v1/chat/completions` /
 `/v1/messages`. The reply streams as normal `text.delta` events (only the final answer). While the members work, the
 native stream also carries `run.event` frames (see the event catalogue), so a UI can show live panels per model.
-Expect 30 s to a few minutes per message. Every message creates a run (§15) linked to the conversation; interrupting
-the turn cancels it. Judges, synthesizer and models are server settings (`COUNCIL_JUDGES`, `COUNCIL_SYNTHESIZER`); to
+A council message takes 30 s to a few minutes, a research message several minutes (the user gets a push notification
+when a report is ready). Every message creates a run (§15) linked to the conversation; interrupting the turn cancels
+it. Images and files sent with the message go to every model (council) or are mounted for every research agent. Judges, synthesizer and models are server settings (`COUNCIL_JUDGES`, `COUNCIL_SYNTHESIZER`); to
 choose them per request, use `POST /runs` with `kind: "council"`.
 
 ---
@@ -1539,10 +1542,10 @@ if the URL is public.
 
 ---
 
-## 15. Runs (multi-agent jobs: council)
+## 15. Runs (multi-agent jobs: council, deep research)
 
-A **run** is a long job that StillGPT executes as many hidden model turns (council now; deep research and short films
-are planned). Runs are durable: steps that finished are stored, so a server restart resumes a run where it stopped.
+A **run** is a long job that StillGPT executes as many hidden model turns (council, deep research; short films are
+planned). Runs are durable: steps that finished are stored, so a server restart resumes a run where it stopped.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -1608,4 +1611,34 @@ Extra events: `answer.delta {model, text}` (live text per member), `answer.done 
 `result`: `{text, winner, category, ranking: [{model, rank, points, score, failed}], synthesized_by, members, answered,
 mode}`. `points` is the Borda count over the judges' rankings; `score` the judges' mean total (0–10); members that
 failed to answer come last with `rank: null, failed: true`.
+
+### Deep research (`kind: "research"`)
+```json
+{"kind": "research", "input": {
+  "prompt": "Riset pasar kopi susu literan di Jabodetabek 2026",
+  "attachments": ["file_…"],
+  "depth": "standard",
+  "language": "Indonesian",
+  "formats": ["pdf", "docx"],
+  "review_plan": false
+}}
+```
+- `depth`: `quick` (4 questions, 1 round), `standard` (default: 8 questions, 2 rounds), `deep` (14 questions, 3 rounds,
+  plus up to 10 fact-checks of medium/low-confidence claims; unsupported claims are dropped).
+- `language`: the report language (default: the language of the question). `formats`: files rendered in the sandbox
+  besides the always-present `.md` (default `["pdf"]`; `[]` = Markdown only).
+- `review_plan: true` stops after planning with `status: "awaiting_input"` and `state.awaiting = {key: "plan_review",
+  what: "plan", plan: {title, objective, sub_questions, outline}}`. Continue with `POST /runs/:id/input`:
+  `{"value": null}` keeps the plan, `{"value": {"sub_questions": [{"question": "…"}], "outline": [{"heading": "…",
+  "covers": ["q1"]}]}}` replaces either part (ids are reassigned q1, q2, … in order).
+- `planner`, `worker`, `writer`: model overrides (defaults `RESEARCH_PLANNER=smart`, `RESEARCH_WORKER=default`,
+  `RESEARCH_WRITER=smart`). Workers use the `research` profile (WebSearch, WebFetch, Bash, Read, Glob, Grep).
+
+Stages (`state.stage`): `plan` → `research` → (`verify`) → `write` → `edit` → `render`. Extra events:
+`research.question {id, question, ok, findings}`; `run.text.delta` streams the edited report.
+`state` also has `plan`, `follow_ups`, `sources` and `findings` counts.
+
+`result`: `{text (Markdown report + "## Sources"), title, files: [{id, name, mimeType, size}] (`.md` first, then the
+rendered `.pdf`/`.docx` that succeeded; `GET /files/:id` for URLs), sources: [{n, url, title}], stats: {questions,
+answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` matching `sources`.
 

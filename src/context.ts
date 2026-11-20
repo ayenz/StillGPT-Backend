@@ -17,6 +17,7 @@ import { QoderCredentialService } from './core/qoderCredential.js';
 import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
 import { councilKind } from './core/runs/council.js';
+import { researchKind } from './core/runs/research.js';
 import { RunService } from './core/runs/service.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
@@ -252,6 +253,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     conversations,
     bus,
     log: log.child({ mod: 'runs' }),
+    store,
     push,
     fcm,
     webhooks,
@@ -262,6 +264,9 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   runService.register(councilKind({ db, models, folax, judges: config.COUNCIL_JUDGES, synthesizer: config.COUNCIL_SYNTHESIZER }));
   runService.registerVirtualModel('council', 'council', ({ content, preamble }) => ({ content, preamble, mode: 'synthesize' }));
   runService.registerVirtualModel('council-debate', 'council', ({ content, preamble }) => ({ content, preamble, mode: 'debate' }));
+  runService.register(researchKind({ store, planner: config.RESEARCH_PLANNER, worker: config.RESEARCH_WORKER, writer: config.RESEARCH_WRITER }));
+  runService.registerVirtualModel('research', 'research', ({ content, preamble }) => ({ content, preamble, depth: 'standard', formats: ['pdf', 'docx'] }));
+  runService.registerVirtualModel('research-deep', 'research', ({ content, preamble }) => ({ content, preamble, depth: 'deep', formats: ['pdf', 'docx'] }));
 
   models.onChange = (changes) => {
     for (const c of changes) void webhooks.emit(null, c.type, { model: { id: c.model.id, display_name: c.model.displayName }, ...('previous' in c ? { previous: c.previous } : {}) });

@@ -1,5 +1,5 @@
 /** A profile = the tool set of a Qoder agent. Model and system prompt are applied per session. */
-export type ProfileName = 'chat' | 'assistant' | 'image' | 'video';
+export type ProfileName = 'chat' | 'assistant' | 'image' | 'video' | 'research';
 
 export interface Profile {
   name: ProfileName;
@@ -25,6 +25,13 @@ export const PROFILES: Record<ProfileName, Profile> = {
     tools: ['ImageGen', 'DeliverArtifacts', 'Read', 'Glob'],
     system:
       'You are an image generation backend. For each request call ImageGen exactly once with the given parameters, then deliver the result with DeliverArtifacts. Never ask questions. Reply with one short sentence.',
+  },
+  research: {
+    name: 'research',
+    tools: ['WebSearch', 'WebFetch', 'Bash', 'Read', 'Glob', 'Grep', 'DeliverArtifacts'],
+    system:
+      'You are a meticulous research agent working inside a research pipeline. Search broadly, open and read the actual sources, prefer primary, official and recent ones, and cross-check important facts.' +
+      ' Never invent facts, numbers, quotes or URLs: every claim you report must come from a page you opened (or from a file under /data/attachments/). Never ask questions. When the task asks for JSON, your final message must be only that JSON.',
   },
   video: {
     name: 'video',

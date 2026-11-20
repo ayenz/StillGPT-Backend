@@ -89,6 +89,10 @@ const schema = z
       .transform((v) => v.split(',').map((x) => x.trim()).filter(Boolean)),
     /** Model that writes the council's final answer from the best ones. */
     COUNCIL_SYNTHESIZER: z.string().trim().min(1).default('smart'),
+    /** Deep research: plans and judges gaps / runs the web research agents / writes and edits the report. */
+    RESEARCH_PLANNER: z.string().trim().min(1).default('smart'),
+    RESEARCH_WORKER: z.string().trim().min(1).default('default'),
+    RESEARCH_WRITER: z.string().trim().min(1).default('smart'),
     /** Default retention: Qoder sessions idle longer than this are archived and their Qoder files deleted (local copies stay). Admins can override it. */
     QODER_RETENTION_HOURS: z.coerce.number().positive().default(24),
     /** Default interval of the Qoder housekeeping pass; 0 = disabled by default. Admins can override it. */

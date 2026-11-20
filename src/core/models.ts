@@ -31,6 +31,8 @@ export interface Resolution {
 export const VIRTUAL_CHAT_MODELS = [
   { id: 'council', name: 'Council (every model answers, judges pick and merge)' },
   { id: 'council-debate', name: 'Council with debate (models revise after reading each other)' },
+  { id: 'research', name: 'Deep Research (web research report with sources, ~5–15 min)' },
+  { id: 'research-deep', name: 'Deep Research, thorough (3 rounds + fact-checks, ~15–30 min)' },
 ] as const;
 
 export const isVirtualModelId = (id: string | null | undefined) => VIRTUAL_CHAT_MODELS.some((m) => m.id === (id ?? '').trim().toLowerCase());

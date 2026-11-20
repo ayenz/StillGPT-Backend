@@ -212,7 +212,7 @@ describe('council runs (API)', () => {
 describe('council as a chat model', () => {
   it('is listed as a model', async () => {
     const native = await json(await h.api('/api/v1/models'));
-    expect(native.data.filter((m: any) => m.provider === 'stillgpt').map((m: any) => m.id)).toEqual(['council', 'council-debate']);
+    expect(native.data.filter((m: any) => m.provider === 'stillgpt').map((m: any) => m.id)).toEqual(['council', 'council-debate', 'research', 'research-deep']);
     const openai = await json(await h.api('/v1/models'));
     expect(openai.data.some((m: any) => m.id === 'council' && m.owned_by === 'stillgpt')).toBe(true);
   });

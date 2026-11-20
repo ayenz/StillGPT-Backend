@@ -10,6 +10,7 @@ import type { ConversationService } from '../conversations.js';
 import type { FcmService } from '../fcm.js';
 import type { ProfileName } from '../profiles.js';
 import type { PushService } from '../push.js';
+import type { MediaStore } from '../storage.js';
 import type { TurnRunner, VirtualTurnOutcome } from '../turns.js';
 import type { WebhookService } from '../webhooks.js';
 import { parseJsonReply } from './json.js';
@@ -52,6 +53,8 @@ export interface TurnStepOutput {
   credits: number;
   conversationId: string;
   ms: number;
+  /** Files the agent delivered (our file ids). */
+  files?: { id: string; name: string; mimeType: string; size: number }[];
 }
 
 export interface StepOptions {
@@ -125,6 +128,8 @@ export interface RunServiceDeps {
   conversations: ConversationService;
   bus: EventBus;
   log: Logger;
+  /** Turns `result.files` into reply artifacts. */
+  store?: MediaStore | null;
   push?: PushService | null;
   fcm?: FcmService | null;
   webhooks?: WebhookService | null;
@@ -321,7 +326,7 @@ export class RunService {
         forward.abort();
         await pump.catch(() => {});
         const text = typeof done.result?.text === 'string' ? done.result.text : '';
-        if (done.status === 'completed') return { text, model: modelId };
+        if (done.status === 'completed') return { text, model: modelId, artifacts: await this.resultArtifacts(done) };
         if (done.status === 'cancelled') return { text, model: modelId, stopReason: 'interrupted' };
         return { text, model: modelId, error: done.error ?? { code: 'run_failed', message: 'The run failed' } };
       } finally {
@@ -329,6 +334,19 @@ export class RunService {
         this.attached.delete(run.id);
       }
     });
+  }
+
+  /** `result.files` ([{id}]) as artifacts with signed URLs (files that are gone are skipped). */
+  private async resultArtifacts(r: RunRow) {
+    const files = Array.isArray(r.result?.files) ? (r.result.files as { id?: unknown }[]) : [];
+    if (!this.d.store || !files.length) return [];
+    const out = [];
+    for (const f of files) {
+      if (typeof f?.id !== 'string') continue;
+      const file = await this.d.store.get(f.id, r.userId).catch(() => null);
+      if (file) out.push(this.d.store.toArtifact(file));
+    }
+    return out;
   }
 
   /** Recent chat history as a transcript for workers that start without the conversation's session. */
@@ -449,11 +467,13 @@ export class RunService {
     const [exists] = await this.d.db.select({ id: messageRows.id }).from(messageRows).where(eq(messageRows.id, r.messageId));
     if (exists) return;
     const text = typeof r.result?.text === 'string' ? r.result.text : '';
+    const artifacts = (await this.resultArtifacts(r)).map((a) => ({ fileId: a.id, name: a.name, mimeType: a.mimeType, size: a.size, kind: a.kind }));
     await this.d.conversations.addMessage({
       id: r.messageId,
       conversationId: r.conversationId,
       role: 'assistant',
       content: text ? [{ type: 'text', text }] : [],
+      artifacts,
       model: r.kind,
       credits: r.credits,
       stopReason: r.status === 'completed' ? 'end_turn' : r.status === 'cancelled' ? 'interrupted' : 'error',
@@ -676,8 +696,9 @@ export class RunContext<I> {
         const r = await handle.done;
         this.checkCancelled();
         if (r.stopReason === 'error') throw new AppError(502, r.error?.code ?? 'upstream_error', r.error?.message ?? 'The turn failed');
-        if (!r.text.trim()) throw new AppError(502, 'empty_reply', `${r.model || o.model} returned an empty reply`);
-        const out: TurnStepOutput = { text: r.text, model: r.model, credits: r.credits.total, conversationId: conv.id, ms: Date.now() - started };
+        if (!r.text.trim() && !r.artifacts.length) throw new AppError(502, 'empty_reply', `${r.model || o.model} returned an empty reply`);
+        const files = r.artifacts.map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType, size: a.size }));
+        const out: TurnStepOutput = { text: r.text, model: r.model, credits: r.credits.total, conversationId: conv.id, ms: Date.now() - started, ...(files.length ? { files } : {}) };
         return { output: out, ...out };
       } finally {
         this.signal.removeEventListener('abort', onAbort);
