@@ -18,6 +18,8 @@ import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
 import { councilKind } from './core/runs/council.js';
 import { researchKind } from './core/runs/research.js';
+import { type FilmAssembler, FfmpegAssembler } from './core/runs/assembler.js';
+import { filmKind } from './core/runs/film.js';
 import { RunService } from './core/runs/service.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
@@ -99,6 +101,8 @@ export interface ContextOverrides {
   pushSender?: PushSender;
   /** fetch for FCM only (OAuth + messages:send); defaults to `fetchImpl` (tests). */
   fcmFetch?: typeof fetch;
+  /** Replaces the ffmpeg film assembler (tests). */
+  filmAssembler?: FilmAssembler;
 }
 
 export async function createContext(config: Config, o: ContextOverrides = {}): Promise<AppContext> {
@@ -254,6 +258,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     bus,
     log: log.child({ mod: 'runs' }),
     store,
+    media,
     push,
     fcm,
     webhooks,
@@ -267,6 +272,16 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   runService.register(researchKind({ store, planner: config.RESEARCH_PLANNER, worker: config.RESEARCH_WORKER, writer: config.RESEARCH_WRITER }));
   runService.registerVirtualModel('research', 'research', ({ content, preamble }) => ({ content, preamble, depth: 'standard', formats: ['pdf', 'docx'] }));
   runService.registerVirtualModel('research-deep', 'research', ({ content, preamble }) => ({ content, preamble, depth: 'deep', formats: ['pdf', 'docx'] }));
+  runService.register(
+    filmKind({
+      media,
+      store,
+      faces,
+      assembler: o.filmAssembler ?? (ffmpeg ? new FfmpegAssembler(ffmpeg) : null),
+      writer: config.FILM_WRITER,
+      vision: 'vision',
+    }),
+  );
 
   models.onChange = (changes) => {
     for (const c of changes) void webhooks.emit(null, c.type, { model: { id: c.model.id, display_name: c.model.displayName }, ...('previous' in c ? { previous: c.previous } : {}) });

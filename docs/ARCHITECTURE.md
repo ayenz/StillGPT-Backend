@@ -220,7 +220,7 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 
 ## 7b. Runs: multi-agent jobs (core/runs/)
 
-Design and roadmap (short film): `docs/DESIGN_RUNS.md`. Implemented: the engine, the council and deep research.
+Design: `docs/DESIGN_RUNS.md`. Implemented: the engine, the council, deep research and short films.
 
 - Tables `runs` (kind, status `queued|running|awaiting_input|completed|failed|cancelled`, input, state, result, credits,
   optional `conversation_id`/`message_id`) and `run_steps` (unique `(run_id, key)`, output, hidden conversation, credits).
@@ -251,6 +251,17 @@ Design and roadmap (short film): `docs/DESIGN_RUNS.md`. Implemented: the engine,
   findings/sources they cover) → `edit` merges (streamed) + a code-built "Sources" list → `save_md` (MediaStore) →
   `render` (sandbox pandoc/LibreOffice → PDF/DOCX via DeliverArtifacts; `TurnStepOutput.files`). `result.files` become
   the chat reply's artifacts. `notify: true` → push/FCM when done.
+- **Short film** (`film.ts`, `assembler.ts`; API only, no chat model — it can take longer than a turn's 45 min):
+  `script` + `script_revise` (JSON, then `normalize`: 3–10 s scenes, ≤ 24, unknown character ids dropped) → `cast:<id>`
+  image jobs (from a saved face when cast) → `frame:<n>` keyframes (image edits with the scene's cast sheets) checked by
+  `check:frame:<n>` (vision JSON score; < 3 → `frame:<n>:fix`) → optional `storyboard_review:<round>` input (redo →
+  `frame:<n>:redo<round>`) → `clip:<n>` VideoGen first-frame jobs (last frame = next keyframe for continuous shots) →
+  `title_card` → `assemble` (local: `FfmpegAssembler` normalises every clip to the film size/30 fps/AAC stereo with
+  0.3 s fades, adds silence where a clip has no audio, concat-copies, then loudnorm + a mov_text subtitle track from
+  the dialogue) → the film is stored and recorded as a completed gallery video job (`MediaService.recordVideo`).
+  `rc.mediaJob` stores the job id on the step at once, so a resumed run waits for the same job (videos cannot be
+  cancelled upstream); a failed job clears it and the retry starts a new one. Jobs with `request.run_id` are hidden from
+  gallery lists and never notify devices; `result.open_path` is where the run's push notification opens.
 
 ## 8. Webhooks / n8n (core/webhooks.ts)
 
@@ -335,7 +346,7 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`; the PAT may also be left empty and set by an admin via `/admin/qoder/credential`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
 `MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `RUN_CONCURRENCY=4`, `RUN_TURN_CONCURRENCY=12`, `RUN_RETRY_BASE_MS=1000`,
-`COUNCIL_JUDGES=smart,kmodel_latest,gmodel`, `COUNCIL_SYNTHESIZER=smart`, `RESEARCH_PLANNER=smart`, `RESEARCH_WORKER=default`, `RESEARCH_WRITER=smart`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
+`COUNCIL_JUDGES=smart,kmodel_latest,gmodel`, `COUNCIL_SYNTHESIZER=smart`, `RESEARCH_PLANNER=smart`, `RESEARCH_WORKER=default`, `RESEARCH_WRITER=smart`, `FILM_WRITER=smart`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` (+ `VAPID_SUBJECT`, default `PUBLIC_BASE_URL`; Web Push "creation ready" notifications, `core/push.ts`, off when unset),

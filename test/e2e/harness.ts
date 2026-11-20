@@ -7,6 +7,7 @@ import { createApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import { type AppContext, createContext } from '../../src/context.js';
 import type { PushSender } from '../../src/core/push.js';
+import type { FilmAssembler } from '../../src/core/runs/assembler.js';
 import { silentLogger } from '../../src/log.js';
 import { type MockQoder, type MockQoderOptions, startMockQoder } from '../mock-qoder/index.js';
 
@@ -29,7 +30,9 @@ export interface Harness {
  * Boots mock Qoder + StillGPT (in-memory PGlite, temp media dir) on random ports.
  * Everything is real except the upstream.
  */
-export async function startHarness(opts: { mock?: MockQoderOptions; env?: Record<string, string>; pushSender?: PushSender; fcmFetch?: typeof fetch } = {}): Promise<Harness> {
+export async function startHarness(
+  opts: { mock?: MockQoderOptions; env?: Record<string, string>; pushSender?: PushSender; fcmFetch?: typeof fetch; filmAssembler?: FilmAssembler } = {},
+): Promise<Harness> {
   const qoder = await startMockQoder({ heartbeatMs: 1000, ...opts.mock });
   const mediaDir = await mkdtemp(join(tmpdir(), 'qr-media-'));
   const admin = { email: 'admin@test.local', password: 'admin-password-123' };
@@ -47,7 +50,7 @@ export async function startHarness(opts: { mock?: MockQoderOptions; env?: Record
     LOG_LEVEL: 'error',
     ...opts.env,
   });
-  const ctx = await createContext(config, { log: silentLogger, qoderRetryBaseMs: 5, pushSender: opts.pushSender, fcmFetch: opts.fcmFetch });
+  const ctx = await createContext(config, { log: silentLogger, qoderRetryBaseMs: 5, pushSender: opts.pushSender, fcmFetch: opts.fcmFetch, filmAssembler: opts.filmAssembler });
   const app = createApp(ctx);
   const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
   await new Promise<void>((r) => server.once('listening', () => r()));

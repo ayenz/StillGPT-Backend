@@ -200,7 +200,16 @@ export interface VideoRequest {
    */
   provider?: VideoProvider;
   callbackUrl?: string;
+  /** Server-side extras merged into the stored job `request` (e.g. `run_id`); never set from client input. */
+  extra?: Record<string, unknown>;
 }
+
+/**
+ * Jobs a multi-agent run creates as intermediate steps (storyboard frames, film scenes) carry `request.run_id`: they
+ * stay out of the gallery lists and never notify devices (the run notifies once at the end).
+ */
+const notRunStep = sql`(${mediaJobs.request}->>'run_id') is null`;
+const isRunStep = (row: MediaJob) => typeof row.request?.run_id === 'string';
 
 export const VIDEO_PROVIDERS = ['qoder', 'folax'] as const;
 export type VideoProvider = (typeof VIDEO_PROVIDERS)[number];
@@ -719,10 +728,36 @@ export class MediaService {
       reference_file_ids: v.referenceFileIds,
       provider: v.provider ?? 'qoder',
       provider_used: v.provider ?? 'qoder',
+      ...(req.extra ?? {}),
     };
     const job = await this.insertJob(v.userId, 'video', request, v.callbackUrl);
     this.schedule(job);
     return this.view(job);
+  }
+
+  /**
+   * A finished video made outside the job runner (a run's assembled film) as a completed gallery job, so it shows in
+   * the gallery with its thumbnail. No webhooks or notifications (the run sends its own).
+   */
+  async recordVideo(o: { userId: string; fileId: string; request: Record<string, unknown>; credits?: number }): Promise<MediaJobView> {
+    const now = new Date();
+    const [row] = await this.d.db
+      .insert(mediaJobs)
+      .values({
+        id: newId('vid'),
+        userId: o.userId,
+        kind: 'video',
+        status: 'completed',
+        request: o.request,
+        progress: 100,
+        resultFileIds: [o.fileId],
+        credits: o.credits ?? null,
+        startedAt: now,
+        completedAt: now,
+      })
+      .returning();
+    await this.d.db.update(files).set({ jobId: row!.id }).where(eq(files.id, o.fileId));
+    return this.view(row!);
   }
 
   async getJob(id: string, userId: string): Promise<MediaJobView> {
@@ -730,7 +765,7 @@ export class MediaService {
   }
 
   async listJobs(userId: string, opts: { kind?: 'image' | 'video'; batchId?: string; limit?: number } = {}): Promise<MediaJobView[]> {
-    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)];
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
     if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     const rows = await this.d.db
@@ -763,7 +798,7 @@ export class MediaService {
     opts: { kind?: 'image' | 'video'; batchId?: string; statuses?: MediaJob['status'][]; limit?: number; cursor?: string } = {},
   ): Promise<{ items: MediaJobView[]; nextCursor: string | null }> {
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
-    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)];
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
     if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     if (opts.statuses?.length) conds.push(inArray(mediaJobs.status, opts.statuses));
@@ -1432,7 +1467,7 @@ export class MediaService {
     await this.d.webhooks.emit(row.userId, event, data).catch((err) => this.d.log.error('media.webhook_failed', { jobId, err }));
     if (row.callbackUrl) await this.d.webhooks.deliverTo(row.callbackUrl, event, data).catch((err) => this.d.log.error('media.callback_failed', { jobId, err }));
     // automation jobs (n8n with a callback_url) and tagged admin face swap experiments do not notify the user's devices
-    else if ((this.d.push?.enabled || this.d.fcm?.enabled) && !faceSwapTagOf(row)) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
+    else if ((this.d.push?.enabled || this.d.fcm?.enabled) && !faceSwapTagOf(row) && !isRunStep(row)) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
   }
 
   /** Push to the owner's browsers and Android app; for an image batch only once, when its last job finishes. */

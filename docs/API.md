@@ -18,7 +18,7 @@ StillGPT also serves OpenAI- and Anthropic-compatible endpoints for existing too
 - [12. Limits and latencies](#12-limits-and-latencies)
 - [13. OpenAI- and Anthropic-compatible endpoints](#13-openai--and-anthropic-compatible-endpoints)
 - [14. n8n recipes](#14-n8n-recipes)
-- [15. Runs (multi-agent jobs: council, deep research)](#15-runs-multi-agent-jobs-council-deep-research)
+- [15. Runs (multi-agent jobs: council, deep research, short film)](#15-runs-multi-agent-jobs-council-deep-research-short-film)
 
 ---
 
@@ -1542,10 +1542,10 @@ if the URL is public.
 
 ---
 
-## 15. Runs (multi-agent jobs: council, deep research)
+## 15. Runs (multi-agent jobs: council, deep research, short film)
 
-A **run** is a long job that StillGPT executes as many hidden model turns (council, deep research; short films are
-planned). Runs are durable: steps that finished are stored, so a server restart resumes a run where it stopped.
+A **run** is a long job that StillGPT executes as many hidden model turns and media jobs (council, deep research,
+short film). Runs are durable: steps that finished are stored, so a server restart resumes a run where it stopped.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -1641,4 +1641,44 @@ Stages (`state.stage`): `plan` → `research` → (`verify`) → `write` → `ed
 `result`: `{text (Markdown report + "## Sources"), title, files: [{id, name, mimeType, size}] (`.md` first, then the
 rendered `.pdf`/`.docx` that succeeded; `GET /files/:id` for URLs), sources: [{n, url, title}], stats: {questions,
 answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` matching `sources`.
+
+### Short film (`kind: "film"`)
+```json
+{"kind": "film", "input": {
+  "prompt": "Film pendek 60 detik: barista muda di Jogja menemukan resep kopi neneknya",
+  "attachments": ["file_… (optional style/subject reference images)"],
+  "duration_s": 60,
+  "ratio": "16:9",
+  "resolution": "1080P",
+  "style": "warm 35mm film, Wes Anderson symmetry",
+  "language": "Indonesian",
+  "captions": true,
+  "cast_face_ids": ["face_…"],
+  "review": "storyboard",
+  "video_provider": "qoder",
+  "title_card": true
+}}
+```
+- `duration_s` 10–180 (default 60): scenes are 3–10 s each (5 s with Folax), at most 24.
+- `ratio` `16:9` | `9:16` | `1:1`; `resolution` `720P` | `1080P` (Folax is always 720p).
+- `cast_face_ids`: up to 4 saved faces (§8 Faces); the writer casts them as characters (in order), and their cast
+  sheets are drawn from the face.
+- `review`: `storyboard` (default) pauses after the keyframes, `script` after the script, `none` never.
+  - Script review: `state.awaiting = {key: "script_review", what: "script", script}`; answer `{"value": null}` or
+    `{"value": <edited script, same JSON shape>}`.
+  - Storyboard review: `state.awaiting = {key: "storyboard_review:<round>", what: "storyboard", frames: [{n, file_id}]}`;
+    answer `{"value": null}` to approve or `{"value": {"redo": [{"n": 2, "note": "make it rain"}]}}` to redraw scenes
+    (up to 3 rounds; then it continues).
+- `video_provider`: `qoder` (VideoGen with audio, lip-synced dialogue; one video at a time, ~3–5 min per scene) or
+  `folax` (parallel, 5 s, 720p, no audio, watermark).
+
+Stages: `script` → `cast` → `storyboard` → (review) → `animate` → `assemble`. `state` carries `script`, `cast` [{id,
+name, file_id}], `storyboard` [{n, file_id}] and `clips` [{n, file_id}] as they appear, so a UI can show the panels and
+scenes live. Every keyframe is checked by a vision model and redrawn once if it scores below 3/5. Intermediate images
+and videos are media jobs with `request.run_id`: they do not appear in `GET /jobs` and do not notify devices.
+
+`result`: `{text (title, logline, scene list), title, files: [film .mp4, captions .srt], job_id, duration_s, open_path:
+"/gallery/<job_id>", script, cast, storyboard: [file ids], clips: [file ids]}`. The film is also a completed video job
+(`request.mode: "film"`, `request.film_run_id`) in the gallery; the push notification opens it. Assembly needs ffmpeg
+on the server (`503 ffmpeg_unavailable` on the step otherwise).
 

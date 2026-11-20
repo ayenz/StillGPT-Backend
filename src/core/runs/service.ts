@@ -8,6 +8,7 @@ import type { Logger } from '../../log.js';
 import type { EventBus } from '../bus.js';
 import type { ConversationService } from '../conversations.js';
 import type { FcmService } from '../fcm.js';
+import { isTerminal, jobTopic, type MediaJobEvent, type MediaJobView, type MediaService } from '../media.js';
 import type { ProfileName } from '../profiles.js';
 import type { PushService } from '../push.js';
 import type { MediaStore } from '../storage.js';
@@ -55,6 +56,11 @@ export interface TurnStepOutput {
   ms: number;
   /** Files the agent delivered (our file ids). */
   files?: { id: string; name: string; mimeType: string; size: number }[];
+}
+
+export interface MediaStepOutput {
+  job_id: string;
+  files: { id: string; name: string; mimeType: string; size: number }[];
 }
 
 export interface StepOptions {
@@ -128,6 +134,8 @@ export interface RunServiceDeps {
   conversations: ConversationService;
   bus: EventBus;
   log: Logger;
+  /** Image/video jobs of runs (film). */
+  media?: MediaService | null;
   /** Turns `result.files` into reply artifacts. */
   store?: MediaStore | null;
   push?: PushService | null;
@@ -495,7 +503,8 @@ export class RunService {
     await this.d.webhooks?.emit(r.userId, ok ? 'run.completed' : 'run.failed', { run: { id: r.id, kind: r.kind, status: r.status, error: r.error } }).catch(() => {});
     if (!def?.notify) return;
     const label = def.label;
-    const path = r.conversationId ? `/chat/${r.conversationId}` : `/runs/${r.id}`;
+    const openPath = typeof r.result?.open_path === 'string' ? r.result.open_path : null;
+    const path = openPath ?? (r.conversationId ? `/chat/${r.conversationId}` : `/runs/${r.id}`);
     const title = ok ? `${label} ready` : `${label} failed`;
     const body = ok ? 'Tap to open it.' : (r.error?.message ?? 'Something went wrong.').slice(0, 140);
     await Promise.all([
@@ -705,6 +714,65 @@ export class RunContext<I> {
       }
     } finally {
       release();
+    }
+  }
+
+  /**
+   * An image/video job as a step. The job id is stored on the step as soon as the job exists, so a resumed run waits for
+   * the same job instead of starting another one (a video cannot be cancelled upstream). A failed job is a retryable
+   * failure; the retry starts a new job.
+   */
+  mediaJob(key: string, kind: 'image' | 'video', create: () => Promise<MediaJobView>, so?: StepOptions): Promise<MediaStepOutput> {
+    const { media, db } = this.svc.deps;
+    if (!media) throw new AppError(503, 'media_unavailable', 'Media jobs are not available');
+    return this.step<MediaStepOutput>(
+      key,
+      kind,
+      async (stepId) => {
+        const [row] = await db.select({ jobId: runSteps.jobId }).from(runSteps).where(eq(runSteps.id, stepId));
+        let jobId = row?.jobId ?? null;
+        if (jobId) {
+          const prev = await media.getJob(jobId, this.userId).catch(() => null);
+          if (!prev || prev.status === 'failed') jobId = null;
+        }
+        if (!jobId) {
+          jobId = (await create()).id;
+          await db.update(runSteps).set({ jobId }).where(eq(runSteps.id, stepId));
+        }
+        this.emit({ type: 'step.job', key, job_id: jobId });
+        const view = await this.waitJob(media, jobId);
+        if (view.status === 'failed') {
+          await db.update(runSteps).set({ jobId: null }).where(eq(runSteps.id, stepId));
+          throw new AppError(502, view.error?.code ?? 'media_failed', view.error?.message ?? `The ${kind} could not be created`);
+        }
+        const files = view.outputs.map((a) => ({ id: a.id, name: a.name, mimeType: a.mimeType, size: a.size }));
+        if (!files.length) throw new AppError(502, 'media_empty', `The ${kind} job finished without a file`);
+        return { output: { job_id: jobId, files }, jobId, credits: view.credits ?? 0 };
+      },
+      so,
+    );
+  }
+
+  private async waitJob(media: MediaService, jobId: string): Promise<MediaJobView> {
+    for (;;) {
+      this.checkCancelled();
+      let wake!: () => void;
+      const woke = new Promise<void>((r) => (wake = r));
+      const off = this.svc.deps.bus.subscribe<MediaJobEvent>(jobTopic(jobId), (e) => {
+        if (e.type !== 'progress') wake();
+      });
+      try {
+        const view = await media.getJob(jobId, this.userId);
+        if (isTerminal(view.status)) return view;
+        const timer = setTimeout(wake, 3000);
+        const onAbort = () => wake();
+        this.signal.addEventListener('abort', onAbort, { once: true });
+        await woke;
+        clearTimeout(timer);
+        this.signal.removeEventListener('abort', onAbort);
+      } finally {
+        off();
+      }
     }
   }
 
