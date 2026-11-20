@@ -218,6 +218,52 @@ describe('film runs', () => {
   });
 });
 
+describe('film from reference photos', () => {
+  it('casts the person in a reference photo and passes place photos on as looks', async () => {
+    const writerPrompts: string[] = [];
+    const scripted = { ...SCRIPT, characters: [{ ...SCRIPT.characters[0]!, face: 1 }, SCRIPT.characters[1]!] };
+    const { makePng } = await import('../mock-qoder/index.js');
+    const uploadPng = async (name: string) => {
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(makePng())], { type: 'image/png' }), name);
+      return json(await h.api('/api/v1/files', { method: 'POST', body: form }));
+    };
+    const person = await uploadPng('lian.png');
+    const palace = await uploadPng('palace.png');
+    h.qoder.setReply((t) => {
+      if (t.includes('A director attached this photo')) {
+        return t.includes('reference photo 1 of 2')
+          ? '{"kind":"person","description":"Young woman with black hair in a low bun with gold pins, red silk Ming robe with an embroidered dragon square."}'
+          : '{"kind":"place","description":"Red palace walls and golden roofs of the Forbidden City at dawn."}';
+      }
+      if (t.startsWith('You are a screenwriter') || t.startsWith('You are a film editor')) {
+        writerPrompts.push(t);
+        return JSON.stringify(scripted);
+      }
+      if (t.includes('You check a keyframe')) return '{"score":5}';
+      return undefined;
+    });
+    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'film', input: { prompt: 'dayang istana kabur di pagi hari', attachments: [person.id, palace.id], duration_s: 15, review: 'none' } } }));
+    const done = await waitRun(run.id);
+    expect(done.status, JSON.stringify(done.error)).toBe('completed');
+    expect(done.steps.map((s: any) => s.key)).toEqual(expect.arrayContaining(['ref:1', 'ref:2']));
+    expect(done.state.references).toHaveLength(2);
+    expect(writerPrompts).toHaveLength(2);
+    for (const p of writerPrompts) {
+      expect(p).toContain('1 = the person in reference photo 1: Young woman with black hair');
+      expect(p).toContain('<reference_photos>');
+      expect(p).toContain('Forbidden City at dawn');
+    }
+    // Sari (face 1) is drawn from the person photo, with the palace photo as a look; Budi gets the palace photo only
+    const sari = await json(await h.api(`/api/v1/jobs/${done.steps.find((s: any) => s.key === 'cast:sari').output.job_id}`));
+    expect(sari.request.input_file_ids).toEqual([person.id, palace.id]);
+    expect(sari.request.prompt).toContain('keep exactly that face');
+    const budi = await json(await h.api(`/api/v1/jobs/${done.steps.find((s: any) => s.key === 'cast:budi').output.job_id}`));
+    expect(budi.request.input_file_ids).toEqual([palace.id]);
+    expect(budi.request.prompt).toContain('The input images are costume, place or style references');
+  });
+});
+
 describe('film without ffmpeg', () => {
   it('fails at the assembly step with a clear error, after the scenes exist', async () => {
     const bare = await startHarness({ env: { RUN_RETRY_BASE_MS: '5', FFMPEG_PATH: '/nonexistent/ffmpeg' } });

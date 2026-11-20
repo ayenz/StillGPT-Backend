@@ -1702,7 +1702,7 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
 ```json
 {"kind": "film", "input": {
   "prompt": "Film pendek 60 detik: barista muda di Jogja menemukan resep kopi neneknya",
-  "attachments": ["file_… (optional style/subject reference images)"],
+  "attachments": ["file_… (optional reference photos: people to cast, places, costumes, style)"],
   "duration_s": 60,
   "ratio": "16:9",
   "resolution": "1080P",
@@ -1717,8 +1717,12 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
 ```
 - `duration_s` 10–180 (default 60): scenes are 3–10 s each (5 s with Folax), at most 24.
 - `ratio` `16:9` | `9:16` | `1:1`; `resolution` `720P` | `1080P` (Folax is always 720p).
+- `attachments`: reference photos. A vision model describes each one first (`ref:<n>` steps, `state.references`): a
+  photo whose subject is one person makes that person castable like a saved face (the writer gives them a role and
+  their cast sheet is drawn from the photo); places, objects and styles guide the script and are passed to the cast
+  sheets as looks. No need to save a face for a one-off film.
 - `cast_face_ids`: up to 4 saved faces (§8 Faces); the writer casts them as characters (in order), and their cast
-  sheets are drawn from the face.
+  sheets are drawn from the face. Saved faces and people from photos share 4 roles.
 - `review`: `storyboard` (default) pauses after the keyframes, `script` after the script, `none` never.
   - Script review: `state.awaiting = {key: "script_review", what: "script", script}`; answer `{"value": null}` or
     `{"value": <edited script, same JSON shape>}`.
