@@ -43,7 +43,32 @@ export interface StartTurn {
    * Events it returns are emitted right before `turn.completed` (e.g. `conversation.title`).
    */
   beforeComplete?: (result: TurnResult) => Promise<TurnEvent[] | void>;
+  /** Internal callers (council workers) may run Folax chat models on hidden one-shot conversations. */
+  allowFolax?: boolean;
 }
+
+/** What a virtual chat model (e.g. `council`) produced for one turn. */
+export interface VirtualTurnOutcome {
+  text: string;
+  /** Shown as the reply's model (e.g. `council`). */
+  model: string;
+  artifacts?: Artifact[];
+  stopReason?: StopReason;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Runs one turn of a virtual chat model. It streams through `emit` (`text.delta`, `run.event`…) and returns the reply;
+ * the TurnRunner persists it like any other reply. `signal` fires on interrupt or timeout.
+ */
+export type VirtualTurnHandler = (o: {
+  conversation: ConversationRow;
+  req: StartTurn;
+  messageId: string;
+  userMessageId: string;
+  emit: (e: TurnEvent) => void;
+  signal: AbortSignal;
+}) => Promise<VirtualTurnOutcome>;
 
 export interface TurnResult {
   conversationId: string;
@@ -159,8 +184,20 @@ export class TurnRunner {
   private readonly active = new Map<string, TurnHandle>();
   /** Running Folax turns by conversation id, for `interrupt` (they have no Qoder session to interrupt). */
   private readonly folaxAborts = new Map<string, AbortController>();
+  /** Running virtual-model turns by conversation id, for `interrupt`. */
+  private readonly virtualAborts = new Map<string, AbortController>();
+  /** Virtual chat models (`council`…) by lowercase id, registered by the services that implement them. */
+  private readonly virtual = new Map<string, VirtualTurnHandler>();
 
   constructor(private readonly d: TurnRunnerDeps) {}
+
+  registerVirtualModel(id: string, handler: VirtualTurnHandler) {
+    this.virtual.set(id.toLowerCase(), handler);
+  }
+
+  private virtualHandler(model: string | null | undefined): VirtualTurnHandler | undefined {
+    return this.virtual.get((model ?? '').trim().toLowerCase());
+  }
 
   /** The running turn of a conversation, if any (for reconnecting clients). */
   get(conversationId: string): TurnHandle | undefined {
@@ -189,7 +226,7 @@ export class TurnRunner {
   /** Ask the agent to stop the running turn (it ends with stopReason `interrupted`). */
   async interrupt(conversationId: string, userId: string) {
     const conv = await this.d.conversations.get(conversationId, userId);
-    const folaxTurn = this.folaxAborts.get(conv.id);
+    const folaxTurn = this.folaxAborts.get(conv.id) ?? this.virtualAborts.get(conv.id);
     if (folaxTurn) {
       folaxTurn.abort();
       return true;
@@ -235,11 +272,14 @@ export class TurnRunner {
     };
     let stopReason: StopReason = 'error';
     const folaxTurn = isFolaxModelId(conv.model);
+    const virtual = this.virtualHandler(conv.model);
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), TURN_TIMEOUT_MS);
 
     try {
-      if (folaxTurn) {
+      if (virtual) {
+        stopReason = await this.runVirtual(st, virtual, emit, timeout.signal);
+      } else if (folaxTurn) {
         stopReason = await this.runFolax(st, emit, timeout.signal);
       } else {
         const profileTools = (PROFILES[conv.profile as ProfileName] ?? PROFILES.chat).tools;
@@ -310,9 +350,45 @@ export class TurnRunner {
     if (req.oneShot) void this.releaseSession(conv.id);
   }
 
+  /** A turn on a virtual chat model: the handler does the work, this keeps the turn bookkeeping (persist, usage, events). */
+  private async runVirtual(st: RunState, handler: VirtualTurnHandler, emit: (e: TurnEvent) => void, signal: AbortSignal): Promise<StopReason> {
+    const { conv, req, handle } = st;
+    const interrupt = new AbortController();
+    this.virtualAborts.set(conv.id, interrupt);
+    st.model = conv.model.trim().toLowerCase();
+    try {
+      // the conversation's Qoder session (if any) misses this turn: drop it, the next Qoder turn replays the history
+      await this.detachQoderSession(st);
+      emit({ type: 'turn.started', conversationId: conv.id, messageId: handle.messageId, model: st.model });
+      const out = await handler({
+        conversation: conv,
+        req,
+        messageId: handle.messageId,
+        userMessageId: handle.userMessageId,
+        emit,
+        signal: AbortSignal.any([signal, interrupt.signal]),
+      });
+      st.model = out.model;
+      if (out.text) {
+        st.texts.push(out.text);
+        emit({ type: 'text.completed', text: out.text });
+      }
+      st.artifacts.push(...(out.artifacts ?? []));
+      if (out.error) {
+        st.error = out.error;
+        emit({ type: 'error', code: out.error.code, message: out.error.message, retryable: false });
+        return 'error';
+      }
+      if (signal.aborted) throw new AppError(504, 'turn_timeout', 'The turn took too long and was stopped');
+      return interrupt.signal.aborted ? 'interrupted' : (out.stopReason ?? 'end_turn');
+    } finally {
+      this.virtualAborts.delete(conv.id);
+    }
+  }
+
   /** Chat-only, configured, not known down, and content a Folax model can take. Throws before anything is stored. */
   private assertFolaxTurn(conv: ConversationRow, req: StartTurn) {
-    if (req.oneShot || req.kind === 'image' || req.kind === 'video' || conv.metadata?.hidden)
+    if (req.kind === 'image' || req.kind === 'video' || ((req.oneShot || conv.metadata?.hidden) && !req.allowFolax))
       throw new AppError(400, 'model_not_supported', 'Folax models are only available for chat', { param: 'model' });
     this.assertFolaxRequest(conv.model, req.content);
   }

@@ -1,6 +1,7 @@
 # StillGPT — Multi-agent runs: Deep Research, Council, Short Film (design)
 
-Status: **draft, not implemented** (2026-11-20). Assumes Qoder usage is free, so the designs favour quality
+Status (2026-11-20): **engine + Council implemented** (see ARCHITECTURE §7b, API §15); Deep Research and Short Film
+are still design. Assumes Qoder usage is free, so the designs favour quality
 (more agents, more models, re-rolls) over cost. The real limits are upstream concurrency (429/draining, ~1 concurrent
 VideoGen) and our own chat latency, so those get explicit caps.
 

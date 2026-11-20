@@ -3,6 +3,7 @@ import { type SSEStreamingApi, streamSSE } from 'hono/streaming';
 import type { AppContext } from '../../context.js';
 import { compatHeaders, estimateTokens, startCompatTurn } from '../../core/compat.js';
 import { isFolaxModelId } from '../../core/folaxChat.js';
+import { isVirtualModelId } from '../../core/models.js';
 import type { TurnEvent } from '../../core/events.js';
 import type { ProfileName } from '../../core/profiles.js';
 import type { TurnHandle, TurnResult } from '../../core/turns.js';
@@ -30,8 +31,8 @@ export interface StartedTurn {
   promptTokens: number;
 }
 
-/** `qoder/<id>` for Qoder models; Folax chat models already carry their namespace (`folax/<id>`). */
-export const publicModelId = (id: string) => (isFolaxModelId(id) ? id : `qoder/${id}`);
+/** `qoder/<id>` for Qoder models; Folax chat models already carry their namespace (`folax/<id>`), virtual ones have none. */
+export const publicModelId = (id: string) => (isFolaxModelId(id) || isVirtualModelId(id) ? id : `qoder/${id}`);
 
 function profileOf(c: Context<Env>, ctx: AppContext): ProfileName {
   const header = c.req.header('x-stillgpt-profile')?.trim().toLowerCase();

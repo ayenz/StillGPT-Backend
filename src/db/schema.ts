@@ -1,4 +1,4 @@
-import { boolean, doublePrecision, index, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { boolean, doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 const createdAt = () => ts('created_at').notNull().defaultNow();
@@ -283,6 +283,78 @@ export const fcmTokens = pgTable(
     lastUsedAt: ts('last_used_at').notNull().defaultNow(),
   },
   (t) => [index('fcm_tokens_user_idx').on(t.userId)],
+);
+
+// ── runs (multi-agent jobs: council, deep research, short film) ─────────────
+
+/** A long job made of named steps (core/runs). Steps that completed are never executed again, so a run resumes after a restart. */
+export const runs = pgTable(
+  'runs',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    status: text('status', { enum: ['queued', 'running', 'awaiting_input', 'completed', 'failed', 'cancelled'] }).notNull().default('queued'),
+    /** The validated request. */
+    input: jsonb('input').$type<Record<string, unknown>>().notNull(),
+    /** What the UI shows while it runs (stage, plan, …), written by the run kind. */
+    state: jsonb('state').$type<Record<string, unknown>>().notNull().default({}),
+    result: jsonb('result').$type<Record<string, unknown> | null>(),
+    /** Chat the run answers in (virtual chat models such as `council`); the reply is that turn's assistant message. */
+    conversationId: text('conversation_id'),
+    messageId: text('message_id'),
+    progress: integer('progress').notNull().default(0),
+    credits: doublePrecision('credits').notNull().default(0),
+    error: jsonb('error').$type<{ code: string; message: string } | null>(),
+    createdAt: createdAt(),
+    startedAt: ts('started_at'),
+    completedAt: ts('completed_at'),
+    deletedAt: ts('deleted_at'),
+  },
+  (t) => [index('runs_user_idx').on(t.userId, t.createdAt), index('runs_status_idx').on(t.status)],
+);
+
+export const runSteps = pgTable(
+  'run_steps',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id').notNull().references(() => runs.id, { onDelete: 'cascade' }),
+    /** Unique within the run, e.g. `answer:efficient`, `judge:2`. */
+    key: text('key').notNull(),
+    kind: text('kind', { enum: ['turn', 'image', 'video', 'local', 'input'] }).notNull(),
+    status: text('status', { enum: ['running', 'completed', 'failed'] }).notNull().default('running'),
+    attempt: integer('attempt').notNull().default(1),
+    output: jsonb('output').$type<unknown>(),
+    /** Hidden one-shot conversation of a turn step. */
+    conversationId: text('conversation_id'),
+    jobId: text('job_id'),
+    model: text('model'),
+    credits: doublePrecision('credits').notNull().default(0),
+    error: jsonb('error').$type<{ code: string; message: string } | null>(),
+    startedAt: ts('started_at').notNull().defaultNow(),
+    completedAt: ts('completed_at'),
+  },
+  (t) => [uniqueIndex('run_steps_key_idx').on(t.runId, t.key)],
+);
+
+/** One row per model per council run: how the judges ranked it (admin leaderboard). */
+export const councilResults = pgTable(
+  'council_results',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id').notNull().references(() => runs.id, { onDelete: 'cascade' }),
+    model: text('model').notNull(),
+    category: text('category').notNull(),
+    /** 1 = best; null when the model failed to answer. */
+    rank: integer('rank'),
+    /** Mean judge score (0–10). */
+    score: doublePrecision('score'),
+    won: boolean('won').notNull().default(false),
+    failed: boolean('failed').notNull().default(false),
+    latencyMs: integer('latency_ms'),
+    createdAt: createdAt(),
+  },
+  (t) => [index('council_results_model_idx').on(t.model, t.category)],
 );
 
 // ── webhooks & usage ────────────────────────────────────────────────────────

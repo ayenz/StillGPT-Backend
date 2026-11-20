@@ -18,6 +18,8 @@ export const WEBHOOK_EVENTS = [
   'model.retired',
   'model.updated',
   'provider.degraded',
+  'run.completed',
+  'run.failed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number];
 

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppContext } from '../../context.js';
-import { FOLAX_IMAGE_MODEL, FOLAX_VIDEO_MODEL, IMAGE_MODEL, type ModelRow, VIDEO_MODEL } from '../../core/models.js';
+import { FOLAX_IMAGE_MODEL, FOLAX_VIDEO_MODEL, IMAGE_MODEL, type ModelRow, VIDEO_MODEL, VIRTUAL_CHAT_MODELS } from '../../core/models.js';
 import { AppError, anthropicErrorBody } from '../../errors.js';
 import type { Env } from '../../http.js';
 import { FOLAX_CHAT_MODELS, FOLAX_MODEL_PREFIX } from '../../core/folaxChat.js';
@@ -13,8 +13,8 @@ interface ModelEntry {
   extra: {
     display_name: string;
     kind: 'alias' | 'model' | 'image' | 'video';
-    /** Absent = Qoder. */
-    provider?: 'folax';
+    /** Absent = Qoder; `stillgpt` = a virtual model StillGPT runs over many models (council). */
+    provider?: 'folax' | 'stillgpt';
     /** Folax chat models: no tools / documents, server-forced "Folax by Infinix" persona. */
     tools?: boolean;
     resolves_to?: string;
@@ -57,6 +57,9 @@ function catalog(ctx: AppContext, bootSec: number): ModelEntry[] {
           }),
         )
       : []),
+    ...VIRTUAL_CHAT_MODELS.map(
+      (m): ModelEntry => ({ id: m.id, displayName: m.name, created: bootSec, extra: { display_name: m.name, kind: 'model', provider: 'stillgpt', price_factor: 0, vision: true, efforts: null } }),
+    ),
     media(IMAGE_MODEL, 'image', 'Qoder Image (ImageGen)'),
     ...(ctx.folax ? [media(FOLAX_IMAGE_MODEL, 'image', 'Folax Image (fast, 2 images per call; edits: 1 input image, shared weekly quota)')] : []),
     media(VIDEO_MODEL, 'video', 'Qoder Video (VideoGen)'),

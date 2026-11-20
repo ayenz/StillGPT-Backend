@@ -94,6 +94,7 @@ src/
     push.ts                Web Push (VAPID) to the PWA when a media job finishes
     fcm.ts                 FCM HTTP v1 (service-account JWT → OAuth) to the Android app when a media job finishes
     usage.ts               credit accounting + per-user limits
+    runs/                  durable multi-agent jobs (§7b): service.ts (RunService, RunContext, step memo), council.ts, json.ts, semaphore.ts
     bus.ts                 in-memory pub/sub for live turn/job events
   providers/
     folax.ts               FolaxClient: folax-adapter sidecar (fast external image generator)
@@ -216,10 +217,37 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
 - Artifacts are downloaded from Qoder and stored under `MEDIA_DIR`; served via `GET /media/:id?exp&sig` (HMAC signed, no auth header needed → works in `<img>`/`<video>`).
 - Gallery renditions (`&variant=thumb|preview`, WebP) are rendered in the background on save and cached next to the original as `<file>.<variant>.v1.webp`; files saved before this existed are rendered on first request. Video stills need ffmpeg (`FFMPEG_PATH`, shipped in the Docker image); without it videos have `thumbnail_url: null`.
 
+## 7b. Runs: multi-agent jobs (core/runs/)
+
+Design and roadmap (deep research, short film): `docs/DESIGN_RUNS.md`. Implemented: the engine and the council.
+
+- Tables `runs` (kind, status `queued|running|awaiting_input|completed|failed|cancelled`, input, state, result, credits,
+  optional `conversation_id`/`message_id`) and `run_steps` (unique `(run_id, key)`, output, hidden conversation, credits).
+- A kind's `execute(rc)` is plain TypeScript. `rc.step(key, …)` runs once per key: a completed step returns its stored
+  output, so re-entering `execute` resumes (restart: `RunService.start()` re-queues `queued`/`running` runs; input:
+  `rc.awaitInput` pauses as `awaiting_input` until `POST /runs/:id/input`). Retryable failures are retried twice with
+  backoff (`RUN_RETRY_BASE_MS`). `rc.optional(p)` turns a failure into `undefined` (one of many answers) but lets a cancel through.
+- `rc.turn` / `rc.turnJson` = one hidden one-shot turn (`metadata.purpose: "run"`), through `RunService.turnSlots`
+  (`RUN_TURN_CONCURRENCY`, separate from user chat). `turnJson` validates the reply with Zod; a reply that does not parse
+  is a retryable failure and the retry is told what was wrong. Hidden turns may use Folax chat models (`allowFolax`).
+- Events: an in-memory replayable `RunHandle` per executing run (+ bus topic `run:<id>`) → `GET /runs/:id/events`.
+  Cancel aborts the run's signal: waiting turn slots reject, live hidden turns are interrupted.
+- **Virtual chat models** (`council`, `council-debate`; `VIRTUAL_CHAT_MODELS` in models.ts): `TurnRunner` dispatches a turn
+  on such a model to a handler registered by `RunService.registerVirtualModel`. It creates a priority run linked to the
+  conversation (input = the message + a transcript of the last 40 messages), forwards run events as `run.event`,
+  `run.text.delta` as `text.delta`, and returns `result.text`; the TurnRunner persists the reply as usual. Interrupt →
+  cancel. If the process restarts mid-run, the resumed run posts the reply message itself (same `message_id`).
+  The conversation's Qoder session is detached on a virtual turn (the next Qoder turn replays the history).
+- **Council** (`council.ts`): members = every active Qoder model deduplicated by display name (+ Folax chat models when
+  the message fits them) answer in parallel (`answer:<model>`) → optional debate rounds (`debate:<r>:<model>`) → judges
+  (`COUNCIL_JUDGES`, Qoder only) get the answers shuffled per judge (deterministic seed) and labelled A, B, …, reply JSON
+  (`judge:<i>:<model>`) → Borda count, ties by mean score → synthesizer (`COUNCIL_SYNTHESIZER`) merges the top 3
+  (falls back to the winner) → `council_results` rows (`stats`) for `GET /admin/council/leaderboard`.
+
 ## 8. Webhooks / n8n (core/webhooks.ts)
 
 - Per-request `callback_url` on video/image jobs (works with n8n *Wait → On webhook call* using `$execution.resumeUrl`).
-- Per-user webhook endpoints (`/api/v1/webhooks`) for `video.completed`, `video.failed`, `image.completed`, `image.failed`; admins also get `model.*` and `provider.degraded`.
+- Per-user webhook endpoints (`/api/v1/webhooks`) for `video.completed`, `video.failed`, `image.completed`, `image.failed`, `run.completed`, `run.failed`; admins also get `model.*` and `provider.degraded`.
 - Delivery: POST JSON `{id, type, created_at, data}`, header `X-StillGPT-Signature: sha256=<hex HMAC(secret, raw body)>`, retries 1m/5m/30m.
 - n8n can also simply use the OpenAI credential type pointing at `https://<host>/v1` (Chat Model / OpenAI nodes).
 
@@ -298,7 +326,8 @@ Upstream Qoder errors are mapped (401→`upstream_auth`, 429/503→`upstream_una
 `PORT`, `PUBLIC_BASE_URL`, `DATABASE_URL` (postgres://… or `pglite://<dir>` or `pglite://memory`), `QODER_BASE_URL`,
 `QODER_PAT` **or** `QODER_SA_KEY` (+`QODER_OPENAPI_BASE_URL`; the PAT may also be left empty and set by an admin via `/admin/qoder/credential`), `QODER_ENVIRONMENT_ID` (optional; auto-created as `stillgpt`),
 `JWT_SECRET`, `MEDIA_DIR`, `MEDIA_SIGNING_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `DEFAULT_PROFILE_NATIVE=assistant`, `DEFAULT_PROFILE_COMPAT=chat`,
-`MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
+`MODEL_ALIASES`, `MODEL_SYNC_INTERVAL_MIN`, `VIDEO_CONCURRENCY`, `RUN_CONCURRENCY=4`, `RUN_TURN_CONCURRENCY=12`, `RUN_RETRY_BASE_MS=1000`,
+`COUNCIL_JUDGES=smart,kmodel_latest,gmodel`, `COUNCIL_SYNTHESIZER=smart`, `SESSION_BUDGET_CREDITS` (optional per-session cap), `QODER_RETENTION_HOURS` / `QODER_HOUSEKEEPING_INTERVAL_HOURS` (Qoder housekeeping defaults, 24 / 24; admins override them via `/admin/housekeeping`), `CORS_ORIGINS`,
 `FOLAX_URL` + `FOLAX_API_KEY` (optional, both or neither; folax-adapter base URL and its `X-API-Key` — the Folax provider is disabled when unset),
 `FACESWAP_URL` + `FACESWAP_API_KEY` (optional faceswap sidecar, `providers/faceswap.ts`; engines `swapper`/`swapper_polish`/`qoder_crop` are unavailable when unset; empty key = no auth),
 `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` (+ `VAPID_SUBJECT`, default `PUBLIC_BASE_URL`; Web Push "creation ready" notifications, `core/push.ts`, off when unset),

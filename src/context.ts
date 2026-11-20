@@ -16,6 +16,8 @@ import { MediaHousekeeper } from './core/mediaHousekeeping.js';
 import { QoderCredentialService } from './core/qoderCredential.js';
 import { QoderCreditsService } from './core/qoderCredits.js';
 import { ConversationTitler } from './core/titler.js';
+import { councilKind } from './core/runs/council.js';
+import { RunService } from './core/runs/service.js';
 import { MediaService } from './core/media.js';
 import { ModelRegistry } from './core/models.js';
 import { MediaTrash } from './core/trash.js';
@@ -80,6 +82,8 @@ export interface AppContext {
   mediaHousekeeper: MediaHousekeeper;
   qoderCredits: QoderCreditsService;
   qoderCredential: QoderCredentialService;
+  /** Multi-agent runs (council…) and the virtual chat models built on them. */
+  runs: RunService;
   /** Start background work (model sync, media worker, webhook retries). */
   start(): Promise<void>;
   close(): Promise<void>;
@@ -242,6 +246,23 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
   const trash = new MediaTrash({ db, store, media, log: log.child({ mod: 'trash' }) });
   const mediaHousekeeper = new MediaHousekeeper({ db, trash, log: log.child({ mod: 'media_housekeeping' }) });
 
+  const runService = new RunService({
+    db,
+    turns,
+    conversations,
+    bus,
+    log: log.child({ mod: 'runs' }),
+    push,
+    fcm,
+    webhooks,
+    runConcurrency: config.RUN_CONCURRENCY,
+    turnConcurrency: config.RUN_TURN_CONCURRENCY,
+    retryBaseMs: config.RUN_RETRY_BASE_MS,
+  });
+  runService.register(councilKind({ db, models, folax, judges: config.COUNCIL_JUDGES, synthesizer: config.COUNCIL_SYNTHESIZER }));
+  runService.registerVirtualModel('council', 'council', ({ content, preamble }) => ({ content, preamble, mode: 'synthesize' }));
+  runService.registerVirtualModel('council-debate', 'council', ({ content, preamble }) => ({ content, preamble, mode: 'debate' }));
+
   models.onChange = (changes) => {
     for (const c of changes) void webhooks.emit(null, c.type, { model: { id: c.model.id, display_name: c.model.displayName }, ...('previous' in c ? { previous: c.previous } : {}) });
   };
@@ -280,6 +301,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
     mediaHousekeeper,
     qoderCredits,
     qoderCredential,
+    runs: runService,
     async start() {
       await auth.ensureAdmin(config.ADMIN_EMAIL, config.ADMIN_PASSWORD);
       await models.load();
@@ -291,6 +313,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
       }
       webhooks.start();
       media.start();
+      await runService.start();
       housekeeper.start();
       mediaHousekeeper.start();
     },
@@ -298,6 +321,7 @@ export async function createContext(config: Config, o: ContextOverrides = {}): P
       if (timer) clearInterval(timer);
       housekeeper.stop();
       mediaHousekeeper.stop();
+      await runService.stop();
       await media.stop();
       await webhooks.stop();
       await database.close();

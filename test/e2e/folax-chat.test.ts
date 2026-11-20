@@ -55,7 +55,7 @@ describe('model catalog', () => {
     const ids = r.body.data.map((m: any) => m.id);
     expect(ids).toEqual(expect.arrayContaining(['folax/folax', 'folax/chatgpt', 'folax/gemini', 'folax/metaai', 'folax/grok']));
     expect(r.body.data.find((m: any) => m.id === 'folax/chatgpt')).toMatchObject({ display_name: 'ChatGPT (via Folax)', provider: 'folax', price_factor: 0, vision: true });
-    expect(r.body.data.filter((m: any) => !m.id.startsWith('folax/')).every((m: any) => m.provider === 'qoder')).toBe(true);
+    expect(r.body.data.filter((m: any) => !m.id.startsWith('folax/') && m.provider !== 'stillgpt').every((m: any) => m.provider === 'qoder')).toBe(true);
   });
 
   it('OpenAI and Anthropic /models list them owned by folax', async () => {
@@ -329,6 +329,29 @@ describe('server without Folax', () => {
       expect(conv).toMatchObject({ status: 400, body: { error: { code: 'provider_unavailable' } } });
     } finally {
       await bare.close();
+    }
+  });
+});
+
+describe('council with Folax members', () => {
+  it('lets Folax chat models answer next to Qoder ones (hidden one-shot turns), but never judge', async () => {
+    const judge = (t: string) => t.startsWith('You are a strict, impartial judge');
+    h.qoder.setReply((t) => {
+      if (!judge(t)) return t.startsWith('Several AI models answered') ? 'final' : undefined;
+      const ids = [...t.matchAll(/<answer id="([A-Z]+)">\n([^\n]*)/g)].map((m) => ({ id: m[1]!, folax: m[2]!.includes('Folax') }));
+      const ranking = [...ids].sort((a, b) => Number(b.folax) - Number(a.folax)).map((x) => x.id);
+      return JSON.stringify({ category: 'other', scores: ids.map((x) => ({ id: x.id, correctness: 5, completeness: 5, clarity: 5, total: 5 })), ranking, best_parts: [] });
+    });
+    try {
+      await h.ctx.folax!.upstream(true); // an earlier test may have left the cached upstream state at `down`
+      const run = (await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'council', input: { prompt: 'halo', models: ['efficient', 'folax/chatgpt'], judges: ['folax/grok', 'ultimate'] } } }))).body;
+      const done = await waitFor(async () => (await json(await h.api(`/api/v1/runs/${run.id}`))).body, (r) => r.status === 'completed' || r.status === 'failed');
+      expect(done.status).toBe('completed');
+      expect(done.result).toMatchObject({ members: 2, answered: 2, winner: 'folax/chatgpt', text: 'final' });
+      expect(chats().map((c: any) => c.body.model)).toEqual(['chatgpt']);
+      expect(done.steps.map((s: any) => s.key)).toContain('judge:0:ultimate');
+    } finally {
+      h.qoder.setReply(undefined);
     }
   });
 });

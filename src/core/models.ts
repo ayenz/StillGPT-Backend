@@ -20,9 +20,20 @@ export interface Resolution {
   requested: string;
   /** Set when we could not honour the request and picked another model. */
   fallbackReason?: string;
-  /** `folax` for `folax/<model>` ids (Folax adapter chat); absent = Qoder. */
-  provider?: 'folax';
+  /** `folax` for `folax/<model>` ids (Folax adapter chat), `virtual` for StillGPT's own chat models; absent = Qoder. */
+  provider?: 'folax' | 'virtual';
 }
+
+/**
+ * Chat models StillGPT implements itself on top of several Qoder/Folax turns (core/runs). Usable wherever a chat model
+ * id is (native chats, OpenAI/Anthropic compat); never resolved to a Qoder model.
+ */
+export const VIRTUAL_CHAT_MODELS = [
+  { id: 'council', name: 'Council (every model answers, judges pick and merge)' },
+  { id: 'council-debate', name: 'Council with debate (models revise after reading each other)' },
+] as const;
+
+export const isVirtualModelId = (id: string | null | undefined) => VIRTUAL_CHAT_MODELS.some((m) => m.id === (id ?? '').trim().toLowerCase());
 
 /** Virtual model ids for media endpoints (not chat models). */
 export const IMAGE_MODEL = 'qoder-image';
@@ -136,6 +147,7 @@ export class ModelRegistry {
       if (!this.folaxEnabled) throw new AppError(400, 'provider_unavailable', 'Folax models are not configured on this server', { param: 'model' });
       return { model: FOLAX_MODEL_PREFIX + name, requested: raw, provider: 'folax' };
     }
+    if (isVirtualModelId(raw)) return { model: raw.toLowerCase(), requested: raw, provider: 'virtual' };
     const id = raw.replace(/^qoder\//, '');
     if (id === IMAGE_MODEL || id === FOLAX_IMAGE_MODEL || id === VIDEO_MODEL || id === FOLAX_VIDEO_MODEL) throw badRequest(`'${id}' is a media model; use the images/videos endpoints`, 'model_not_supported');
 

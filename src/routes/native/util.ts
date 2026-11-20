@@ -109,6 +109,8 @@ export function turnEventView(e: TurnEvent): Record<string, unknown> {
       return { type: e.type, conversation_id: e.conversationId, message_id: e.messageId, model: e.model };
     case 'conversation.title':
       return { type: e.type, conversation_id: e.conversationId, title: e.title };
+    case 'run.event':
+      return { type: e.type, run_id: e.runId, event: e.event };
     case 'tool.completed':
       return { type: e.type, id: e.id, is_error: e.isError, output: e.output };
     case 'artifact':

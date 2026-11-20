@@ -76,6 +76,19 @@ const schema = z
       .default('5000,15000,30000')
       .transform((v) => v.split(',').map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n >= 0)),
     SESSION_BUDGET_CREDITS: z.coerce.number().positive().optional(),
+    /** Multi-agent runs (core/runs) executing at once; chat replies of virtual models (council) start regardless. */
+    RUN_CONCURRENCY: z.coerce.number().int().min(1).default(4),
+    /** Hidden Qoder/Folax turns of all runs in flight at once (kept apart from user chat turns). */
+    RUN_TURN_CONCURRENCY: z.coerce.number().int().min(1).default(12),
+    /** First backoff (ms) before a failed run step is retried; doubles per attempt. */
+    RUN_RETRY_BASE_MS: z.coerce.number().int().min(1).default(1000),
+    /** Council judges (aliases or model ids, comma separated); unavailable ones are skipped. */
+    COUNCIL_JUDGES: z
+      .string()
+      .default('smart,kmodel_latest,gmodel')
+      .transform((v) => v.split(',').map((x) => x.trim()).filter(Boolean)),
+    /** Model that writes the council's final answer from the best ones. */
+    COUNCIL_SYNTHESIZER: z.string().trim().min(1).default('smart'),
     /** Default retention: Qoder sessions idle longer than this are archived and their Qoder files deleted (local copies stay). Admins can override it. */
     QODER_RETENTION_HOURS: z.coerce.number().positive().default(24),
     /** Default interval of the Qoder housekeeping pass; 0 = disabled by default. Admins can override it. */

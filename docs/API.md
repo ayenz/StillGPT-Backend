@@ -18,6 +18,7 @@ StillGPT also serves OpenAI- and Anthropic-compatible endpoints for existing too
 - [12. Limits and latencies](#12-limits-and-latencies)
 - [13. OpenAI- and Anthropic-compatible endpoints](#13-openai--and-anthropic-compatible-endpoints)
 - [14. n8n recipes](#14-n8n-recipes)
+- [15. Runs (multi-agent jobs: council)](#15-runs-multi-agent-jobs-council)
 
 ---
 
@@ -317,6 +318,22 @@ models:
 ```
 Then use Continue's **Agent** mode.
 
+#### Council (virtual models `council`, `council-debate`)
+
+`GET /models` also lists two models StillGPT runs itself, with `provider: "stillgpt"`:
+
+| id | what happens on each message |
+|---|---|
+| `council` | every active Qoder model (and the Folax chat models, when configured and the message has no documents and ≤ 4 images) answers in parallel → 2–3 judge models rank the answers blind → a synthesizer writes the final reply from the best three |
+| `council-debate` | the same, plus one round where every model reads the others' answers (anonymised) and revises its own before judging |
+
+Use them like any chat model: `model: "council"` on a conversation (native API) or in `/v1/chat/completions` /
+`/v1/messages`. The reply streams as normal `text.delta` events (only the final answer). While the members work, the
+native stream also carries `run.event` frames (see the event catalogue), so a UI can show live panels per model.
+Expect 30 s to a few minutes per message. Every message creates a run (§15) linked to the conversation; interrupting
+the turn cancels it. Judges, synthesizer and models are server settings (`COUNCIL_JUDGES`, `COUNCIL_SYNTHESIZER`); to
+choose them per request, use `POST /runs` with `kind: "council"`.
+
 ---
 
 ## 5. Conversations
@@ -455,6 +472,7 @@ data: {"type":"text.delta","text":"Hel"}
 | `usage` | `{credits: {model, sandbox, total}}` | credits used by this turn |
 | `error` | `{code, message, retryable}` | a turn-level error. `turn.completed` still follows |
 | `conversation.title` | `{conversation_id, title}` | only on the first turn of an untitled conversation: the auto-generated title (update the sidebar) |
+| `run.event` | `{run_id, event}` | only for virtual models (`council`): progress of the run behind the reply. `event` is a run event (§15), e.g. `answer.delta {model, text}` for a live panel per model, `answer.done`, `council.ranking`, `run.stage` |
 | `turn.completed` | `{message_id, stop_reason, text, artifacts, credits}` | always last. `text` is the full reply |
 
 Example:
@@ -1093,6 +1111,7 @@ These events can be subscribed to:
 | `image.completed`, `image.failed`, `video.completed`, `video.failed` | the job owner's endpoints |
 | `model.added`, `model.retired`, `model.updated` | the endpoints of every admin user |
 | `provider.degraded` | the endpoints of every admin user |
+| `run.completed`, `run.failed` | the run owner's endpoints (`data.run: {id, kind, status, error}`) |
 
 ### Delivery
 ```
@@ -1174,6 +1193,7 @@ These endpoints need `role: "admin"`. Other users get `403 forbidden`.
 | POST | `/admin/users` | `{email, password?, display_name?, role? = "user", monthly_credit_limit?}` | `201 {user}`, or `409 email_taken` |
 | PATCH | `/admin/users/:id` | any of `{role, monthly_credit_limit (null = unlimited), disabled, password, display_name}` | `{user}` |
 | POST | `/admin/models/sync` | – | `{changes: [{type: "model.added"\|"model.retired"\|"model.updated", model: {id, display_name}, previous?}], active_models}` |
+| GET | `/admin/council/leaderboard?days=30&category=` | – | `{data: [{model, runs, wins, win_rate, failures, mean_rank, mean_score, mean_latency_ms}], categories: [{category, runs}], days, category}` — how council members fare, best win rate first. `category` is the judges' classification: `coding`, `math`, `writing`, `factual`, `advice`, `creative`, `other` |
 
 An admin cannot demote or disable their own account (`400 cannot_modify_self`).
 A disabled user cannot log in, and their tokens and keys return `403 account_disabled`.
@@ -1516,3 +1536,76 @@ Polling also works: loop over `GET /api/v1/jobs/{{id}}` with a Wait of 15 s unti
 For events that are not tied to a single workflow run (all `video.completed` events, or the `model.*` changes for
 admins), register a *Webhook* trigger URL with `POST /api/v1/webhooks`. Verify `X-StillGPT-Signature` in a Code node
 if the URL is public.
+
+---
+
+## 15. Runs (multi-agent jobs: council)
+
+A **run** is a long job that StillGPT executes as many hidden model turns (council now; deep research and short films
+are planned). Runs are durable: steps that finished are stored, so a server restart resumes a run where it stopped.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/runs` | `{kind, input}` | `201 {run}` (status `queued`) |
+| GET | `/runs?kind=&limit=20&before=` | – | `{data: [run without input], has_more, next_cursor}` (newest first; `before` = `next_cursor`) |
+| GET | `/runs/:id` | – | `{run + input, steps: [step]}` |
+| GET | `/runs/:id/events` | – | SSE: a `run` snapshot (with steps), then live events until it settles (see below) |
+| POST | `/runs/:id/cancel` | – | `{run}` with status `cancelled` (already finished runs are returned unchanged) |
+| POST | `/runs/:id/input` | `{value}` | `{run}`: answers a run in `awaiting_input` and resumes it (`409 run_not_waiting` otherwise) |
+| DELETE | `/runs/:id` | – | `204` (cancels it first if it still runs) |
+
+`run`: `{id, kind, status, progress (0–100), state, result, error, credits, conversation_id, message_id, created_at,
+started_at, completed_at}`. `status`: `queued` → `running` → `completed` | `failed` | `cancelled`, or `awaiting_input`
+when it waits for the user (`state.awaiting` says what for). `state` is kind-specific progress (`stage`, `stage_label`,
+`members`…). `conversation_id`/`message_id` are set when the run answers a chat message (virtual models).
+
+`step`: `{key, kind (turn|local|input|image|video), status (running|completed|failed), attempt, model, output, credits,
+error, started_at, completed_at}`. A failed step with a retryable error (429/5xx, unusable reply) is retried twice.
+
+At most `RUN_CONCURRENCY` (4) runs execute at once (chat replies of virtual models always start at once) and at most
+`RUN_TURN_CONCURRENCY` (12) of their hidden turns are in flight, separately from normal chat turns. A finished run sends
+the `run.completed`/`run.failed` webhooks. Kinds marked as long (not council) also send a Web Push / FCM notification
+(`url`/`data.path` = `/runs/<id>`, or `/chat/<conversation_id>`; FCM `data: {type: "run", run_id, kind, path}`).
+
+### Run events (SSE `GET /runs/:id/events`)
+Frames have `id` = sequence number (resume with `Last-Event-ID`), `event` = the type, `data` = the JSON below.
+
+| event | data |
+|---|---|
+| `run` | the run snapshot with `steps` (always first, no `id`) |
+| `run.started` | `{run_id, kind}` |
+| `run.stage` | `{stage, label, progress}` |
+| `run.state` | `{state}` (the changed keys) |
+| `step.started` / `step.completed` / `step.retry` / `step.failed` | `{key, attempt?, model?, credits?, error?}` |
+| `run.text.delta` | `{text}`: the final answer as it is written |
+| `run.awaiting_input` | `{run_id, awaiting}` |
+| `run.completed` | `{run_id, result, credits}` (last) |
+| `run.failed` / `run.cancelled` | `{run_id, error}` (last) |
+
+### Council (`kind: "council"`)
+```json
+{"kind": "council", "input": {
+  "prompt": "Bandingkan Postgres dan MySQL untuk aplikasi SaaS kecil",
+  "attachments": ["file_…"],
+  "models": "all",
+  "mode": "synthesize",
+  "debate_rounds": 1,
+  "judges": ["smart", "gmodel"],
+  "synthesizer": "smart"
+}}
+```
+- `prompt` and/or `attachments` (file ids from `POST /files`: images are shown to the models, other files are mounted
+  as documents) are required.
+- `models`: `"all"` (default: every active Qoder model, one per display name, plus the Folax chat models when they can
+  take the message) or a list of model ids/aliases (`folax/chatgpt` included). Unknown ones are skipped.
+- `mode`: `best` (the top-ranked answer as is), `synthesize` (default: a synthesizer merges the top three), `debate`
+  (`debate_rounds` revision rounds first, then synthesize).
+- `judges` (1–5, Qoder models only) and `synthesizer` override the server defaults.
+
+Extra events: `answer.delta {model, text}` (live text per member), `answer.done {model, ok, chars}`,
+`council.ranking {ranking, category, judges}`.
+
+`result`: `{text, winner, category, ranking: [{model, rank, points, score, failed}], synthesized_by, members, answered,
+mode}`. `points` is the Borda count over the judges' rankings; `score` the judges' mean total (0–10); members that
+failed to answer come last with `rank: null, failed: true`.
+

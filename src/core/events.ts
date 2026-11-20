@@ -37,6 +37,8 @@ export type TurnEvent =
   | { type: 'artifact'; artifact: Artifact }
   | { type: 'usage'; credits: Credits }
   | { type: 'conversation.title'; conversationId: string; title: string }
+  /** Progress of the multi-agent run behind a virtual model (council panels, judges…); `event` is already wire JSON. */
+  | { type: 'run.event'; runId: string; event: Record<string, unknown> }
   | { type: 'turn.completed'; messageId: string; stopReason: StopReason; text: string; artifacts: Artifact[]; credits: Credits }
   | { type: 'error'; code: string; message: string; retryable: boolean };
 
