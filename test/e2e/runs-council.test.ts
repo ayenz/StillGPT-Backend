@@ -1,9 +1,9 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { aggregate } from '../../src/core/runs/council.js';
+import { aggregate, judgeQuality, parseDebate } from '../../src/core/runs/council.js';
 import { extractJson } from '../../src/core/runs/json.js';
 import { Semaphore } from '../../src/core/runs/semaphore.js';
-import { runSteps, runs } from '../../src/db/schema.js';
+import { conversations, runSteps, runs } from '../../src/db/schema.js';
 import { type Harness, startHarness } from './harness.js';
 import { readSse } from './native-sse.js';
 
@@ -279,5 +279,66 @@ describe('council as a chat model', () => {
     expect(r.message.stop_reason).toBe('interrupted');
     const run = (await json(await h.api('/api/v1/runs?kind=council&limit=1'))).data[0];
     expect(run.status).toBe('cancelled');
+  });
+});
+
+describe('debate verdicts and judge quality', () => {
+  it('reads and strips the VERDICT line', () => {
+    expect(parseDebate('VERDICT: revised\n\nThe ball costs 500.')).toEqual({ changed: true, text: 'The ball costs 500.' });
+    expect(parseDebate('**VERDICT: kept**\nSame answer.')).toEqual({ changed: false, text: 'Same answer.' });
+    expect(parseDebate('No verdict here')).toEqual({ changed: null, text: 'No verdict here' });
+  });
+
+  it('flags judges that rank by label order or score everyone the same', () => {
+    const labels = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const v = (ranking: string[], totals: number[]) => ({ category: 'math', ranking, best_parts: [], scores: totals.map((total, i) => ({ id: labels[i]!, correctness: total, completeness: total, clarity: total, total })) });
+    expect(judgeQuality(v(['B', 'C', 'D', 'E', 'F', 'A'], [9, 3, 8, 7, 6, 5]), labels)).toEqual({ lazy: true, reason: 'ranked in label order' });
+    expect(judgeQuality(v(['D', 'A', 'F', 'B', 'E', 'C'], [9, 9.2, 9.1, 9.3, 9, 9.4]), labels)).toEqual({ lazy: true, reason: 'gave every answer the same score' });
+    expect(judgeQuality(v(['D', 'A', 'F', 'B', 'E', 'C'], [9, 3, 8, 7, 6, 5]), labels)).toEqual({ lazy: false });
+  });
+});
+
+describe('council transparency', () => {
+  it('streams debate revisions, reports every judge, down-weights a lazy one and gives the first judge a sandbox', async () => {
+    h.qoder.setReply((t, model) => {
+      if (t.startsWith('You answered a question together')) return model === 'fast' ? 'VERDICT: revised\n\nfast changed its mind' : 'VERDICT: kept\n\nsame as before';
+      if (isJudge(t)) {
+        const ids = [...t.matchAll(/<answer id="([A-Z]+)">\n([^\n]*)/g)].map((m) => ({ id: m[1]!, text: m[2]! }));
+        // the efficient judge is lazy (label order); the others put the revised `fast` answer first
+        const ranking = model === 'efficient' ? ids.map((x) => x.id) : [...ids].reverse().sort((a, b) => Number(b.text.includes('changed its mind')) - Number(a.text.includes('changed its mind'))).map((x) => x.id);
+        return JSON.stringify({ category: 'math', scores: ranking.map((id, i) => ({ id, correctness: 9 - i, completeness: 8, clarity: 8, total: 9 - i, note: `note ${id}` })), ranking, best_parts: [] });
+      }
+      return isSynth(t) ? 'final' : undefined;
+    });
+    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'council', input: { prompt: 'q', models: ['efficient', 'fast', 'qfmodel', 'ultimate'], mode: 'debate', judges: ['ultimate', 'efficient', 'qfmodel'] } } }));
+    const frames = await readSse(await h.api(`/api/v1/runs/${run.id}/events`));
+    expect(frames.filter((f) => f.event === 'debate.delta').length).toBeGreaterThan(0);
+    const dones = frames.filter((f) => f.event === 'debate.done').map((f) => f.data);
+    expect(dones.find((d: any) => d.model === 'fast')).toMatchObject({ round: 1, ok: true, changed: true });
+    expect(dones.find((d: any) => d.model === 'qfmodel')).toMatchObject({ changed: false });
+    expect(frames.some((f) => f.event === 'council.judges')).toBe(true);
+
+    const done = await waitRun(run.id);
+    const r = done.result;
+    expect(r.winner).toBe('fast');
+    expect(r.revisions).toHaveLength(4);
+    const lazy = r.judges.find((j: any) => j.judge === 'efficient');
+    expect(lazy).toMatchObject({ ok: true, lazy: true, reason: 'ranked in label order', weight: 0.25 });
+    const first = r.judges.find((j: any) => j.judge === 'ultimate');
+    expect(first).toMatchObject({ ok: true, checker: true, lazy: false, top: 'fast' });
+    expect(Object.keys(first.scores).sort()).toEqual(['efficient', 'fast', 'qfmodel', 'ultimate']);
+    expect(first.scores.fast.note).toMatch(/^note [A-Z]$/);
+    expect(r.agreement).toEqual({ agree: 2, judges: 2, split: false });
+    // the stored answer of `fast` is the revision without its VERDICT line
+    const step = done.steps.find((s: any) => s.key === 'debate:1:fast');
+    expect(step.output.text).toMatch(/^VERDICT: revised/);
+    // the sandbox judge ran on the research profile (Bash), the others on plain chat
+    const judgeConv = async (key: string) => {
+      const [step] = await h.ctx.database.db.select().from(runSteps).where(and(eq(runSteps.runId, run.id), eq(runSteps.key, key)));
+      const id = step!.conversationId!;
+      return (await h.ctx.database.db.select().from(conversations).where(eq(conversations.id, id)))[0]!.profile;
+    };
+    expect(await judgeConv('judge:0:ultimate')).toBe('research');
+    expect(await judgeConv('judge:1:efficient')).toBe('chat');
   });
 });

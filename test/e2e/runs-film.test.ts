@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { type AssembleInput, buildSrt, filmSize, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
+import { type AssembleInput, buildSrt, filmSize, joinArgs, joinPlan, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
 import { normalize, type Script } from '../../src/core/runs/film.js';
 import { type Harness, startHarness } from './harness.js';
 
@@ -54,24 +54,26 @@ const SCRIPT: Script = {
     { id: 'budi', name: 'Budi', appearance: 'older man, grey beard', wardrobe: 'batik shirt', face: null },
   ],
   scenes: [
-    { seconds: 6, location: 'small cafe', action: 'Sari opens the shutters', camera: 'wide', characters: ['sari'], dialogue: [], sfx: 'metal shutter', mood: 'calm', continuous: true },
-    { seconds: 14, location: 'counter', action: 'Sari pours latte art', camera: 'close', characters: ['sari', 'ghost'], dialogue: [{ character: 'Sari', line: 'Selamat pagi!' }], sfx: '', mood: 'warm', continuous: false },
-    { seconds: 5, location: 'table', action: 'Budi tastes and smiles', camera: 'medium', characters: ['budi'], dialogue: [{ character: 'Budi', line: 'Enak sekali.' }], sfx: '', mood: 'joy', continuous: false },
+    { seconds: 6, location: 'small cafe', action: 'Sari opens the shutters', camera: 'wide', characters: ['sari'], dialogue: [], sfx: 'metal shutter', mood: 'calm', continuous: true, transition: 'cut' },
+    { seconds: 14, location: 'counter', action: 'Sari pours latte art', camera: 'close', characters: ['sari', 'ghost'], dialogue: [{ character: 'Sari', line: 'Selamat pagi!' }], sfx: '', mood: 'warm', continuous: false, transition: 'dissolve' },
+    { seconds: 5, location: 'table', action: 'Budi tastes and smiles', camera: 'medium', characters: ['budi'], dialogue: [{ character: 'Budi', line: 'Enak sekali.' }], sfx: '', mood: 'joy', continuous: false, transition: 'dissolve' },
   ],
 };
 
 interface Seen {
   scripts: number;
+  writer: string[];
   checks: string[];
   frames: string[];
 }
 
 /** Writer replies the script (draft + revision), the vision check gives `score(scene)`. */
 function script(score: (t: string) => number = () => 4): Seen {
-  const seen: Seen = { scripts: 0, checks: [], frames: [] };
+  const seen: Seen = { scripts: 0, writer: [], checks: [], frames: [] };
   h.qoder.setReply((t) => {
     if (t.startsWith('You are a screenwriter') || t.startsWith('You are a film editor')) {
       seen.scripts++;
+      seen.writer.push(t);
       return JSON.stringify(SCRIPT);
     }
     if (t.includes('You check a keyframe')) {
@@ -102,17 +104,29 @@ describe('film helpers', () => {
     const silent = segmentArgs({ input: 'in.mp4', out: 'o.mp4', duration: 5, hasAudio: false, width: 1920, height: 1080 });
     expect(silent).toContain('anullsrc=channel_layout=stereo:sample_rate=48000');
     expect(silent.join(' ')).toContain('[1:a]aformat');
-    expect(silent.join(' ')).toContain('fade=t=out:st=4.700:d=0.3');
+    expect(silent.join(' ')).not.toContain('fade'); // scenes are joined with cuts/dissolves, not faded one by one
+    // cuts concat, dissolves overlap by 0.5 s; the film fades in/out only at its edges
+    expect(joinPlan([{ duration: 3, transition: 'cut' }, { duration: 6, transition: 'dissolve' }, { duration: 4, transition: 'cut' }])).toEqual({ starts: [0, 2.5, 8.5], total: 12.5 });
+    const join = joinArgs([{ path: 'a.mp4', duration: 3, transition: 'cut' }, { path: 'b.mp4', duration: 6, transition: 'dissolve' }, { path: 'c.mp4', duration: 4, transition: 'cut' }], 'out.mp4').join(' ');
+    expect(join).toContain('[i0v][i1v]xfade=transition=fade:duration=0.500:offset=2.500[v1]');
+    expect(join).toContain('[v1][i2v]concat=n=2:v=1:a=0[v2]');
+    expect(join).toContain('[a1][i2a]concat=n=2:v=0:a=1[a2]');
+    expect(join).toContain('fade=t=out:st=11.900:d=0.600');
+    expect(join.match(/-reinit_filter 0 -i/g)).toHaveLength(3);
     const still = segmentArgs({ input: 't.png', out: 'o.mp4', duration: 3, hasAudio: false, width: 1080, height: 1920, still: true });
     expect(still.slice(4, 9)).toEqual(['-loop', '1', '-framerate', '30', '-t']);
     expect(filmSize('9:16', '1080P')).toEqual({ width: 1080, height: 1920 });
     expect(filmSize('1:1', '720P')).toEqual({ width: 720, height: 720 });
   });
 
-  it('clamps scene lengths and drops unknown characters', () => {
+  it('clamps scene lengths to the pacing, drops unknown characters and cuts after a continuous shot', () => {
     const n = normalize(SCRIPT, 60, null);
-    expect(n.scenes.map((s) => s.seconds)).toEqual([6, 10, 5]);
+    expect(n.scenes.map((s) => s.seconds)).toEqual([6, 10, 6]); // balanced: 6–10 s
     expect(n.scenes[1]!.characters).toEqual(['sari']);
+    // scene 1 continues into scene 2, so scene 2 is a cut even though the writer asked for a dissolve
+    expect(n.scenes.map((s) => s.transition)).toEqual(['cut', 'cut', 'dissolve']);
+    expect(normalize(SCRIPT, 60, null, 'long').scenes.map((s) => s.seconds)).toEqual([10, 14, 10]);
+    expect(normalize(SCRIPT, 60, null, 'fast').scenes.map((s) => s.seconds)).toEqual([6, 6, 5]);
     const folax = normalize(SCRIPT, 10, 5);
     expect(folax.scenes.map((s) => s.seconds)).toEqual([5, 5]);
   });
@@ -150,6 +164,7 @@ describe('film runs', () => {
     expect(a).toMatchObject({ width: 1920, height: 1080, captions: true, titleSeconds: 3 });
     expect(a.titleCard).toBeTruthy();
     expect(a.clips.map((c) => c.captions)).toEqual([[], ['Sari: Selamat pagi!'], ['Budi: Enak sekali.']]);
+    expect(a.clips.map((c) => c.transition)).toEqual(['cut', 'cut', 'dissolve']);
 
     const r = done.result;
     expect(r).toMatchObject({ title: 'Kopi Pagi', duration_s: 18, open_path: `/gallery/${r.job_id}` });
@@ -169,12 +184,15 @@ describe('film runs', () => {
 
   it('pauses on the storyboard, redraws scenes on request, then continues', async () => {
     const seen = script();
-    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'film', input: { prompt: 'barista', duration_s: 15, ratio: '9:16', captions: false, title_card: false } } }));
+    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'film', input: { prompt: 'barista', duration_s: 15, ratio: '9:16', captions: false, title_card: false, pacing: 'long' } } }));
     const first = await waitRun(run.id);
     expect(first.status).toBe('awaiting_input');
     expect(first.state.awaiting).toMatchObject({ key: 'storyboard_review:1', what: 'storyboard' });
     expect(first.state.awaiting.frames).toHaveLength(3);
     expect(first.steps.some((s: any) => s.key.startsWith('clip:'))).toBe(false);
+    // long takes: the writer is asked for 10–20 s scenes and real cuts
+    expect(seen.writer[0]).toContain('Each scene is 10–20 s. Pacing: few long, flowing takes');
+    expect(seen.writer[0]).toContain('Never fade to black between scenes');
     const original2 = first.state.awaiting.frames[1].file_id;
 
     await h.api(`/api/v1/runs/${run.id}/input`, { method: 'POST', json: { value: { redo: [{ n: 2, note: 'make it rain outside' }] } } });

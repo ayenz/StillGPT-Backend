@@ -1662,11 +1662,22 @@ Frames have `id` = sequence number (resume with `Last-Event-ID`), `event` = the 
 - `judges` (1–5, Qoder models only) and `synthesizer` override the server defaults.
 
 Extra events: `answer.delta {model, text}` (live text per member), `answer.done {model, ok, chars}`,
-`council.ranking {ranking, category, judges}`.
+`debate.delta {model, round, text}` (a revision as it is written; it starts with a `VERDICT: kept|revised` line),
+`debate.done {model, round, ok, changed}` (`changed`: the model changed its conclusion; null if it did not say),
+`council.ranking {ranking, category, judges}`, `council.judges {judges, agreement}`.
+
+Judging: every judge sees the answers shuffled and labelled differently. The first judge runs with a sandbox (Bash /
+python) to verify calculations and code. A judge that ranks in label order or gives every answer the same score
+(±0.5) is marked `lazy` and counts ¼.
 
 `result`: `{text, winner, category, ranking: [{model, rank, points, score, failed}], synthesized_by, members, answered,
-mode}`. `points` is the Borda count over the judges' rankings; `score` the judges' mean total (0–10); members that
-failed to answer come last with `rank: null, failed: true`.
+mode, judges, agreement, revisions}`. `points` is the (weighted) Borda count over the judges' rankings; `score` the
+judges' mean total (0–10); members that failed to answer come last with `rank: null, failed: true`.
+- `judges`: `[{judge, ok, checker?, lazy?, reason?, weight?, top?, ranking?: [models], scores?: {model: {total,
+  note?}}}]`, one per judge (`ok: false` when it gave no usable verdict).
+- `agreement`: `{agree, judges, split}`: how many fully counted judges ranked the winner first; `split` = they all
+  picked different answers (treat the result with care).
+- `revisions` (debate): `[{model, round, ok, changed}]`.
 
 ### Deep research (`kind: "research"`)
 ```json
@@ -1715,7 +1726,7 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
   "title_card": true
 }}
 ```
-- `duration_s` 10–180 (default 60): scenes are 3–10 s each (5 s with Folax), at most 24.
+- `duration_s` 10–180 (default 60): scene length follows `pacing` (5 s with Folax), at most 24 scenes.
 - `ratio` `16:9` | `9:16` | `1:1`; `resolution` `720P` | `1080P` (Folax is always 720p).
 - `attachments`: reference photos. A vision model describes each one first (`ref:<n>` steps, `state.references`): a
   photo whose subject is one person makes that person castable like a saved face (the writer gives them a role and
@@ -1731,6 +1742,10 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
     (up to 3 rounds; then it continues).
 - `video_provider`: `qoder` (VideoGen with audio, lip-synced dialogue; one video at a time, ~3–5 min per scene) or
   `folax` (parallel, 5 s, 720p, no audio, watermark).
+- `pacing`: `long` (10–20 s takes), `balanced` (default, 6–10 s) or `fast` (3–6 s cuts). Folax scenes are always 5 s.
+- Editing: scenes follow each other with hard cuts; the writer marks a scene `transition: "dissolve"` when time passes
+  or the place changes (0.5 s crossfade). The film fades in from and out to black only at its start and end; the
+  title card dissolves into the first scene.
 
 Stages: `script` → `cast` → `storyboard` → (review) → `animate` → `assemble`. `state` carries `script`, `cast` [{id,
 name, file_id}], `storyboard` [{n, file_id}] and `clips` [{n, file_id}] as they appear, so a UI can show the panels and

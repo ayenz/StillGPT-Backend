@@ -243,7 +243,10 @@ Design: `docs/DESIGN_RUNS.md`. Implemented: the engine, the council, deep resear
   the message fits them) answer in parallel (`answer:<model>`) → optional debate rounds (`debate:<r>:<model>`) → judges
   (`COUNCIL_JUDGES`, Qoder only) get the answers shuffled per judge (deterministic seed) and labelled A, B, …, reply JSON
   (`judge:<i>:<model>`) → Borda count, ties by mean score → synthesizer (`COUNCIL_SYNTHESIZER`) merges the top 3
-  (falls back to the winner) → `council_results` rows (`stats`) for `GET /admin/council/leaderboard`.
+  (falls back to the winner) → `council_results` rows (`stats`) for `GET /admin/council/leaderboard`. Debate replies start
+  with `VERDICT: kept|revised` (`parseDebate`, streamed as `debate.delta`); judge 0 runs on the `research` profile (sandbox
+  checks); `judgeQuality` marks lazy judges (label-order ranking, flat scores) and `aggregate` weighs them ¼;
+  `result.judges` / `result.agreement` expose every judge's scores and how much they agree.
 - **Deep research** (`research.ts`, virtual models `research`/`research-deep`): `plan` (JSON: sub-questions + outline;
   optional `plan_review` input) → `research:<qid>` agents on the `research` profile (WebSearch/WebFetch sandbox) reply
   JSON findings with URLs → `gap:<round>` adds follow-up questions → (`deep`) `verify:<i>` re-checks medium/low claims →
@@ -256,9 +259,10 @@ Design: `docs/DESIGN_RUNS.md`. Implemented: the engine, the council, deep resear
   image jobs (from a saved face when cast) → `frame:<n>` keyframes (image edits with the scene's cast sheets) checked by
   `check:frame:<n>` (vision JSON score; < 3 → `frame:<n>:fix`) → optional `storyboard_review:<round>` input (redo →
   `frame:<n>:redo<round>`) → `clip:<n>` VideoGen first-frame jobs (last frame = next keyframe for continuous shots) →
-  `title_card` → `assemble` (local: `FfmpegAssembler` normalises every clip to the film size/30 fps/AAC stereo with
-  0.3 s fades, adds silence where a clip has no audio, concat-copies, then loudnorm + a mov_text subtitle track from
-  the dialogue) → the film is stored and recorded as a completed gallery video job (`MediaService.recordVideo`).
+  `title_card` → `assemble` (local: `FfmpegAssembler` normalises every clip to the film size/30 fps/AAC stereo, adds
+  silence where a clip has no audio, then one `joinArgs` graph joins them: `concat` for cuts, `xfade`/`acrossfade` for
+  the scenes the writer marked `dissolve`, fade in/out only at the film's edges, loudnorm; captions go in as a mov_text
+  track timed by `joinPlan`). Scene length follows `pacing` (`PACING`, clamped in `normalize`) → the film is stored and recorded as a completed gallery video job (`MediaService.recordVideo`).
   `rc.mediaJob` stores the job id on the step at once, so a resumed run waits for the same job (videos cannot be
   cancelled upstream); a failed job clears it and the retry starts a new one. Jobs with `request.run_id` are hidden from
   gallery lists and never notify devices; `result.open_path` is where the run's push notification opens.
