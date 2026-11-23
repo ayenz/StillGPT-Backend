@@ -1727,7 +1727,14 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
   "title_card": true
 }}
 ```
-- `duration_s` 10–180 (default 60): scene length follows `pacing` (5 s with Folax), at most 24 scenes.
+- `duration_s` 10–900 (default 60): scene length follows `pacing` (5 s with Folax). Up to 180 s the script is
+  written in one pass (at most 24 scenes). **Longer films** (up to 15 min, at most 120 scenes) are written as an
+  outline (characters, locations, 2–10 acts with their length; `state.outline`), then every act in parallel, then a
+  continuity editor that fixes contradictions across acts (`state.continuity: [{n, reason}]`); scenes carry `act`.
+  Qoder animates one scene at a time (~4 min each), so a 15-minute film takes many hours.
+- `clip_checks` (default true): every animated scene is checked by a vision model on 3 stills (start, middle, end)
+  against its keyframe and cast sheets; a scene scoring below 3/5 is re-taken once with the problems as notes
+  (`state.clip_checks: [{n, score, problems, retake}]`). Not for Folax scenes.
 - `ratio` `16:9` | `9:16` | `1:1`; `resolution` `720P` | `1080P` (Folax is always 720p).
 - `attachments`: reference photos. A vision model describes each one first (`ref:<n>` steps, `state.references`): a
   photo whose subject is one person makes that person castable like a saved face (the writer gives them a role and
@@ -1749,7 +1756,8 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
   title card dissolves into the first scene.
 
 Stages: `script` → `cast` → `storyboard` → (review) → `animate` → `assemble`. `state` carries `script`, `cast` [{id,
-name, file_id}], `storyboard` [{n, file_id}] and `clips` [{n, file_id}] as they appear, so a UI can show the panels and
+name, file_id}], `locations` [{id, name, file_id}] (one establishing image per place: keyframes are drawn with it, so
+a place looks the same in every scene), `storyboard` [{n, file_id}] and `clips` [{n, file_id}] as they appear, so a UI can show the panels and
 scenes live. Every keyframe is checked by a vision model and redrawn once if it scores below 3/5. Intermediate images
 and videos are media jobs with `request.run_id`: they do not appear in `GET /jobs` and do not notify devices.
 

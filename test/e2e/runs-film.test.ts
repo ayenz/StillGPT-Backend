@@ -1,12 +1,18 @@
 import { readFile } from 'node:fs/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { type AssembleInput, buildSrt, filmSize, joinArgs, joinPlan, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
-import { normalize, type Script } from '../../src/core/runs/film.js';
+import { type AssembleInput, buildSrt, chunkParts, filmSize, joinArgs, joinPlan, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
+import { applyFixes, normalize, type Script } from '../../src/core/runs/film.js';
+import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 
 /** Records what the film kind asks to assemble; returns the clips' bytes joined as the "film". */
 class FakeAssembler {
   calls: AssembleInput[] = [];
+  stillCalls: { path: string; at: number[] }[] = [];
+  async stills(path: string, at: number[]) {
+    this.stillCalls.push({ path, at });
+    return at.map(() => makePng());
+  }
   async assemble(input: AssembleInput) {
     this.calls.push(input);
     const parts = await Promise.all(input.clips.map((c) => readFile(c.path)));
@@ -53,14 +59,16 @@ const SCRIPT: Script = {
     { id: 'sari', name: 'Sari', appearance: 'young woman, short black hair', wardrobe: 'green apron', face: null },
     { id: 'budi', name: 'Budi', appearance: 'older man, grey beard', wardrobe: 'batik shirt', face: null },
   ],
+  locations: [{ id: 'cafe', name: 'Small cafe', description: 'warm wooden cafe with a copper espresso machine' }],
   scenes: [
-    { seconds: 6, location: 'small cafe', action: 'Sari opens the shutters', camera: 'wide', characters: ['sari'], dialogue: [], sfx: 'metal shutter', mood: 'calm', continuous: true, transition: 'cut' },
-    { seconds: 14, location: 'counter', action: 'Sari pours latte art', camera: 'close', characters: ['sari', 'ghost'], dialogue: [{ character: 'Sari', line: 'Selamat pagi!' }], sfx: '', mood: 'warm', continuous: false, transition: 'dissolve' },
+    { seconds: 6, location_id: 'cafe', location: 'small cafe', action: 'Sari opens the shutters', camera: 'wide', characters: ['sari'], dialogue: [], sfx: 'metal shutter', mood: 'calm', continuous: true, transition: 'cut' },
+    { seconds: 14, location_id: 'cafe', location: 'counter', action: 'Sari pours latte art', camera: 'close', characters: ['sari', 'ghost'], dialogue: [{ character: 'Sari', line: 'Selamat pagi!' }], sfx: '', mood: 'warm', continuous: false, transition: 'dissolve' },
     { seconds: 5, location: 'table', action: 'Budi tastes and smiles', camera: 'medium', characters: ['budi'], dialogue: [{ character: 'Budi', line: 'Enak sekali.' }], sfx: '', mood: 'joy', continuous: false, transition: 'dissolve' },
   ],
 };
 
 interface Seen {
+  clipChecks: string[];
   scripts: number;
   writer: string[];
   checks: string[];
@@ -68,8 +76,8 @@ interface Seen {
 }
 
 /** Writer replies the script (draft + revision), the vision check gives `score(scene)`. */
-function script(score: (t: string) => number = () => 4): Seen {
-  const seen: Seen = { scripts: 0, writer: [], checks: [], frames: [] };
+function script(score: (t: string) => number = () => 4, clipScore: (t: string) => number = () => 4): Seen {
+  const seen: Seen = { clipChecks: [], scripts: 0, writer: [], checks: [], frames: [] };
   h.qoder.setReply((t) => {
     if (t.startsWith('You are a screenwriter') || t.startsWith('You are a film editor')) {
       seen.scripts++;
@@ -79,6 +87,10 @@ function script(score: (t: string) => number = () => 4): Seen {
     if (t.includes('You check a keyframe')) {
       seen.checks.push(t);
       return JSON.stringify({ score: score(t), problems: ['melted hands'] });
+    }
+    if (t.includes('You check one scene')) {
+      seen.clipChecks.push(t);
+      return JSON.stringify({ score: clipScore(t), problems: ['face morphs at the end'] });
     }
     if (t.includes('Cinematic film still')) seen.frames.push(t);
     return undefined;
@@ -300,5 +312,101 @@ describe('film without ffmpeg', () => {
     } finally {
       await bare.close();
     }
+  });
+});
+
+describe('long films and quality', () => {
+  it('chunks long joins and applies continuity fixes', () => {
+    const parts = Array.from({ length: 45 }, (_, i) => ({ transition: (i % 7 === 0 ? 'dissolve' : 'cut') as 'cut' | 'dissolve' }));
+    const chunks = chunkParts(parts);
+    expect(chunks.map((c) => c.parts.length)).toEqual([20, 20, 5]);
+    // a chunk enters the final join with its first part's transition (part 21 = index 20 is a cut, index 42 a dissolve)
+    expect(chunks.map((c) => c.transition)).toEqual(['cut', 'cut', 'cut']);
+    expect(chunkParts(parts, 21)[2]!.transition).toBe('dissolve');
+    const inner = joinArgs([{ path: 'a.mp4', duration: 3, transition: 'cut' }, { path: 'b.mp4', duration: 4, transition: 'cut' }], 'o.mp4', { finish: false }).join(' ');
+    expect(inner).not.toContain('loudnorm');
+    expect(inner).not.toContain('fade=t=in');
+    const scenes = [
+      { action: 'a', location_id: 'x', characters: ['p'], camera: '', transition: 'cut' as const },
+      { action: 'b', location_id: 'x', characters: ['p'], camera: '', transition: 'cut' as const },
+    ];
+    expect(applyFixes(scenes, [{ n: 2, transition: 'dissolve', characters: [] }, { n: 9, action: 'ignored' }])).toEqual([scenes[0], { ...scenes[1], transition: 'dissolve', characters: [] }]);
+  });
+
+  it('writes a long film as acts in parallel with a continuity pass, and re-takes a bad clip', async () => {
+    const seen = { outline: 0, acts: [] as string[], continuity: '' };
+    const sceneOf = (act: number, k: number) => ({ seconds: 8, location_id: act === 1 ? 'palace' : 'garden', location: 'L', action: `act ${act} scene ${k}`, camera: 'wide', characters: ['lin'], dialogue: [], sfx: '', mood: '', continuous: false, transition: 'cut' });
+    h.qoder.setReply((t) => {
+      if (t.includes('Outline a 4-minute film')) {
+        seen.outline++;
+        return JSON.stringify({
+          title: 'Kabut Istana',
+          logline: 'x',
+          style_bible: { look: 'misty' },
+          characters: [{ id: 'lin', name: 'Lin', appearance: 'young woman', wardrobe: 'red robe' }],
+          locations: [
+            { id: 'palace', name: 'Palace', description: 'red walls' },
+            { id: 'garden', name: 'Garden', description: 'lotus pond' },
+          ],
+          acts: [
+            { title: 'Escape', summary: 'she slips out', seconds: 100 },
+            { title: 'Return', summary: 'she comes back', seconds: 140 },
+          ],
+        });
+      }
+      if (t.startsWith('You write the shooting script of act')) {
+        seen.acts.push(t);
+        const act = t.includes('of act 1 of 2') ? 1 : 2;
+        return JSON.stringify({ scenes: [1, 2].map((k) => sceneOf(act, k)) });
+      }
+      if (t.startsWith('You are the continuity editor')) {
+        seen.continuity = t;
+        return JSON.stringify({ fixes: [{ n: 3, transition: 'dissolve', reason: 'time jump between acts' }] });
+      }
+      if (t.includes('You check a keyframe')) return '{"score":5}';
+      if (t.includes('You check one scene')) return t.includes('act 2 scene 2') ? '{"score":2,"problems":["face morphs"]}' : '{"score":4}';
+      return undefined;
+    });
+    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'film', input: { prompt: 'dayang kabur dari istana', duration_s: 240, review: 'none', title_card: false } } }));
+    const done = await waitRun(run.id);
+    expect(done.status, JSON.stringify(done.error)).toBe('completed');
+    expect(seen.outline).toBe(1);
+    expect(seen.acts).toHaveLength(2);
+    // every act writer sees the whole story and knows which act is theirs
+    expect(seen.acts.find((t) => t.includes('of act 2 of 2'))).toContain('Act 2 (THIS ACT): Return (140 s)');
+    // the act lengths were scaled to the film: 100/240 and 140/240 of 240 s
+    expect(done.state.outline.acts.map((a: any) => a.seconds)).toEqual([100, 140]);
+    expect(seen.continuity).toContain('4. [act 2] garden | lin | cut | act 2 scene 2');
+    const s = done.result.script;
+    expect(s.scenes.map((x: any) => [x.act, x.action, x.transition])).toEqual([
+      [1, 'act 1 scene 1', 'cut'],
+      [1, 'act 1 scene 2', 'cut'],
+      [2, 'act 2 scene 1', 'dissolve'],
+      [2, 'act 2 scene 2', 'cut'],
+    ]);
+    // one establishing image per place; keyframes get the cast sheet and the place last
+    const keys: string[] = done.steps.map((x: any) => x.key);
+    expect(keys).toEqual(expect.arrayContaining(['outline', 'act:1', 'act:2', 'continuity', 'location:palace', 'location:garden']));
+    const frame1 = await json(await h.api(`/api/v1/jobs/${done.steps.find((x: any) => x.key === 'frame:1').output.job_id}`));
+    const lin = done.result.cast.find((c: any) => c.id === 'lin').file_id;
+    const palace = done.state.locations.find((l: any) => l.id === 'palace').file_id;
+    expect(frame1.request.input_file_ids).toEqual([lin, palace]);
+    expect(frame1.request.prompt).toContain('The last input image shows the location "Palace"');
+    // clip checks: 3 stills per clip; the bad clip (scene 4) is re-taken once and the re-take is used
+    expect(keys.filter((k) => k.startsWith('check:clip:'))).toHaveLength(4);
+    expect(keys).toContain('clip:4:fix');
+    expect(keys.filter((k) => k.endsWith(':fix') && k.startsWith('clip:'))).toEqual(['clip:4:fix']);
+    const retake = await json(await h.api(`/api/v1/jobs/${done.steps.find((x: any) => x.key === 'clip:4:fix').output.job_id}`));
+    expect(retake.request.prompt).toContain('Avoid: face morphs');
+    expect(done.result.clips[3]).toBe(retake.outputs[0].id);
+    expect(done.state.clip_checks.map((c: any) => [c.n, c.retake])).toEqual([
+      [1, false],
+      [2, false],
+      [3, false],
+      [4, true],
+    ]);
+    const call = assembler.calls.at(-1)!;
+    expect(call.clips).toHaveLength(4);
+    expect(call.clips.map((c) => c.transition)).toEqual(['cut', 'cut', 'dissolve', 'cut']);
   });
 });

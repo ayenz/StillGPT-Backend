@@ -272,6 +272,13 @@ Design: `docs/DESIGN_RUNS.md`. Implemented: the engine, the council, deep resear
   findings/sources they cover) → `edit` merges (streamed) + a code-built "Sources" list → `save_md` (MediaStore) →
   `render` (sandbox pandoc/LibreOffice → PDF/DOCX via DeliverArtifacts; `TurnStepOutput.files`). `result.files` become
   the chat reply's artifacts. `notify: true` → push/FCM when done.
+- **Long films** (`duration_s` > `LONG_FILM_S` = 180, up to 900): `outline` (characters, `locations`, 2–10 acts with
+  lengths scaled to the film) → `act:<n>` scene writers in parallel against the whole outline → `continuity` (fixes by
+  scene number, `applyFixes`) → the normal pipeline with up to 120 scenes. `location:<id>` establishing images (no people)
+  are drawn per used place and passed last to every keyframe of that place (cast sheets first, max 3 inputs).
+  `clip_checks`: `stills:<n>:<clip>` (3 JPEG stills via `FilmAssembler.stills`) + `check:clip:<n>:<clip>` (vision JSON
+  score) → `clip:<n>:fix` re-take once below 3/5. The assembler joins more than `CHUNK_LIMIT` (24) parts in chunks of 20
+  (`chunkParts`, `joinArgs(..., {finish: false})`), then joins the chunks with edges + loudnorm.
 - **Short film** (`film.ts`, `assembler.ts`; API only, no chat model — it can take longer than a turn's 45 min):
   `script` + `script_revise` (JSON, then `normalize`: 3–10 s scenes, ≤ 24, unknown character ids dropped) → `cast:<id>`
   image jobs (from a saved face when cast) → `frame:<n>` keyframes (image edits with the scene's cast sheets) checked by
