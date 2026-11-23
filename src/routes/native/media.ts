@@ -1,6 +1,8 @@
+import { and, eq, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppContext } from '../../context.js';
+import { mediaJobs } from '../../db/schema.js';
 import { batchViewOf, IMAGE_SIZES, type ImageBatchView, type ImageRequest, imageBatchJson, isTerminal, jobTopic, MAX_IMAGE_BATCH, type MediaJobEvent, type MediaJobView, mediaJobJson, type VideoRequest } from '../../core/media.js';
 import { MAX_VARIATIONS, VARIATION_AXES } from '../../core/variations.js';
 import { WEBHOOK_EVENTS } from '../../core/webhooks.js';
@@ -92,7 +94,20 @@ export function fileRoutes(ctx: AppContext) {
     return c.json(fileView(saved, ctx.store), 201);
   });
 
-  app.get('/files/:id', async (c) => c.json(fileView(await ctx.store.get(c.req.param('id'), c.get('user').id), ctx.store)));
+  app.get('/files/:id', async (c) => {
+    const userId = c.get('user').id;
+    const file = await ctx.store.get(c.req.param('id'), userId);
+    // the creation this file came from, while it is still in the gallery (not trashed)
+    let jobId: string | null = null;
+    if (file.jobId) {
+      const [job] = await ctx.database.db
+        .select({ id: mediaJobs.id })
+        .from(mediaJobs)
+        .where(and(eq(mediaJobs.id, file.jobId), eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt)));
+      jobId = job?.id ?? null;
+    }
+    return c.json({ ...fileView(file, ctx.store), job_id: jobId });
+  });
 
   return app;
 }

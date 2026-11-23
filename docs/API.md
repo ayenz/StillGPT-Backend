@@ -551,7 +551,8 @@ For images and videos `thumbnail_url` and `preview_url` are set (see "Thumbnails
 If the client sends `application/octet-stream`, the server works out the type from the file extension.
 
 ### GET /files/:id
-Returns the same object with a signed `url`. You can only see your own files.
+Returns the same object with a signed `url`, plus `job_id`: the gallery creation that produced the file (`null` for
+uploads, or when that creation was deleted or trashed). You can only see your own files.
 
 ### Attachment limits (enforced when the message is sent)
 - **Images** (vision input, image edits, video frames/references): PNG, JPEG and WebP up to the 50 MB upload limit.
