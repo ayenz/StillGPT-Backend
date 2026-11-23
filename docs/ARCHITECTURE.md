@@ -191,19 +191,26 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   `EnhancerInstructions`, `/admin/enhancer/*`); the contract (allowed ratios, JSON shape, safety rules) stays in code.
   When the Qoder turn fails, gives no usable JSON or takes over `ENHANCER_QODER_MS` (15 s; down, out of credits…), Folax writes
   it instead (`folax/gemini`, then `folax/chatgpt`; free, `model: "folax/…"`, `credits: 0`). Folax's upstream filter rejects any
-  request containing words like "sexual"/"nudity"/"minors"/"busty", even in our own rules, so `folaxSafePrompt` drops those
-  rule lines (the user's hints and idea are untouched). If Folax fails too, the original prompt comes back (`enhanced: false`).
+  request containing words like "sexual"/"nudity"/"minors"/"busty", even in our own rules, so `folaxSafePrompt`
+  (`core/folaxFallback.ts`, shared by all helper fallbacks) drops those `- ` rule lines; user data (`<hints>`, `<idea>`,
+  `<prompt>`, `<user-words>`, `<earlier>`, image traits) is untouched. If Folax fails too, the original prompt comes back
+  (`enhanced: false`).
 - Image-aware prompts (`core/references.ts`): `ReferenceReader` describes an image once with the `vision` alias (traits cached
   in `files.traits`). The enhancer uses it for image edits (`mode: edit`, ratio from the input), video first/last frames
   (`first_frame`: motion only) and video references; variations use it to steer away from references or stay on an edited
-  image / first frame. User and image-derived text is fenced (`<\/` escaped) inside tags.
+  image / first frame. User and image-derived text is fenced (`<\/` escaped) inside tags. When the Qoder vision turn fails,
+  replies with no usable JSON or takes over `VISION_QODER_MS` (20 s), Folax's vision model reads the image instead (sent as a
+  base64 data URL; at most 3 Folax vision calls at once, one retry on a full queue) and its traits are cached the same way.
+  The head swap describe step (`describeHead`, `files.head_traits`) falls back the same way.
 - Large images: uploads go up to 50 MB; `attachments.shrinkImage` makes a same-format copy under ~4.5 MB for Qoder (its file
   limit) when a PNG/JPEG/WebP is uploaded upstream; the Qoder file id is cached so it happens once per file.
 - Prompt variations (`core/variations.ts`, `POST /api/v1/prompts/variations`, `variations` on `POST /images`): each reference image
   is first described once by the `vision` alias (a hidden one-shot turn with the image attached) into traits (outfit, palette,
   background…), cached in `files.traits`. Then one `enhancer` turn writes `n` variants that change the `vary` axes away from those
   traits and from `avoid` (earlier variants), and keep the `keep` axes. Instructions are editable as kind `variation`
-  (`kv.enhancer.instructions.variation`). On image jobs a variation failure falls back to the unvaried prompt.
+  (`kv.enhancer.instructions.variation`). When the Qoder turn fails, gives no usable variations or takes over
+  `VARIATIONS_QODER_MS` (75 s; it takes ~38 s), Folax writes them (`folax/gemini`, then `folax/chatgpt`; `credits: 0`).
+  On image jobs a variation failure that Folax could not save falls back to the unvaried prompt.
 - Videos are **jobs**: table `media_jobs` (status `queued|in_progress|completed|failed`, qoder session id, last event id, progress, result artifact, error, `callback_url`).
   A worker runs them with concurrency `VIDEO_CONCURRENCY` (default 1 — the Qoder account allows ~1 concurrent video; a full upstream queue is retried automatically) and **resumes** in-flight jobs after restart by reading session events.
 - Upscale (`POST /images/:fileId/upscale`, `providers/upscale.ts`): an image job with `provider_used: upscale` and

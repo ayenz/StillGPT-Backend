@@ -6,7 +6,12 @@ import type { ConversationService } from './conversations.js';
 import type { EnhanceKind } from './enhancer.js';
 import type { EnhancerInstructions } from './enhancerInstructions.js';
 import { clip, type DescribedImage, describeForPrompt, fence, firstJsonObject, type ReferenceReader, type ReferenceTraits, referenceView } from './references.js';
+import type { FolaxClient } from '../providers/folax.js';
+import { askFolax, withinMs } from './folaxFallback.js';
 import type { TurnRunner } from './turns.js';
+
+/** Folax models for the fallback: gemini wrote all 9 of 9 variations in ~8 s (2026-11-23, real prod prompts), chatgpt ~28 s. */
+export const FOLAX_VARIATION_MODELS = ['gemini', 'chatgpt'] as const;
 
 /** What a variation may change (`vary`) or must preserve (`keep`). */
 export const VARIATION_AXES = ['subject', 'outfit', 'color', 'background', 'pose', 'lighting', 'camera', 'props', 'hair', 'style', 'text', 'mood', 'motion'] as const;
@@ -213,6 +218,10 @@ export class PromptVariator {
       references: ReferenceReader;
       log: Logger;
       instructions?: EnhancerInstructions;
+      /** Fallback when Qoder cannot write the variations; null/absent = no fallback. */
+      folax?: FolaxClient | null;
+      /** How long the Qoder turn may take before Folax is asked instead (default 75 s; it takes ~38 s, at most ~72 s). */
+      qoderWaitMs?: number;
     },
   ) {}
 
@@ -244,12 +253,26 @@ export class PromptVariator {
     // explicit `vary` = the user chose what changes, so their wording does not lock those axes
     const userPrompt = v.vary === undefined ? v.userPrompt : undefined;
     const text = buildVariationPrompt({ instructions, kind: v.kind, prompt: v.prompt, vary, keep, firstFrame, edits, references, avoid: v.avoid, n: v.n, userPrompt });
-    const turn = await this.oneShot(v.userId, v.model ?? 'enhancer', [{ type: 'text', text }]);
-    const variations = turn.ok ? parseVariations(turn.text, { original: v.prompt, avoid: v.avoid, n: v.n }) : [];
+    const parse = (reply: string) => parseVariations(reply, { original: v.prompt, avoid: v.avoid, n: v.n });
+    let turn = await this.oneShot(v.userId, v.model ?? 'enhancer', [{ type: 'text', text }]);
+    let variations = turn.ok ? parse(turn.text) : [];
     if (!variations.length) {
       this.d.log.warn('variations.unusable_reply', { text: turn.text.slice(0, 200) });
-      throw new AppError(502, 'variation_failed', 'The model did not return usable variations; try again');
+      // Qoder down, out of credits, slow or unusable: Folax writes them (free)
+      const folax = await askFolax({
+        folax: this.d.folax,
+        log: this.d.log,
+        what: 'variations',
+        models: FOLAX_VARIATION_MODELS,
+        content: [{ type: 'text', text }],
+        parse: (reply) => {
+          const r = parse(reply);
+          return r.length ? r : null;
+        },
+      });
+      if (folax) [turn, variations] = [{ ok: true, text: '', model: folax.model, credits: 0 }, folax.value];
     }
+    if (!variations.length) throw new AppError(502, 'variation_failed', 'The model did not return usable variations; try again');
     return {
       original: v.prompt,
       kind: v.kind,
@@ -262,10 +285,24 @@ export class PromptVariator {
     };
   }
 
+  /** The Qoder turn; `ok: false` when it failed or took over `qoderWaitMs` (then it is interrupted). */
   private async oneShot(userId: string, model: string, content: ContentBlock[]) {
-    const conv = await this.d.conversations.create({ userId, profile: 'chat', model, title: 'prompt variations', metadata: { hidden: true, purpose: 'prompt_variations' } });
-    const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content });
-    const r = await handle.done;
-    return { ok: r.stopReason !== 'error', text: r.text, model: r.model, credits: r.credits.total };
+    const failed = { ok: false, text: '', model, credits: 0 };
+    try {
+      const conv = await this.d.conversations.create({ userId, profile: 'chat', model, title: 'prompt variations', metadata: { hidden: true, purpose: 'prompt_variations' } });
+      const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content });
+      const waitMs = this.d.qoderWaitMs ?? 75_000;
+      const r = await withinMs(handle.done, waitMs);
+      if (!r) {
+        this.d.log.warn('variations.qoder_slow', { waitedMs: waitMs });
+        void this.d.turns.interrupt(conv.id, userId).catch(() => {});
+        return failed;
+      }
+      return { ok: r.stopReason !== 'error', text: r.text, model: r.model, credits: r.credits.total };
+    } catch (err) {
+      if (err instanceof AppError && err.status < 500) throw err;
+      this.d.log.warn('variations.turn_failed', { err });
+      return failed;
+    }
   }
 }

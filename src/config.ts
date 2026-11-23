@@ -147,6 +147,10 @@ const schema = z
     AUTO_TITLE_QODER_MS: z.coerce.number().int().min(1000).default(45_000),
     /** How long the Qoder prompt-enhancer turn may take before Folax (`folax/gemini`, then `folax/chatgpt`) writes it instead. */
     ENHANCER_QODER_MS: z.coerce.number().int().min(1000).default(15_000),
+    /** Same for prompt variations (they take ~38 s on Qoder, at most ~72 s in 2 weeks of prod). */
+    VARIATIONS_QODER_MS: z.coerce.number().int().min(1000).default(75_000),
+    /** Same for reading images (enhancer/variation references, head swap describe): ~3 s on Qoder, at most ~18 s. Folax reads them instead. */
+    VISION_QODER_MS: z.coerce.number().int().min(1000).default(20_000),
     CORS_ORIGINS: z
       .string()
       .default('*')

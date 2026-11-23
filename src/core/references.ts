@@ -7,6 +7,8 @@ import type { Logger } from '../log.js';
 import { INLINE_IMAGE_TYPES } from './attachments.js';
 import type { ConversationService } from './conversations.js';
 import type { MediaStore, StoredFile } from './storage.js';
+import type { FolaxClient } from '../providers/folax.js';
+import { askFolax, withinMs } from './folaxFallback.js';
 import type { TurnRunner } from './turns.js';
 
 /** Attributes a vision model reads from an image; cached on the file row (`files.traits`). */
@@ -108,6 +110,10 @@ export class ReferenceReader {
       log: Logger;
       /** Model alias/id that reads images. Default `vision`. */
       visionModel?: string;
+      /** Reads the image when Qoder cannot (down, out of credits, slow, unusable reply); null/absent = no fallback. */
+      folax?: FolaxClient | null;
+      /** How long the Qoder vision turn may take before Folax is asked instead (default 20 s; it takes ~3 s, at most ~18 s). */
+      qoderWaitMs?: number;
     },
   ) {}
 
@@ -134,14 +140,17 @@ export class ReferenceReader {
     if (file.traits && Object.keys(file.traits).length) return { file, traits: file.traits as Traits, cached: true, credits: 0, ...size };
     if (!INLINE_IMAGE_TYPES.includes(file.mimeType)) return { file, traits: null, cached: false, credits: 0, ...size };
     try {
-      const turn = await this.oneShot(userId, this.d.visionModel ?? 'vision', [
-        { type: 'image', fileId: file.id, mimeType: file.mimeType },
-        { type: 'text', text: DESCRIBE_PROMPT },
-      ]);
-      const traits = turn.ok ? parseTraits(turn.text) : null;
+      const { value: traits, credits } = await this.read(
+        userId,
+        [
+          { type: 'image', fileId: file.id, mimeType: file.mimeType },
+          { type: 'text', text: DESCRIBE_PROMPT },
+        ],
+        parseTraits,
+        { fileId: file.id },
+      );
       if (traits) await this.d.store.setTraits(file.id, traits);
-      else this.d.log.warn('references.describe_unusable', { fileId: file.id, text: turn.text.slice(0, 200) });
-      return { file, traits, cached: false, credits: turn.credits, ...size };
+      return { file, traits, cached: false, credits, ...size };
     } catch (err) {
       this.d.log.warn('references.describe_failed', { fileId: file.id, err });
       return { file, traits: null, cached: false, credits: 0, ...size };
@@ -167,19 +176,17 @@ export class ReferenceReader {
       const cached = parseHeadTraits(JSON.stringify(file.headTraits ?? {}));
       if (cached) return { traits: cached, cached: true, credits: 0 };
       if (!INLINE_IMAGE_TYPES.includes(file.mimeType)) return { traits: null, cached: false, credits: 0 };
-      const turn = await this.oneShot(
+      const { value: traits, credits } = await this.read(
         userId,
-        this.d.visionModel ?? 'vision',
         [
           { type: 'image', fileId: file.id, mimeType: file.mimeType },
           { type: 'text', text: o.prompt },
         ],
-        { jobId: o.jobId, purpose: 'head_swap_description' },
+        parseHeadTraits,
+        { fileId, jobId: o.jobId, purpose: 'head_swap_description' },
       );
-      const traits = turn.ok ? parseHeadTraits(turn.text) : null;
       if (traits) await this.d.store.setHeadTraits(file.id, traits);
-      else this.d.log.warn('references.describe_head_unusable', { fileId, text: turn.text.slice(0, 200) });
-      return { traits, cached: false, credits: turn.credits };
+      return { traits, cached: false, credits };
     } catch (err) {
       this.d.log.warn('references.describe_head_failed', { fileId, err });
       return { traits: null, cached: false, credits: 0 };
@@ -197,16 +204,48 @@ export class ReferenceReader {
     }
   }
 
+  /**
+   * Reads an image with the Qoder vision turn; when that fails, takes over `qoderWaitMs` or gives nothing `parse` can
+   * use, Folax's vision model reads it instead (free). `value` is null when neither could.
+   */
+  private async read<T>(
+    userId: string,
+    content: ContentBlock[],
+    parse: (text: string) => T | null,
+    o: { fileId: string; jobId?: string; purpose?: string },
+  ): Promise<{ value: T | null; credits: number }> {
+    const turn = await this.oneShot(userId, this.d.visionModel ?? 'vision', content, o);
+    const value = turn.ok ? parse(turn.text) : null;
+    if (value) return { value, credits: turn.credits };
+    this.d.log.warn('references.describe_unusable', { fileId: o.fileId, purpose: o.purpose, text: turn.text.slice(0, 200) });
+    // every Folax model reads images with the same vision model: one is enough
+    const folax = await askFolax({ folax: this.d.folax, log: this.d.log, what: 'references', models: ['gemini'], content, store: this.d.store, userId, parse });
+    return { value: folax?.value ?? null, credits: turn.credits };
+  }
+
+  /** The Qoder turn; `ok: false` when it failed or took over `qoderWaitMs` (then it is interrupted). */
   private async oneShot(userId: string, model: string, content: ContentBlock[], o: { jobId?: string; purpose?: string } = {}) {
-    const conv = await this.d.conversations.create({
-      userId,
-      profile: 'chat',
-      model,
-      title: 'reference description',
-      metadata: { hidden: true, purpose: o.purpose ?? 'reference_description', ...(o.jobId ? { job_id: o.jobId } : {}) },
-    });
-    const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content, ...(o.jobId ? { jobId: o.jobId } : {}) });
-    const r = await handle.done;
-    return { ok: r.stopReason !== 'error', text: r.text, credits: r.credits.total };
+    try {
+      const conv = await this.d.conversations.create({
+        userId,
+        profile: 'chat',
+        model,
+        title: 'reference description',
+        metadata: { hidden: true, purpose: o.purpose ?? 'reference_description', ...(o.jobId ? { job_id: o.jobId } : {}) },
+      });
+      const handle = await this.d.turns.start({ conversationId: conv.id, userId, oneShot: true, content, ...(o.jobId ? { jobId: o.jobId } : {}) });
+      const waitMs = this.d.qoderWaitMs ?? 20_000;
+      const r = await withinMs(handle.done, waitMs);
+      if (!r) {
+        this.d.log.warn('references.qoder_slow', { waitedMs: waitMs, purpose: o.purpose });
+        void this.d.turns.interrupt(conv.id, userId).catch(() => {});
+        return { ok: false, text: '', credits: 0 };
+      }
+      return { ok: r.stopReason !== 'error', text: r.text, credits: r.credits.total };
+    } catch (err) {
+      // a usage-limit 4xx stays a failed read here, like before: describe never throws
+      this.d.log.warn('references.turn_failed', { purpose: o.purpose, err: (err as Error).message });
+      return { ok: false, text: '', credits: 0 };
+    }
   }
 }
