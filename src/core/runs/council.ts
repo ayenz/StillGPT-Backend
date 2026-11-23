@@ -310,6 +310,12 @@ function shuffled<T>(items: T[], seed: string): T[] {
 }
 
 const clip = (t: string, n = ANSWER_CHARS) => (t.length > n ? `${t.slice(0, n)}\n[…cut]` : t);
+
+/** Characters of all answers in one debate / judge prompt; each answer gets an equal share (at least 1500). */
+const DEBATE_BUDGET = 80_000;
+const JUDGE_BUDGET = 120_000;
+/** Per-answer length when `n` answers share `budget` (22 long answers would otherwise make 260k-char prompts). */
+export const share = (budget: number, n: number) => Math.max(1500, Math.min(ANSWER_CHARS, Math.floor(budget / Math.max(1, n))));
 const context = (preamble?: string) => (preamble ? fenced('conversation', clip(preamble, 8000)) : '');
 
 function debatePrompt(question: string, preamble: string | undefined, own: string, others: Answer[]): string {
@@ -318,7 +324,7 @@ function debatePrompt(question: string, preamble: string | undefined, own: strin
     context(preamble),
     fenced('question', question),
     fenced('your_answer', clip(own)),
-    ...others.map((a, i) => fenced(`answer_${label(i)}`, clip(a.text))),
+    ...others.map((a, i) => fenced(`answer_${label(i)}`, clip(a.text, share(DEBATE_BUDGET, others.length)))),
     [
       'Write your improved final answer to the question. Keep what you are sure of, fix what the others showed you got wrong, add what you missed. Do not mention the other answers or this revision. Reply in the language of the question.',
       'Start your reply with exactly one line: "VERDICT: kept" if your conclusion stays the same (only wording or details improved) or "VERDICT: revised" if the others changed your conclusion. Then an empty line, then the answer.',
@@ -336,7 +342,7 @@ function judgePrompt(question: string, preamble: string | undefined, order: Answ
       : '',
     context(preamble),
     fenced('question', question),
-    ...order.map((a, k) => fenced('answer', clip(a.text), `id="${labels[k]}"`)),
+    ...order.map((a, k) => fenced('answer', clip(a.text, share(JUDGE_BUDGET, order.length)), `id="${labels[k]}"`)),
     [
       'Score every answer 0–10 for correctness, completeness and clarity, give a total (0–10, your overall judgement) and a short note on its main strength or flaw.',
       'Use the whole scale and separate the answers: when several are equally correct, rank them by depth, precision and how directly they answer. Never rank by the order of the ids.',

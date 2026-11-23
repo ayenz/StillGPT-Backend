@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { aggregate, judgeQuality, parseDebate } from '../../src/core/runs/council.js';
+import { aggregate, judgeQuality, parseDebate, share } from '../../src/core/runs/council.js';
 import { extractJson } from '../../src/core/runs/json.js';
 import { Semaphore } from '../../src/core/runs/semaphore.js';
 import { conversations, runSteps, runs } from '../../src/db/schema.js';
@@ -283,6 +283,12 @@ describe('council as a chat model', () => {
 });
 
 describe('debate verdicts and judge quality', () => {
+  it('shares the prompt budget between answers', () => {
+    expect(share(120_000, 3)).toBe(12_000); // few answers: the full 12k each
+    expect(share(120_000, 22)).toBe(5454); // a 22-model council stays near 120k characters per judge prompt
+    expect(share(80_000, 200)).toBe(1500); // never below 1500
+  });
+
   it('reads and strips the VERDICT line', () => {
     expect(parseDebate('VERDICT: revised\n\nThe ball costs 500.')).toEqual({ changed: true, text: 'The ball costs 500.' });
     expect(parseDebate('**VERDICT: kept**\nSame answer.')).toEqual({ changed: false, text: 'Same answer.' });

@@ -20,8 +20,13 @@ import type { UsageService } from './usage.js';
 
 /** Upper bound for one turn (video generation may block up to 30 min upstream). */
 const TURN_TIMEOUT_MS = 45 * 60_000;
+/**
+ * Virtual models (council, deep research) run many turns behind one reply: a 22-model council with a debate on long
+ * answers took ~50 min. Their turn may run this long; only an explicit interrupt stops it earlier.
+ */
+const VIRTUAL_TURN_TIMEOUT_MS = 4 * 3600_000;
 /** A conversation stuck in `busy` longer than this is considered abandoned (process crash). */
-const STALE_BUSY_MS = TURN_TIMEOUT_MS + 5 * 60_000;
+const STALE_BUSY_MS = VIRTUAL_TURN_TIMEOUT_MS + 5 * 60_000;
 const MAX_STREAM_RECONNECTS = 5;
 const MAX_MODEL_RETRIES = 3;
 
@@ -274,7 +279,7 @@ export class TurnRunner {
     const folaxTurn = isFolaxModelId(conv.model);
     const virtual = this.virtualHandler(conv.model);
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), TURN_TIMEOUT_MS);
+    const timer = setTimeout(() => timeout.abort(), virtual ? VIRTUAL_TURN_TIMEOUT_MS : TURN_TIMEOUT_MS);
 
     try {
       if (virtual) {
