@@ -306,6 +306,23 @@ describe('face swap engines', () => {
     expect((await download(done.jobs[0].outputs[0].url)).equals(PASTED)).toBe(true);
   });
 
+  it('Qoder down: qoder and qoder_crop face swaps are finished by the plain swapper', async () => {
+    const { target, face } = await setup();
+    h.qoder.setToolError(() => 'image_gen error: billing_error You have no available credit.');
+    try {
+      for (const engine of ['qoder', 'qoder_crop']) {
+        sidecar.reset();
+        const b = await finished((await json(await swap(target.id, { face_id: face.id, engine }))).body.id);
+        expect(b.status).toBe('completed');
+        expect(b.jobs[0].request).toMatchObject({ qoder_fallback: 'faceswap', provider_used: 'faceswap', fallback_reason: 'generation_failed' });
+        expect(sidecar.calls.at(-1)!.path).toBe('/v1/swap');
+        expect((await download(b.jobs[0].outputs[0].url)).equals(SWAPPED)).toBe(true);
+      }
+    } finally {
+      h.qoder.setToolError(undefined);
+    }
+  });
+
   it('rejects an unknown engine', async () => {
     const { target, face } = await setup();
     expect((await json(await swap(target.id, { face_id: face.id, engine: 'magic' }))).status).toBe(400);

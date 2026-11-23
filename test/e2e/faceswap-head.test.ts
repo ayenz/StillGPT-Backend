@@ -52,6 +52,8 @@ async function startFakeSidecar() {
         const features = { hair_dE: [12, 3, 30][k % 3]!, d_expr: [0.1, 0.05, 0.3][k % 3]!, identity: [0.6, 0.55, 0.7][k % 3]!, aligned: true, fallback: false, inliers: 80 };
         return reply(200, { image: makePng(7, 9, [k % 256, 1, 2]).toString('base64'), mime_type: 'image/png', width: 30, height: 40, features, timings_ms: { total: 5 } });
       }
+      if (path === '/v1/swap')
+        return reply(200, { image: makePng(5, 5, [1, 2, 3]).toString('base64'), mime_type: 'image/png', width: 5, height: 5, target_faces: 1, source_faces: 1, timings_ms: { swap: 12 } });
       reply(404, { detail: 'Not Found' });
     });
   });
@@ -320,6 +322,17 @@ describe('head_swap engine', () => {
     expect(b.credits).toBeGreaterThan(0);
     expect(b.credits).toBeCloseTo(await usageTotal(b.id), 6);
     expect(b.request.face_swap.chosen).toBeUndefined();
+  });
+
+  it('Qoder made no candidate at all (down, out of credits): the plain swapper finishes the job', async () => {
+    const { target, face } = await setup();
+    h.qoder.setToolError(() => 'image_gen error: billing_error You have no available credit.');
+    const a = (await finished((await json(await swap(target.id, { face_id: face.id }))).body.id)).jobs[0];
+    expect(a.status).toBe('completed');
+    expect(a.request).toMatchObject({ qoder_fallback: 'faceswap', provider_used: 'faceswap', fallback_reason: 'head_swap_failed' });
+    expect(a.request.face_swap.candidates.every((c: any) => c.error && !c.file_id)).toBe(true);
+    expect(a.outputs).toHaveLength(1);
+    expect(sidecar.calls.map((c) => c.path)).toEqual(['/v1/swap']);
   });
 
   it('an unusable description still runs with neutral wording (traits null, not cached)', async () => {

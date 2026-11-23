@@ -183,6 +183,13 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   artifacts of the job and usage is recorded with 0 credits (model `folax`). `auto` = Folax for text-to-image when configured, Qoder
   otherwise, and Qoder as transparent fallback when Folax fails; edits always use Qoder. `request.provider`, `provider_used` and
   `fallback_reason` record the decision. Folax `AUTH_INVALID` emits the admin webhook `provider.degraded` (throttled to 1/h).
+- Qoder → fallback for image jobs (`MediaService.orQoderFallback`): when the Qoder turn of an image job fails or delivers no file
+  (down, `billing_error` "no available credit", generator transport errors…; not `budget_exceeded` / `credit_limit_exceeded`),
+  text-to-image goes to Folax generate, an edit of exactly one image to a Folax prompt edit (weekly quota shared by all users),
+  and face swaps (`qoder`, `qoder_crop`, `swapper_polish`, and `head_swap` when no candidate got an image from Qoder) to the
+  sidecar swapper. Edits combining several images and videos have no fallback. The job records `qoder_fallback`, `qoder_error`,
+  `fallback_reason` and the new `provider_used`; after a restart a switched job continues on its fallback without a new Qoder
+  turn. A fallback that fails too fails the job with its own code and a message naming both errors.
 - Prompt enhancer (`core/enhancer.ts`, `POST /api/v1/prompts/enhance`): one turn on a hidden `chat` conversation with the `enhancer` model
   alias that rewrites an idea into an English prompt + aspect ratio (image size, or video ratio/seconds). `enhance: true` on
   image/video jobs runs it at creation time; its size/ratio/seconds apply only where the request left them unset, and

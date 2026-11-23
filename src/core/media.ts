@@ -1089,10 +1089,17 @@ export class MediaService {
       this.publishProgress(job.id, 'in_progress', 0);
       stopProgress = this.trackProgress(job, started);
       if (upscaleOf(job)) return await this.finish(job.id, await this.runUpscale(job));
+      // Qoder already failed this job before a restart: continue on the fallback it was switched to
+      const switched = qoderFallbackOf(job);
+      if (switched) return await this.finish(job.id, await this.runQoderFallback(job, switched, null));
       let current = job;
       const engine = faceSwapEngineOf(job);
       if (engine === 'swapper') return await this.finish(job.id, await this.runSwapper(job));
-      if (engine === 'head_swap') return await this.finish(job.id, await this.runHeadSwap(job));
+      if (engine === 'head_swap') {
+        const outcome = await this.runHeadSwap(job);
+        // Qoder made no candidate at all (down, out of credits): the swapper; a sidecar failure keeps head_swap_failed
+        return await this.finish(job.id, failedOutcome(outcome) && (await this.noHeadCandidates(job.id)) ? await this.orQoderFallback(job, outcome) : outcome);
+      }
       if (isCloseUpEngine(engine)) current = await this.prepareFaceCrop(job);
       if (usesFolaxVideo(job)) {
         const outcome = await this.runFolaxVideo(job);
@@ -1109,7 +1116,16 @@ export class MediaService {
           current = await this.fallBackFromFolax(job, toAppError(err));
         }
       }
-      const outcome = await this.runQoderWithRetry(current);
+      let outcome: Outcome;
+      try {
+        outcome = await this.runQoderWithRetry(current);
+      } catch (err) {
+        if (err instanceof ServerStopping) throw err;
+        const e = toAppError(err);
+        outcome = { fileIds: [], credits: null, error: { code: e.code, message: e.message } };
+      }
+      // only Qoder's own failure falls back (a close-up Qoder delivered but that does not fit keeps its own rules)
+      if (failedOutcome(outcome)) return await this.finish(job.id, await this.orQoderFallback(current, outcome));
       await this.finish(job.id, isCloseUpEngine(engine) ? await this.completeFaceCrop(current, outcome) : outcome);
     } catch (err) {
       // the server is stopping mid-job: it stays in_progress and resumes after the restart
@@ -1693,6 +1709,12 @@ export class MediaService {
     return { fileIds: fs.all_candidates ? ok.map((x) => x.c.composite_file_id!) : [ok[0]!.c.composite_file_id!], credits, error: null };
   }
 
+  /** True when no head swap candidate got an image from Qoder. */
+  private async noHeadCandidates(jobId: string): Promise<boolean> {
+    const [row] = await this.d.db.select().from(mediaJobs).where(eq(mediaJobs.id, jobId));
+    return !((row?.request.face_swap as FaceSwapJobInfo | undefined)?.candidates ?? []).some((c) => c.file_id);
+  }
+
   /** Merge fields into `request.face_swap` atomically (parallel candidates write the same row). */
   private async patchFaceSwap(jobId: string, patch: Partial<FaceSwapJobInfo>) {
     await this.d.db
@@ -1709,6 +1731,61 @@ export class MediaService {
       .set({ request: sql`jsonb_set(${mediaJobs.request}, ${path}::text[], coalesce(${mediaJobs.request} #> ${path}::text[], '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb)` })
       .where(eq(mediaJobs.id, jobId));
     return patch;
+  }
+
+  /**
+   * Where an image job goes when Qoder could not make it (down, out of credits, nothing delivered…), or null:
+   * - face swaps (every engine but `swapper`) → the sidecar swapper (Folax cannot move a face);
+   * - edits of exactly one image → a Folax prompt edit (weekly quota shared by all users);
+   * - text-to-image → Folax generate.
+   * Never twice: a job that already came to Qoder from Folax (except for a too long prompt) has none.
+   */
+  private qoderFallbackFor(job: MediaJob): QoderFallback | null {
+    if (job.kind !== 'image' || upscaleOf(job)) return null;
+    if (faceSwapEngineOf(job)) return this.d.faceswap ? 'faceswap' : null;
+    const reason = job.request.fallback_reason;
+    if (reason && reason !== 'prompt_too_long_for_folax') return null;
+    if (!this.d.folax || this.d.folax.knownDown()) return null;
+    const inputs = inputIds(job).length;
+    return inputs === 0 ? 'folax' : inputs === 1 ? 'folax_edit' : null;
+  }
+
+  /** The Qoder outcome, or (when it failed for a reason our own limits did not cause) the fallback's. */
+  private async orQoderFallback(job: MediaJob, outcome: Outcome): Promise<Outcome> {
+    if (!failedOutcome(outcome) || this.stopped) return outcome;
+    const code = outcome.error?.code ?? 'no_output';
+    if (NO_QODER_FALLBACK.has(code)) return outcome;
+    const to = this.qoderFallbackFor(job);
+    if (!to) return outcome;
+    this.d.log.warn('media.qoder_fallback', { jobId: job.id, code, to });
+    const patch = {
+      qoder_fallback: to,
+      qoder_error: outcome.error ?? { code, message: 'Qoder did not deliver any file' },
+      provider_used: to === 'faceswap' ? 'faceswap' : 'folax',
+      fallback_reason: code,
+      ...(to === 'folax_edit' ? { folax_edit: { mode: 'instruction' } } : {}),
+    };
+    // merged in SQL: `job` may predate what the run stored on the row (head swap candidates)
+    const [row] = await this.d.db
+      .update(mediaJobs)
+      .set({ request: sql`${mediaJobs.request} || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(mediaJobs.id, job.id))
+      .returning();
+    return this.runQoderFallback(row ?? { ...job, request: { ...job.request, ...patch } }, to, outcome.credits);
+  }
+
+  /** Runs the fallback; credits stay what Qoder already charged (the fallbacks are free). */
+  private async runQoderFallback(job: MediaJob, to: QoderFallback, qoderCredits: number | null): Promise<Outcome> {
+    const credits = qoderCredits ?? job.credits ?? null;
+    try {
+      const o = to === 'faceswap' ? await this.runSwapper(job) : to === 'folax_edit' ? await this.runFolaxEdit(job) : await this.runFolax(job);
+      return { ...o, credits: credits ?? o.credits };
+    } catch (err) {
+      const e = toAppError(err);
+      const qoder = (job.request.qoder_error as { code?: string } | undefined)?.code ?? 'error';
+      this.d.log.warn('media.qoder_fallback_failed', { jobId: job.id, to, code: e.code, err: e.message });
+      return { fileIds: [], credits, error: { code: e.code, message: `Qoder failed (${qoder}) and the ${to} fallback failed too: ${e.message}` } };
+    }
   }
 
   /** Folax failed: tell admins about auth problems; `auto` jobs continue on Qoder, explicit `folax` jobs fail. */
@@ -2121,6 +2198,17 @@ const baseName = (filename: string) => filename.replace(/\.[^.]+$/, '').slice(0,
 const extOf = (mime: string) => (mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg');
 
 const usesFolax = (job: MediaJob) => job.kind === 'image' && job.request.provider_used === 'folax';
+
+/** Where an image job went after Qoder failed it (`request.qoder_fallback`). */
+type QoderFallback = 'folax' | 'folax_edit' | 'faceswap';
+const qoderFallbackOf = (job: MediaJob): QoderFallback | null => {
+  const to = job.request.qoder_fallback;
+  return to === 'folax' || to === 'folax_edit' || to === 'faceswap' ? to : null;
+};
+/** Qoder failures our own limits caused: they would fail the same way anywhere, so no fallback. */
+const NO_QODER_FALLBACK = new Set(['budget_exceeded', 'credit_limit_exceeded']);
+/** Same rule as `finish`: an error, or no file at all. */
+const failedOutcome = (o: Outcome) => !!o.error || !o.fileIds.length;
 /** The admin experiment tag of a face swap job (`request.face_swap.tag`), if any. */
 const faceSwapTagOf = (job: MediaJob): string | undefined => {
   const tag = (job.request.face_swap as { tag?: unknown } | undefined)?.tag;

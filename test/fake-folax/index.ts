@@ -153,6 +153,17 @@ export async function startFakeFolax() {
   });
   routes.set('GET /v1/usage', () => [200, { object: 'usage', ...state.usage }]);
 
+  /** POST /v1/images/generate-all: two images per prompt, like the adapter. */
+  routes.set('POST /v1/images/generate-all', () => [
+    200,
+    {
+      images: [
+        { file_name: 'folax-1.jpg', mime_type: 'image/jpeg', data: FAKE_JPEG.toString('base64') },
+        { file_name: 'folax-2.jpg', mime_type: 'image/jpeg', data: FAKE_JPEG.toString('base64') },
+      ],
+    },
+  ]);
+
   /** POST /v1/images/edits (JSON): echoes a small JPEG; replays by Idempotency-Key like the adapter. */
   const editReplies = new Map<string, unknown>();
   routes.set('POST /v1/images/edits', async (req, body) => {
