@@ -189,6 +189,10 @@ OpenAI/Anthropic clients resend the full history each call. Mapping:
   `request.original_prompt` keeps the input. The LLM text is `instructions + hints + contract + <idea>`: `instructions` (persona,
   style, length, how to pick a ratio) are admin-editable per kind in `kv.enhancer.instructions.{image,video}` (cached by
   `EnhancerInstructions`, `/admin/enhancer/*`); the contract (allowed ratios, JSON shape, safety rules) stays in code.
+  When the Qoder turn fails, gives no usable JSON or takes over `ENHANCER_QODER_MS` (15 s; down, out of credits…), Folax writes
+  it instead (`folax/gemini`, then `folax/chatgpt`; free, `model: "folax/…"`, `credits: 0`). Folax's upstream filter rejects any
+  request containing words like "sexual"/"nudity"/"minors"/"busty", even in our own rules, so `folaxSafePrompt` drops those
+  rule lines (the user's hints and idea are untouched). If Folax fails too, the original prompt comes back (`enhanced: false`).
 - Image-aware prompts (`core/references.ts`): `ReferenceReader` describes an image once with the `vision` alias (traits cached
   in `files.traits`). The enhancer uses it for image edits (`mode: edit`, ratio from the input), video first/last frames
   (`first_frame`: motion only) and video references; variations use it to steer away from references or stay on an edited

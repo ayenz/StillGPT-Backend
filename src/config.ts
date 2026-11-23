@@ -145,6 +145,8 @@ const schema = z
     AUTO_TITLE_WAIT_MS: z.coerce.number().int().min(0).default(5000),
     /** How long the Qoder title turn may take before Folax (`folax/gemini`) names the conversation instead. */
     AUTO_TITLE_QODER_MS: z.coerce.number().int().min(1000).default(45_000),
+    /** How long the Qoder prompt-enhancer turn may take before Folax (`folax/gemini`, then `folax/chatgpt`) writes it instead. */
+    ENHANCER_QODER_MS: z.coerce.number().int().min(1000).default(15_000),
     CORS_ORIGINS: z
       .string()
       .default('*')

@@ -45,6 +45,8 @@ export async function startFakeFolax() {
     videoPolls: 2,
     videoFail: null as null | { code: string; message: string },
     chatReply: null as string | null,
+    /** Per-model replies (win over `chatReply`). */
+    chatReplies: {} as Record<string, string>,
     chatPieceDelayMs: 0,
     chatMidError: null as string | null,
     chatNoStop: false,
@@ -213,7 +215,7 @@ export async function startFakeFolax() {
       closed = true;
       chatStreams.open--;
     });
-    const reply = state.chatReply ?? `Halo dari ${b.model}, saya Folax by Infinix.`;
+    const reply = state.chatReplies[String(b.model)] ?? state.chatReply ?? `Halo dari ${b.model}, saya Folax by Infinix.`;
     const pieces = reply.match(/.{1,8}/gs) ?? [];
     res.write(chunk({ role: 'assistant', content: '' }));
     for (const [i, p] of pieces.entries()) {
@@ -296,6 +298,7 @@ export async function startFakeFolax() {
       state.videoPolls = 2;
       state.videoFail = null;
       state.chatReply = null;
+      state.chatReplies = {};
       state.chatPieceDelayMs = 0;
       state.chatMidError = null;
       state.chatNoStop = false;

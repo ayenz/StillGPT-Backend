@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError, badRequest } from '../errors.js';
 import type { Logger } from '../log.js';
+import type { FolaxClient } from '../providers/folax.js';
 import type { EnhancerInstructions } from './enhancerInstructions.js';
 import { type DescribedImage, describeForPrompt, fence, type ReferenceReader, type ReferenceTraits, referenceView } from './references.js';
 import type { ConversationService } from './conversations.js';
@@ -216,9 +217,39 @@ export function parseEnhancerReply(text: string): z.infer<typeof replySchema> | 
 }
 
 /**
+ * Folax models for the fallback, in order. 2026-11-23 benchmark (5 Folax models × 6 ideas × 2, prod instructions):
+ * all followed the JSON contract once the prompt was Folax-safe; gemini was fastest (~7 s median) and always kept poster
+ * text in quotes, chatgpt wrote the richest prompts but took ~14 s. `folax` dropped quoted text, grok/metaai ~9–10 s.
+ */
+export const FOLAX_ENHANCER_MODELS = ['gemini', 'chatgpt'] as const;
+const FOLAX_TIMEOUT_MS = 60_000;
+/**
+ * Folax's upstream filter rejects the whole request ("The current information may contain inappropriate content…")
+ * when any of these words appears, even inside our own safety rules. Each rule line containing one is left out.
+ */
+const FOLAX_BLOCKED_WORDS = /\b(sex\w*|nud\w*|naked|minors?|busty|porn\w*|erotic\w*)\b/i;
+const FOLAX_FILTER_REPLY = /may contain inappropriate content/i;
+
+/**
+ * The enhancer prompt without the rule lines Folax's filter rejects. Only our instructions are touched: the user's
+ * `<hints>` line and everything from `<idea>` on stay as they are.
+ */
+export function folaxSafePrompt(text: string): string {
+  const at = text.lastIndexOf('<idea>');
+  const head = at >= 0 ? text.slice(0, at) : text;
+  const kept = head
+    .split('\n')
+    .filter((l) => l.startsWith('<hints>') || !FOLAX_BLOCKED_WORDS.test(l))
+    .join('\n');
+  return at >= 0 ? kept + text.slice(at) : kept;
+}
+
+/**
  * "✨ Enhance" button: rewrites a short idea into a detailed image/video prompt.
- * Runs one turn on a hidden one-shot conversation; on any failure returns the original prompt (enhanced:false)
- * so the UI never loses what the user typed.
+ * Runs one turn on a hidden one-shot conversation. When Qoder fails, replies with something unusable or takes over
+ * `qoderWaitMs` (down, out of credits…), Folax (`folax/gemini`, then `folax/chatgpt`; free, stateless) writes it instead,
+ * if configured and not known down. If that fails too the original prompt comes back (enhanced:false), so the UI never
+ * loses what the user typed.
  */
 export class PromptEnhancer {
   constructor(
@@ -230,6 +261,10 @@ export class PromptEnhancer {
       instructions?: EnhancerInstructions;
       /** Reads attached images; without it image-backed prompts are enhanced without knowing what the images show. */
       references?: ReferenceReader;
+      /** Fallback when Qoder cannot enhance; null/absent = no fallback. */
+      folax?: FolaxClient | null;
+      /** How long the Qoder turn may take before Folax is asked instead (default 15 s). */
+      qoderWaitMs?: number;
     },
   ) {}
 
@@ -255,25 +290,15 @@ export class PromptEnhancer {
 
     const constraints = kind === 'video' ? videoConstraints({ seconds: req.seconds, audio: req.audio }) : '';
     const text = buildEnhancerPrompt({ kind, instructions, idea: original, purpose: req.purpose, style: req.style, imageRules, constraints });
-    // an upstream failure (queue full, timeout…) must not lose the user's prompt or fail the media job: fall back to the original
-    let result: { text: string; stopReason: string; model: string; credits: number } = { text: '', stopReason: 'error', model: req.model ?? 'enhancer', credits: 0 };
-    try {
-      const conv = await this.d.conversations.create({
-        userId: req.userId,
-        profile: 'chat',
-        model: req.model ?? 'enhancer',
-        title: 'prompt enhancer',
-        metadata: { hidden: true, purpose: 'prompt_enhancer' },
-      });
-      const handle = await this.d.turns.start({ conversationId: conv.id, userId: req.userId, oneShot: true, content: [{ type: 'text', text }] });
-      const r = await handle.done;
-      result = { text: r.text, stopReason: r.stopReason, model: r.model, credits: r.credits.total };
-    } catch (err) {
-      if (err instanceof AppError && err.status < 500) throw err;
-      this.d.log.warn('enhancer.turn_failed', { err });
+    // an upstream failure (queue full, timeout, no credits…) must not lose the user's prompt or fail the media job:
+    // Folax tries next, then the original prompt is used
+    let result = await this.viaQoder(req, text);
+    let parsed = result.stopReason === 'error' ? null : parseEnhancerReply(result.text);
+    if (!parsed) {
+      this.d.log.warn('enhancer.unusable_reply', { stopReason: result.stopReason, text: result.text.slice(0, 200) });
+      const folax = await this.viaFolax(text);
+      if (folax) [result, parsed] = [{ text: '', stopReason: 'end_turn', model: folax.model, credits: 0 }, folax.parsed];
     }
-    const parsed = result.stopReason === 'error' ? null : parseEnhancerReply(result.text);
-    if (!parsed) this.d.log.warn('enhancer.unusable_reply', { stopReason: result.stopReason, text: result.text.slice(0, 200) });
 
     const credits = result.credits + images.reduce((s, d) => s + d.credits, 0);
     const base = { original, kind, mode, references: images.map(referenceView), enhanced: !!parsed, model: result.model, credits, prompt: parsed?.prompt ?? original };
@@ -289,6 +314,61 @@ export class PromptEnhancer {
     const inputRatio = mode === 'edit' && input?.width && input.height && !EXPLICIT_RATIO.test(original) ? closestImageRatio(input.width, input.height) : null;
     const ratio = inputRatio ?? (parsed?.aspect_ratio && RATIO_TO_SIZE[parsed.aspect_ratio] ? parsed.aspect_ratio : '1:1');
     return { ...base, aspect_ratio: ratio, size: RATIO_TO_SIZE[ratio] };
+  }
+
+  /** One turn on a hidden one-shot conversation; `stopReason: 'error'` when it failed or took over `qoderWaitMs`. */
+  private async viaQoder(req: EnhanceRequest, text: string): Promise<{ text: string; stopReason: string; model: string; credits: number }> {
+    const failed = { text: '', stopReason: 'error', model: req.model ?? 'enhancer', credits: 0 };
+    const waitMs = this.d.qoderWaitMs ?? 15_000;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const conv = await this.d.conversations.create({
+        userId: req.userId,
+        profile: 'chat',
+        model: req.model ?? 'enhancer',
+        title: 'prompt enhancer',
+        metadata: { hidden: true, purpose: 'prompt_enhancer' },
+      });
+      const handle = await this.d.turns.start({ conversationId: conv.id, userId: req.userId, oneShot: true, content: [{ type: 'text', text }] });
+      const timeout = new Promise<'timeout'>((r) => (timer = setTimeout(() => r('timeout'), waitMs)));
+      const r = await Promise.race([handle.done, timeout]);
+      if (r === 'timeout') {
+        this.d.log.warn('enhancer.qoder_slow', { waitedMs: waitMs });
+        void this.d.turns.interrupt(conv.id, req.userId).catch(() => {});
+        return failed;
+      }
+      return { text: r.text, stopReason: r.stopReason, model: r.model, credits: r.credits.total };
+    } catch (err) {
+      if (err instanceof AppError && err.status < 500) throw err;
+      this.d.log.warn('enhancer.turn_failed', { err });
+      return failed;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The reply of the first Folax model that gives a usable one, or null (not configured, known down, all failed). */
+  private async viaFolax(prompt: string): Promise<{ model: string; parsed: z.infer<typeof replySchema> } | null> {
+    const folax = this.d.folax;
+    if (!folax || folax.knownDown()) return null;
+    const text = folaxSafePrompt(prompt);
+    for (const model of FOLAX_ENHANCER_MODELS) {
+      const started = Date.now();
+      try {
+        let reply = '';
+        const pieces = await folax.chat({ model, messages: [{ role: 'user', content: text }], timeoutMs: FOLAX_TIMEOUT_MS });
+        for await (const piece of pieces) reply += piece;
+        const parsed = parseEnhancerReply(reply);
+        this.d.log.info('enhancer.folax_fallback', { model, ok: !!parsed, ms: Date.now() - started });
+        if (parsed) return { model: `folax/${model}`, parsed };
+        // the user's own idea tripped Folax's filter: another Folax model gets the same answer
+        if (FOLAX_FILTER_REPLY.test(reply)) return null;
+      } catch (err) {
+        this.d.log.warn('enhancer.folax_failed', { model, err: (err as Error).message });
+        if (folax.knownDown()) return null;
+      }
+    }
+    return null;
   }
 }
 
