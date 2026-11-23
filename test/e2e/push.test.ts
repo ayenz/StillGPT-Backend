@@ -154,6 +154,19 @@ describe('notifications when a job finishes', () => {
     expect(sent).toHaveLength(0);
   });
 
+  it('image jobs created with gallery: false do not notify; normal image jobs do', async () => {
+    await subscribe();
+    const hidden = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'bulk', gallery: false } }));
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.status).toBe('completed');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sent).toHaveLength(0);
+
+    const shown = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'normal' } }));
+    expect(shown.body.status).toBe('completed');
+    await waitFor(() => sent.length === 1, 10_000);
+  });
+
   it('a subscription the push service reports gone is deleted', async () => {
     await subscribe();
     failWith = 410;

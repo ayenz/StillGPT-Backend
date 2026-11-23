@@ -279,6 +279,9 @@ export interface VideoRequest {
  */
 const notRunStep = sql`(${mediaJobs.request}->>'run_id') is null`;
 const isRunStep = (row: MediaJob) => typeof row.request?.run_id === 'string';
+/** Jobs created with `gallery: false` (bulk generation scripts) carry `request.hidden`: out of the gallery, no device notifications. */
+const notHidden = sql`(${mediaJobs.request}->>'hidden') is null`;
+const isHidden = (row: MediaJob) => row.request?.hidden === true;
 
 export const VIDEO_PROVIDERS = ['qoder', 'folax'] as const;
 export type VideoProvider = (typeof VIDEO_PROVIDERS)[number];
@@ -867,7 +870,7 @@ export class MediaService {
   }
 
   async listJobs(userId: string, opts: { kind?: 'image' | 'video'; batchId?: string; limit?: number } = {}): Promise<MediaJobView[]> {
-    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep];
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep, notHidden];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
     if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     const rows = await this.d.db
@@ -900,7 +903,7 @@ export class MediaService {
     opts: { kind?: 'image' | 'video'; batchId?: string; statuses?: MediaJob['status'][]; limit?: number; cursor?: string } = {},
   ): Promise<{ items: MediaJobView[]; nextCursor: string | null }> {
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
-    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep];
+    const conds = [eq(mediaJobs.userId, userId), isNull(mediaJobs.deletedAt), notRunStep, notHidden];
     if (opts.kind) conds.push(eq(mediaJobs.kind, opts.kind));
     if (opts.batchId) conds.push(eq(mediaJobs.batchId, opts.batchId));
     if (opts.statuses?.length) conds.push(inArray(mediaJobs.status, opts.statuses));
@@ -1866,8 +1869,8 @@ export class MediaService {
     const data = { job: mediaJobJson(view) };
     await this.d.webhooks.emit(row.userId, event, data).catch((err) => this.d.log.error('media.webhook_failed', { jobId, err }));
     if (row.callbackUrl) await this.d.webhooks.deliverTo(row.callbackUrl, event, data).catch((err) => this.d.log.error('media.callback_failed', { jobId, err }));
-    // automation jobs (n8n with a callback_url) and tagged admin face swap experiments do not notify the user's devices
-    else if ((this.d.push?.enabled || this.d.fcm?.enabled) && !faceSwapTagOf(row) && !isRunStep(row)) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
+    // automation jobs (n8n with a callback_url), hidden bulk jobs and tagged admin face swap experiments do not notify the user's devices
+    else if ((this.d.push?.enabled || this.d.fcm?.enabled) && !faceSwapTagOf(row) && !isRunStep(row) && !isHidden(row)) void this.notifyFinished(row, view).catch((err) => this.d.log.error('media.push_failed', { jobId, err }));
   }
 
   /** Push to the owner's browsers and Android app; for an image batch only once, when its last job finishes. */

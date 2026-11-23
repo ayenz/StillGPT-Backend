@@ -731,6 +731,7 @@ For several different images at once, send `variations` on `POST /images` instea
 | `variations` | `true` \| `{vary?, keep?}` | – | with `n` > 1: image 0 uses the prompt as written, images 1..n-1 get their own variation (see below). With `n` 1 or no `n`: just the prompt as written |
 | `async` | bool | `false` | `true` returns `202` straight away with a queued job (or batch) |
 | `callback_url` | URL | – | POSTed when the job finishes (§9) |
+| `gallery` | bool | `true` | `false` keeps the job (every job of a batch) out of `GET /jobs` and off the user's devices (no push/FCM). For bulk generation scripts; the job is still readable with `GET /jobs/:id` and `GET /images/batches/:id`, and webhooks still fire. Stored as `request.hidden: true` |
 
 - **Synchronous (default):** the request waits for the image (about 30 s on Qoder, about 10 s on Folax) and returns `200`
   with the finished job. Check `status`: a failed generation also returns `200`, with `status: "failed"`.

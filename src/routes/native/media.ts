@@ -29,6 +29,8 @@ const imageBody = z.object({
   user_prompt: z.unknown().optional(),
   async: z.boolean().optional(),
   callback_url: z.unknown().optional(),
+  /** false: keep the job(s) out of the gallery and off the user's devices (bulk generation); still readable by id. */
+  gallery: z.boolean().optional(),
 });
 
 const upscaleBody = z.object({
@@ -128,6 +130,7 @@ export function mediaJobRoutes(ctx: AppContext) {
       variations: b.variations,
       userPrompt: b.user_prompt,
       callbackUrl: b.callback_url,
+      ...(b.gallery === false ? { extra: { hidden: true } } : {}),
     } as ImageRequest;
     if (b.n !== undefined) {
       const batch = await ctx.media.createImageBatch(req, typeof b.n === 'number' ? b.n : Number.NaN, { wait: !b.async });

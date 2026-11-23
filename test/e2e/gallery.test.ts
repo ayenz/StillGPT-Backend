@@ -29,6 +29,30 @@ async function runHousekeeping(dryRun = false) {
   return (await json(await admin('/media-housekeeping/run', { method: 'POST', json: { dry_run: dryRun } }))).body.report;
 }
 
+describe('hidden jobs (gallery: false)', () => {
+  it('stay out of the gallery list but are readable by id, also in a batch', async () => {
+    const one = (await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'tersembunyi', gallery: false } }))).body;
+    expect(one.status).toBe('completed');
+    expect(one.request.hidden).toBe(true);
+    const batch = (await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'massal', n: 2, gallery: false } }))).body;
+    expect(batch.status).toBe('completed');
+    const shown = await image('kelihatan');
+
+    const listed = (await json(await h.api('/api/v1/jobs?kind=image&limit=100'))).body.data.map((j: any) => j.id);
+    expect(listed).toContain(shown.id);
+    expect(listed).not.toContain(one.id);
+    for (const j of batch.jobs) expect(listed).not.toContain(j.id);
+
+    expect((await json(await h.api(`/api/v1/jobs/${one.id}`))).body).toMatchObject({ id: one.id, status: 'completed' });
+    expect((await json(await h.api(`/api/v1/images/batches/${batch.id}`))).body.jobs).toHaveLength(2);
+    expect((await fetch(one.outputs[0].url)).status).toBe(200);
+  });
+
+  it('gallery must be a boolean', async () => {
+    expect((await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'x', gallery: 'no' } })).status).toBe(400);
+  });
+});
+
 describe('gallery trash (user)', () => {
   it('delete hides the job and its media at once; restore brings both back', async () => {
     const job = await image('dihapus');
