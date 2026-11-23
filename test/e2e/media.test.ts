@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { conversations, mediaJobs } from '../../src/db/schema.js';
+import { conversations, files, mediaJobs } from '../../src/db/schema.js';
 import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 import { readSse } from './native-sse.js';
@@ -204,5 +204,20 @@ describe('restart recovery', () => {
 
     const usage = await json(await h.api('/api/v1/usage'));
     expect(usage.body.by_kind.video.credits).toBeGreaterThan(0);
+  });
+});
+
+describe('editing a generated image', () => {
+  it('uploads our own copy when Qoder refuses to mount its own output (agent_output)', async () => {
+    const first = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'a red lantern', provider: 'qoder' } }));
+    expect(first.body.status).toBe('completed');
+    const generated = first.body.outputs[0];
+    const [before] = await h.ctx.database.db.select().from(files).where(eq(files.id, generated.id));
+    expect(before!.qoderFileId).toBeTruthy(); // the id of Qoder's own output
+    const edit = await json(await h.api('/api/v1/images', { method: 'POST', json: { prompt: 'make the lantern blue', provider: 'qoder', input_file_ids: [generated.id] } }));
+    expect(edit.body.status, JSON.stringify(edit.body.error)).toBe('completed');
+    const [after] = await h.ctx.database.db.select().from(files).where(eq(files.id, generated.id));
+    // re-uploaded once: the cached id now points at our upload, which mounts
+    expect(after!.qoderFileId).not.toBe(before!.qoderFileId);
   });
 });

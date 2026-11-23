@@ -514,7 +514,9 @@ export class TurnRunner {
     try {
       await this.d.qoder.addFileResource(sessionId, m.qoderFileId, m.mountPath);
     } catch (err) {
-      if (!isUpstreamNotFound(err)) return ignoreDuplicateMount(err);
+      // 404: our cached copy is gone; 400 "platform-generated … re-upload": an agent's output cannot be mounted (Qoder
+      // since 2026-11), e.g. a generated image used as the input of an edit. Both: upload our own copy and mount that.
+      if (!isUpstreamNotFound(err) && !isAgentOutputMount(err)) return ignoreDuplicateMount(err);
       this.d.log.warn('turn.attachment_reupload', { fileId: m.fileId, staleQoderFileId: m.qoderFileId });
       m.qoderFileId = await reupload(m.fileId, userId, this.d.store, this.d.qoder);
       await this.d.qoder.addFileResource(sessionId, m.qoderFileId, m.mountPath).catch(ignoreDuplicateMount);
@@ -816,6 +818,7 @@ function normalizeStop(reason: string): StopReason {
 }
 
 const isUpstreamNotFound = (err: unknown) => err instanceof AppError && err.code === 'upstream_not_found';
+const isAgentOutputMount = (err: unknown) => err instanceof AppError && err.status === 400 && /cannot be mounted|re-upload/i.test(err.message);
 
 const ignoreDuplicateMount = (err: unknown) => {
   if (err instanceof AppError && err.status === 409) return;

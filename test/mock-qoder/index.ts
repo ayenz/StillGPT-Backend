@@ -259,7 +259,9 @@ export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQ
     if (typeof r.mount_path !== 'string' || !r.mount_path.startsWith('/')) {
       bad("Field 'mount_path' must be an absolute path.", 'mount_path');
     }
-    core.getFile(r.file_id);
+    const file = core.getFile(r.file_id);
+    // like the real API since 2026-11: files an agent produced cannot be mounted, only uploads
+    if (file.scope) bad(`Platform-generated file '${r.file_id}' (purpose=agent_output) cannot be mounted as a session resource; download and re-upload it first.`, 'file_id');
     const res: ResourceObject = {
       id: core.nextId('sesr'),
       type: 'file',
