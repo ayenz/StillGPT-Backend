@@ -12,6 +12,15 @@ export interface FilmClip {
   captions: string[];
   /** Into this clip from the previous one (ignored for the first). Default `cut`. */
   transition?: Transition;
+  /** Voice-over that starts with this clip. */
+  narration?: string;
+}
+
+/** A music track looped under clips `from`..`to` (0-based, inclusive). */
+export interface MusicTrack {
+  path: string;
+  from: number;
+  to: number;
 }
 
 export interface AssembleInput {
@@ -23,6 +32,8 @@ export interface AssembleInput {
   height: number;
   /** Add the dialogue as a subtitle track (and return the SRT). */
   captions: boolean;
+  /** Music bed, ducked under the narration. */
+  music?: MusicTrack[];
 }
 
 export interface AssembleOutput {
@@ -37,6 +48,103 @@ export interface FilmAssembler {
   assemble(input: AssembleInput, signal?: AbortSignal): Promise<AssembleOutput>;
   /** JPEG stills of a clip at the given fractions of its length (0–1), for quality checks. */
   stills(path: string, at: number[], signal?: AbortSignal): Promise<Buffer[]>;
+  /** The audio of a file as a small mono MP3 (speech checks of music clips). */
+  audio(path: string, signal?: AbortSignal): Promise<Buffer>;
+}
+
+/** Mix levels: the music bed sits well under the clips' own sound; the narration sits on top. */
+const MUSIC_GAIN = 0.25;
+const CLIP_GAIN = 0.85;
+const NARRATION_GAIN = 1.6;
+/** Music fades and the overlap between consecutive tracks. */
+const MUSIC_FADE_S = 1.5;
+/** Narration starts this long after its clip. */
+const NARRATION_DELAY_S = 0.3;
+
+export interface MixPlan {
+  /** Music windows on the film timeline. */
+  music: { path: string; start: number; end: number }[];
+  narration: { path: string; start: number }[];
+}
+
+/**
+ * Where music and narration go, from the joined parts' timeline. `offset` = number of parts before the first clip (the
+ * title card). The first music window starts at 0 (under the title card); windows overlap by MUSIC_FADE_S to crossfade.
+ */
+export function mixPlan(input: { clips: FilmClip[]; music?: MusicTrack[] }, starts: number[], durations: number[], offset: number): MixPlan {
+  const total = (starts.at(-1) ?? 0) + (durations.at(-1) ?? 0);
+  const tracks = [...(input.music ?? [])].sort((a, b) => a.from - b.from);
+  const music = tracks.map((t, k) => {
+    const from = t.from + offset;
+    const to = Math.min(t.to + offset, starts.length - 1);
+    const start = k === 0 ? 0 : starts[from]!;
+    const end = k === tracks.length - 1 ? total : Math.min(total, starts[to]! + durations[to]! + MUSIC_FADE_S);
+    return { path: t.path, start, end };
+  });
+  const narration = input.clips.flatMap((c, i) => (c.narration ? [{ path: c.narration, start: starts[i + offset]! + NARRATION_DELAY_S }] : []));
+  return { music, narration };
+}
+
+/** ffmpeg arguments that lay music and narration over the joined film (video copied) and normalise loudness. */
+export function mixArgs(video: string, total: number, plan: MixPlan, out: string): string[] {
+  const inputs: string[] = ['-i', video];
+  const filters: string[] = [];
+  let n = 1;
+  const music: string[] = [];
+  for (const [k, m] of plan.music.entries()) {
+    const dur = Math.max(0.5, m.end - m.start);
+    const fade = Math.min(MUSIC_FADE_S, dur / 3);
+    inputs.push('-stream_loop', '-1', '-i', m.path);
+    filters.push(
+      `[${n}:a]${AUDIO},atrim=0:${f3(dur)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${f3(fade)},afade=t=out:st=${f3(dur - fade)}:d=${f3(fade)},volume=${MUSIC_GAIN},adelay=${Math.round(m.start * 1000)}:all=1[m${k}]`,
+    );
+    music.push(`[m${k}]`);
+    n++;
+  }
+  const voices: string[] = [];
+  for (const [k, v] of plan.narration.entries()) {
+    inputs.push('-i', v.path);
+    filters.push(`[${n}:a]${AUDIO},volume=${NARRATION_GAIN},adelay=${Math.round(v.start * 1000)}:all=1[n${k}]`);
+    voices.push(`[n${k}]`);
+    n++;
+  }
+  // the bed: the clips' own sound plus the music
+  filters.push(`[0:a]${AUDIO},volume=${CLIP_GAIN}[clip]`);
+  const mixOf = (labels: string[], name: string) =>
+    labels.length === 1 ? `${labels[0]}anull[${name}]` : `${labels.join('')}amix=inputs=${labels.length}:normalize=0:duration=longest[${name}]`;
+  if (music.length) {
+    filters.push(mixOf(music, 'music'));
+    filters.push(`[clip][music]amix=inputs=2:normalize=0:duration=first[bed]`);
+  } else filters.push('[clip]anull[bed]');
+  if (voices.length) {
+    // the narration ducks the bed (sidechain) and sits on top
+    filters.push(`${mixOf(voices, 'voice0')}`);
+    filters.push(`[voice0]apad=whole_dur=${f3(total)},asplit=2[voice][key]`);
+    filters.push('[bed][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=500[ducked]');
+    filters.push('[ducked][voice]amix=inputs=2:normalize=0:duration=first[mix]');
+  } else filters.push('[bed]anull[mix]');
+  filters.push(`[mix]loudnorm=I=-16:TP=-1.5:LRA=11,${AUDIO}[aout]`);
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    ...inputs,
+    '-filter_complex',
+    filters.join(';'),
+    '-map',
+    '0:v',
+    '-map',
+    '[aout]',
+    '-c:v',
+    'copy',
+    ...AUDIO_ENCODE,
+    '-t',
+    f3(total),
+    '-movflags',
+    '+faststart',
+    out,
+  ];
 }
 
 /** Output size of a film. */
@@ -253,18 +361,38 @@ export class FfmpegAssembler implements FilmAssembler {
         await this.run(joinArgs(chunks, joined), signal);
       }
 
+      // music and narration go over the finished picture in one more pass (video copied)
+      const offset = input.titleCard ? 1 : 0;
+      const mix = mixPlan(input, plan.starts, parts.map((p) => p.duration), offset);
+      let picture = joined;
+      if (mix.music.length || mix.narration.length) {
+        picture = join(dir, 'mixed.mp4');
+        await this.run(mixArgs(joined, plan.total, mix, picture), signal);
+      }
+
       // a caption ends where the next part starts (a dissolve overlaps them)
       const srt = input.captions
         ? buildSrt(parts.map((p, i) => ({ start: plan.starts[i]!, seconds: Math.min(p.duration, (plan.starts[i + 1] ?? Infinity) - plan.starts[i]!), lines: captions[i]! })))
         : null;
-      let film = joined;
+      let film = picture;
       if (srt) {
         const subs = join(dir, 'film.srt');
         await writeFile(subs, srt);
         film = join(dir, 'film.mp4');
-        await this.run(['-y', '-hide_banner', '-loglevel', 'error', '-i', joined, '-i', subs, '-map', '0:v', '-map', '0:a', '-map', '1:s', '-c', 'copy', '-c:s', 'mov_text', '-movflags', '+faststart', film], signal);
+        await this.run(['-y', '-hide_banner', '-loglevel', 'error', '-i', picture, '-i', subs, '-map', '0:v', '-map', '0:a', '-map', '1:s', '-c', 'copy', '-c:s', 'mov_text', '-movflags', '+faststart', film], signal);
       }
       return { mp4: await readFile(film), srt, durationS: Math.round(plan.total * 100) / 100 };
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async audio(path: string, signal?: AbortSignal): Promise<Buffer> {
+    const dir = await mkdtemp(join(tmpdir(), 'stillgpt-audio-'));
+    try {
+      const file = join(dir, 'audio.mp3');
+      await this.run(['-y', '-hide_banner', '-loglevel', 'error', '-i', path, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', file], signal);
+      return await readFile(file);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }

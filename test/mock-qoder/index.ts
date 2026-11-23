@@ -77,6 +77,8 @@ export interface MockQoder {
   setToolError(fn: ((tool: 'ImageGen' | 'VideoGen', text: string) => string | undefined) | undefined): void;
   /** Change the accepted bearer token (simulates rotating the PAT upstream). */
   setToken(t: string): void;
+  /** Deliver the returned files (DeliverArtifacts) on turns whose text matches (undefined restores none). */
+  setFiles(fn: ((text: string) => { name: string; bytes: Buffer; mimeType: string }[] | undefined) | undefined): void;
 }
 
 const BASE = '/api/v1/cloud';
@@ -647,6 +649,9 @@ export async function startMockQoder(opts: MockQoderOptions = {}): Promise<MockQ
     },
     setToken(t) {
       token = t;
+    },
+    setFiles(fn) {
+      scriptOpts.files = fn;
     },
     retireModel(id) {
       const rec = state.models.get(id);

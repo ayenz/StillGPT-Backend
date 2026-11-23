@@ -1732,6 +1732,14 @@ answered, findings, sources, rounds, depth}}`. Citations in the text are `[n]` m
   outline (characters, locations, 2–10 acts with their length; `state.outline`), then every act in parallel, then a
   continuity editor that fixes contradictions across acts (`state.continuity: [{n, reason}]`); scenes carry `act`.
   Qoder animates one scene at a time (~4 min each), so a 15-minute film takes many hours.
+- `music` (default true): the writer describes the score (`score`; per act for long films); VideoGen makes 30 s
+  instrumental clips (480p, only their audio is used), Whisper in the Qoder sandbox checks each for voices and a clip
+  with words is re-made once; the music loops under its scenes (one cue, two from 90 s, or one per act), crossfades,
+  and is ducked ~10 dB under the narration. Scenes are then asked for ambience and dialogue only, no music.
+- `narration` (default false) + `narrator` (`female` | `male`): the writer adds voice-over lines to about a third of
+  the scenes (never with dialogue); edge-tts speaks them in the Qoder sandbox (voice by the script's `language`, e.g.
+  `id-ID-GadisNeural` / `id-ID-ArdiNeural`) and they start 0.3 s into their scene; they are captioned too.
+  `state.audio` reports `music_<n>: {file_id, voices_heard, remade}` and `narration: {voice, lines, spoken}`.
 - `clip_checks` (default true): every animated scene is checked by a vision model on 3 stills (start, middle, end)
   against its keyframe and cast sheets; a scene scoring below 3/5 is re-taken once with the problems as notes
   (`state.clip_checks: [{n, score, problems, retake}]`). Not for Folax scenes.

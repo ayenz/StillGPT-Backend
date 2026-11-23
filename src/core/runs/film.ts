@@ -56,6 +56,11 @@ export const filmInput = z.object({
   title_card: z.boolean().default(true),
   /** Check every animated scene with a vision model (stills from start, middle and end) and re-roll bad ones once. */
   clip_checks: z.boolean().default(true),
+  /** A music bed (VideoGen instrumental clips, checked for voices with Whisper), ducked under the narration. */
+  music: z.boolean().default(true),
+  /** Voice-over lines written into the script and spoken with edge-tts in the Qoder sandbox. */
+  narration: z.boolean().default(false),
+  narrator: z.enum(['female', 'male']).default('female'),
   writer: z.string().min(1).optional(),
 });
 export type FilmInput = z.infer<typeof filmInput>;
@@ -78,6 +83,8 @@ const scene = z.object({
   characters: z.array(z.string()).max(6).default([]),
   dialogue: z.array(z.object({ character: z.string().max(80), line: z.string().trim().min(1).max(300) })).max(6).default([]),
   sfx: z.string().max(300).default(''),
+  /** Voice-over spoken over this scene (when narration is on). */
+  narration: z.string().trim().max(400).optional().nullable(),
   mood: z.string().max(200).default(''),
   /** The next scene continues this shot (the clip ends on the next keyframe). */
   continuous: z.boolean().default(false),
@@ -102,6 +109,12 @@ export const scriptSchema = z.object({
   style_bible: styleBible,
   characters: z.array(character).max(8).default([]),
   locations: z.array(location).max(20).default([]),
+  /** The film's music (instruments, mood, tempo). */
+  score: z.string().max(600).default(''),
+  /** Language code of the dialogue and narration, e.g. "id". */
+  language: z.string().max(20).default(''),
+  /** Long films: the music cue of every act. */
+  act_music: z.array(z.string().max(600)).max(10).default([]),
   scenes: z.array(scene).min(1).max(MAX_SCENES_LONG),
 });
 export type Script = z.infer<typeof scriptSchema>;
@@ -115,7 +128,7 @@ const outlineSchema = z.object({
   characters: z.array(character).max(8).default([]),
   locations: z.array(location).max(20).default([]),
   acts: z
-    .array(z.object({ title: z.string().trim().min(1).max(120), summary: z.string().trim().min(1).max(1500), seconds: z.coerce.number().min(10).max(900) }))
+    .array(z.object({ title: z.string().trim().min(1).max(120), summary: z.string().trim().min(1).max(1500), seconds: z.coerce.number().min(10).max(900), music: z.string().max(600).optional() }))
     .min(2)
     .max(10),
 });
@@ -295,6 +308,10 @@ export function filmKind(d: FilmDeps): RunKind<FilmInput> {
       const clips: string[] = new Array(script.scenes.length);
       const animated = { n: 0 };
       const checks: { n: number; score: number; problems: string[]; retake: boolean }[] = [];
+      // the music and narration are made while the scenes animate (music clips queue with the scenes on VideoGen)
+      const audioWork = input.music || input.narration ? rc.optional(makeAudio(rc, d, input, script, tag)) : Promise.resolve(undefined);
+      // if the scenes fail first, this is never awaited: keep its rejection (a cancel) from being unhandled
+      audioWork.catch(() => {});
       await Promise.all(
         script.scenes.map(async (s, i) => {
           const last = s.continuous && i + 1 < frames.length && input.video_provider === 'qoder' ? frames[i + 1] : undefined;
@@ -351,6 +368,8 @@ export function filmKind(d: FilmDeps): RunKind<FilmInput> {
         }),
       );
 
+      const audio = await audioWork;
+
       // 5. title card + assembly
       let titleFile: string | null = null;
       if (input.title_card) {
@@ -371,10 +390,12 @@ export function filmKind(d: FilmDeps): RunKind<FilmInput> {
             clips: await Promise.all(
               clips.map(async (id, i) => ({
                 path: await pathOf(id),
-                captions: script.scenes[i]!.dialogue.map((l) => `${l.character}: ${l.line}`),
+                captions: [...script.scenes[i]!.dialogue.map((l) => `${l.character}: ${l.line}`), ...(script.scenes[i]!.narration ? [script.scenes[i]!.narration!] : [])],
                 transition: script.scenes[i]!.transition,
+                narration: audio?.narration.get(i) ? await pathOf(audio.narration.get(i)!) : undefined,
               })),
             ),
+            music: audio ? await Promise.all(audio.music.map(async (m) => ({ path: await pathOf(m.fileId), from: m.from, to: m.to }))) : [],
             titleCard: titleFile ? await pathOf(titleFile) : undefined,
             titleSeconds: 3,
             width,
@@ -479,6 +500,155 @@ async function checkClip(rc: RunContext<FilmInput>, d: FilmDeps, script: Script,
   });
 }
 
+// ── music and narration ─────────────────────────────────────────────────────
+
+/** Music cues and the scenes each covers: one per act for long films; short films get one, or two from 90 s. */
+export function musicCues(script: Script, durationS: number): { cue: string; from: number; to: number }[] {
+  const n = script.scenes.length;
+  const acts = [...new Set(script.scenes.map((s) => s.act).filter((a): a is number => !!a))].sort((a, b) => a - b);
+  if (acts.length > 1)
+    return acts.map((a) => {
+      const idx = script.scenes.flatMap((s, i) => (s.act === a ? [i] : []));
+      return { cue: script.act_music[a - 1] || script.score, from: idx[0]!, to: idx.at(-1)! };
+    });
+  if (durationS >= 90 && n >= 4) {
+    const half = Math.floor(n / 2);
+    return [
+      { cue: script.score, from: 0, to: half - 1 },
+      { cue: `${script.score} A later section of the same theme, building towards the ending.`, from: half, to: n - 1 },
+    ];
+  }
+  return [{ cue: script.score, from: 0, to: n - 1 }];
+}
+
+/** edge-tts voices per language code, female / male. */
+const VOICES: Record<string, [string, string]> = {
+  id: ['id-ID-GadisNeural', 'id-ID-ArdiNeural'],
+  ms: ['ms-MY-YasminNeural', 'ms-MY-OsmanNeural'],
+  jv: ['jv-ID-SitiNeural', 'jv-ID-DimasNeural'],
+  su: ['su-ID-TutiNeural', 'su-ID-JajangNeural'],
+  en: ['en-US-AriaNeural', 'en-US-GuyNeural'],
+  zh: ['zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural'],
+  ja: ['ja-JP-NanamiNeural', 'ja-JP-KeitaNeural'],
+  ko: ['ko-KR-SunHiNeural', 'ko-KR-InJoonNeural'],
+  th: ['th-TH-PremwadeeNeural', 'th-TH-NiwatNeural'],
+  vi: ['vi-VN-HoaiMyNeural', 'vi-VN-NamMinhNeural'],
+  fr: ['fr-FR-DeniseNeural', 'fr-FR-HenriNeural'],
+  es: ['es-ES-ElviraNeural', 'es-ES-AlvaroNeural'],
+  de: ['de-DE-KatjaNeural', 'de-DE-ConradNeural'],
+};
+export function narratorVoice(language: string, narrator: 'female' | 'male'): string {
+  const code = language.trim().toLowerCase().slice(0, 2);
+  const pair = VOICES[code] ?? (/indo/i.test(language) ? VOICES.id! : VOICES.en!);
+  return pair[narrator === 'male' ? 1 : 0];
+}
+
+const speechCheck = z.object({ speech: z.boolean(), words: z.string().max(2000).default('') });
+const NARRATION_BATCH = 20;
+
+/**
+ * The score (VideoGen instrumental clips: only their audio is used; a clip in which Whisper hears words is re-made
+ * once) and the narration (edge-tts in the Qoder sandbox, 20 lines per turn). Returns file ids by scene.
+ */
+async function makeAudio(rc: RunContext<FilmInput>, d: FilmDeps, input: FilmInput, script: Script, tag: Record<string, string>) {
+  const music: { fileId: string; from: number; to: number }[] = [];
+  const narration = new Map<number, string>();
+  const report: Record<string, unknown> = {};
+  await Promise.all([
+    input.music && script.score
+      ? Promise.all(
+          musicCues(script, input.duration_s).map(async (c, k) => {
+            const make = (key: string, strict: boolean) =>
+              rc.mediaJob(key, 'video', () =>
+                d.media.createVideoJob({
+                  userId: rc.userId,
+                  prompt: musicPrompt(script, c.cue, strict),
+                  seconds: 30,
+                  resolution: '480P',
+                  ratio: '16:9',
+                  audio: true,
+                  provider: 'qoder',
+                  extra: { ...tag, film_role: 'music', cue: k + 1 },
+                }),
+              );
+            let out = await rc.optional(make(`music:${k + 1}`, false));
+            if (!out) return;
+            const heard = await rc.optional(hearWords(rc, d, `music:${k + 1}`, out.files[0]!.id));
+            if (heard?.speech) {
+              const retry = await rc.optional(make(`music:${k + 1}:fix`, true));
+              if (retry) out = retry;
+            }
+            music.push({ fileId: out.files[0]!.id, from: c.from, to: c.to });
+            report[`music_${k + 1}`] = { file_id: out.files[0]!.id, voices_heard: heard?.speech ?? null, remade: !!heard?.speech };
+          }),
+        )
+      : Promise.resolve(),
+    input.narration
+      ? (async () => {
+          const lines = script.scenes.flatMap((s, i) => (s.narration ? [{ i, text: s.narration }] : []));
+          const voice = narratorVoice(script.language || input.language || '', input.narrator);
+          for (let b = 0; b < lines.length; b += NARRATION_BATCH) {
+            const batch = lines.slice(b, b + NARRATION_BATCH);
+            const r = await rc.optional(rc.turn(`tts:${b / NARRATION_BATCH + 1}`, { model: d.writer, profile: 'research', text: ttsPrompt(batch, voice) }));
+            for (const f of r?.files ?? []) {
+              const m = /nar_(\d+)\.mp3$/i.exec(f.name);
+              if (m) narration.set(Number(m[1]), f.id);
+            }
+          }
+          report.narration = { voice, lines: lines.length, spoken: narration.size };
+        })()
+      : Promise.resolve(),
+  ]);
+  music.sort((a, b) => a.from - b.from);
+  await rc.setState({ audio: report });
+  return { music, narration };
+}
+
+/** Whisper (faster-whisper, tiny, VAD) in the sandbox: does a music clip contain words? */
+async function hearWords(rc: RunContext<FilmInput>, d: FilmDeps, key: string, fileId: string) {
+  if (!d.assembler) return undefined;
+  const mp3 = await rc.step(`${key}:audio:${fileId}`, 'local', async () => {
+    const clip = await d.store.get(fileId, rc.userId);
+    const bytes = await d.assembler!.audio(d.store.pathOf(clip), rc.signal);
+    const f = await d.store.save({ userId: rc.userId, kind: 'artifact', filename: `${key.replace(':', '-')}.mp3`, mimeType: 'audio/mpeg', bytes });
+    return { output: f.id };
+  });
+  return rc.turnJson(`${key}:speech:${fileId}`, {
+    model: d.writer,
+    profile: 'research',
+    schema: speechCheck,
+    text: [
+      'Check whether the attached music file (under /data/attachments/) contains any spoken or sung words. Run in Bash:',
+      "python3 -m pip install --quiet faster-whisper 'av==13.1.0'",
+      "python3 -c \"from faster_whisper import WhisperModel; import glob; p=glob.glob('/data/attachments/*.mp3')[0]; m=WhisperModel('tiny', device='cpu', compute_type='int8'); s,_=m.transcribe(p, vad_filter=True); print('|'.join(x.text for x in s))\"",
+      'speech = true only if the transcription contains real words (ignore isolated "uh", "mm", or a single repeated syllable).',
+      'Reply with ONLY JSON: {"speech":false,"words":"…"}',
+    ].join('\n'),
+    content: [{ type: 'document', fileId: mp3, filename: 'music.mp3', mimeType: 'audio/mpeg' }],
+  });
+}
+
+function musicPrompt(script: Script, cue: string, strict: boolean): string {
+  return [
+    `Slow, abstract drift through soft light and mist matching the mood of the film "${script.title}" (${script.style_bible.look || 'cinematic'}), no people, no text.`,
+    `AUDIO: an instrumental film score only — ${cue || 'a gentle cinematic underscore'}. Steady, continuous music for the whole clip that can loop under scenes.`,
+    strict
+      ? 'Purely instrumental: absolutely NO voices — no singing, humming, choir, chanting, whispering or speech of any kind, and no sound effects.'
+      : 'No speech, no singing, no voices, no sound effects.',
+  ].join(' ');
+}
+
+function ttsPrompt(lines: { i: number; text: string }[], voice: string): string {
+  const items = lines.map((l) => ({ file: `nar_${String(l.i).padStart(3, '0')}.mp3`, text: l.text }));
+  return [
+    'Make voice-over files for a film. Run in Bash: python3 -m pip install --quiet edge-tts, then for every item run',
+    `edge-tts --voice ${voice} --rate=-5% --text "<text>" --write-media /tmp/<file>`,
+    '(quote the text safely, e.g. write a small python script with subprocess and a list). Check that every file exists and is not empty.',
+    'Deliver ALL the mp3 files with DeliverArtifacts, keeping their exact file names. Reply with one short sentence.',
+    fenced('items', JSON.stringify(items, null, 1)),
+  ].join('\n');
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 const stripModel = <T extends object>(v: T & { _model?: string }): T => {
@@ -512,7 +682,7 @@ export function normalize(script: Script, durationS: number, fixedSeconds: numbe
  */
 async function writeLongScript(rc: RunContext<FilmInput>, writer: string, idea: string, input: FilmInput, castable: Castable[], references: string[]): Promise<Script> {
   await rc.stage('script', 'Outlining the acts', 2);
-  const outline = stripModel(await rc.turnJson('outline', { model: writer, schema: outlineSchema, text: outlinePrompt(idea, input, castable, references) }));
+  const outline = stripModel(await rc.turnJson('outline', { model: writer, schema: z.object({ ...outlineSchema.shape, score: z.string().max(600).default(''), language: z.string().max(20).default('') }), text: outlinePrompt(idea, input, castable, references) }));
   // act lengths add up to the film's length
   const sum = outline.acts.reduce((t, a) => t + a.seconds, 0);
   const acts = outline.acts.map((a) => ({ ...a, seconds: Math.max(20, Math.round((a.seconds / sum) * input.duration_s)) }));
@@ -533,7 +703,7 @@ async function writeLongScript(rc: RunContext<FilmInput>, writer: string, idea: 
   if (review?.fixes.length) scenes = applyFixes(scenes, review.fixes);
   await rc.setState({ continuity: (review?.fixes ?? []).map((f) => ({ n: f.n, reason: f.reason ?? '' })) });
   const { acts: _acts, ...rest } = outline;
-  return { ...rest, scenes };
+  return { ...rest, act_music: outline.acts.map((a) => a.music ?? ''), scenes };
 }
 
 /** Continuity fixes by 1-based scene number; unknown numbers are ignored. */
@@ -581,9 +751,19 @@ function refPrompt(n: number, of: number): string {
 const LOCATION_RULE =
   '- "locations": every distinct place of the film once (id, name, and a description of its architecture, props, colours and light that a set designer can build from). Every scene names its place by "location_id"; reuse places instead of inventing near-duplicates.';
 
-const SCENE_JSON = '{"seconds":6,"location_id":"cafe","location":"…","action":"…","camera":"…","characters":["mira"],"dialogue":[{"character":"Mira","line":"…"}],"sfx":"…","mood":"…","continuous":false,"transition":"cut"}';
+const SCENE_JSON = '{"seconds":6,"location_id":"cafe","location":"…","action":"…","camera":"…","characters":["mira"],"dialogue":[{"character":"Mira","line":"…"}],"sfx":"…","mood":"…","narration":"","continuous":false,"transition":"cut"}';
 const HEAD_JSON =
-  '"title":"…","logline":"…","style_bible":{"look":"…","palette":"…","lighting":"…","camera":"…"},"characters":[{"id":"mira","name":"Mira","appearance":"…","wardrobe":"…","face":null}],"locations":[{"id":"cafe","name":"…","description":"…"}]';
+  '"title":"…","logline":"…","language":"id","score":"…","style_bible":{"look":"…","palette":"…","lighting":"…","camera":"…"},"characters":[{"id":"mira","name":"Mira","appearance":"…","wardrobe":"…","face":null}],"locations":[{"id":"cafe","name":"…","description":"…"}]';
+
+/** Film-level sound rules: language code, music direction. */
+function soundRules(input: FilmInput): string[] {
+  return [
+    '- "language": the language code of the dialogue (e.g. "id", "en", "zh").',
+    input.music
+      ? '- "score": the film\'s music in one or two sentences (instruments, mood, tempo, era), written for a composer. The scenes carry no music of their own.'
+      : '- "score": leave empty.',
+  ];
+}
 
 /** Rules every scene follows (short scripts and long films' acts). */
 function sceneRules(input: FilmInput, fixedSeconds: number | null): string[] {
@@ -595,6 +775,9 @@ function sceneRules(input: FilmInput, fixedSeconds: number | null): string[] {
     '- Each scene is ONE continuous shot an image-to-video model can animate from its first frame: a clear location, one main action, simple camera movement. No cuts inside a scene, no on-screen text.',
     `- Dialogue: short lines (≤ 15 words), at most 2 per scene, in ${input.language ?? 'the language of the idea'}; silent scenes are fine.`,
     '- "continuous": true only when the next scene continues the same shot (it then ends on the next scene\'s first frame).',
+    input.narration
+      ? `- "narration": an optional voice-over line for a scene (inner thoughts, passing time, context the pictures cannot show; never a description of what is visible), at most about two words per second of the scene, in ${input.language ?? 'the language of the idea'}. Use it in about a third of the scenes, never in a scene with dialogue; otherwise leave it empty.`
+      : '- "narration": leave empty.',
   ];
 }
 
@@ -615,6 +798,7 @@ function scriptRules(input: FilmInput, castable: Castable[], fixedSeconds: numbe
     '- At most 4 characters, each with a precise, fixed visual description (age, build, face, hair, skin tone, wardrobe) that never changes. Characters are referenced by id in scenes.',
     LOCATION_RULE,
     castRule(castable),
+    ...soundRules(input),
     SAFETY,
     `Reply with ONLY JSON: {${HEAD_JSON},"scenes":[${SCENE_JSON}]}`,
   ].join('\n');
@@ -633,8 +817,10 @@ function outlinePrompt(idea: string, input: FilmInput, castable: Castable[], ref
       LOCATION_RULE.replace('Every scene names its place by "location_id"; reuse', 'Up to 20 places; reuse'),
       '- A style bible (look, palette, lighting, camera) that holds for the whole film.',
       castRule(castable),
+      ...soundRules(input),
+      input.music ? '- Every act has a "music" cue: how the score sounds in that act (it may change with the story).' : '',
       SAFETY,
-      `Reply with ONLY JSON: {${HEAD_JSON},"acts":[{"title":"…","summary":"…","seconds":120}]}`,
+      `Reply with ONLY JSON: {${HEAD_JSON},"acts":[{"title":"…","summary":"…","seconds":120${input.music ? ',"music":"…"' : ''}}]}`,
     ].join('\n'),
   ]
     .filter(Boolean)
@@ -756,7 +942,7 @@ function clipPrompt(script: Script, s: Scene, input: FilmInput): string {
     `Camera: ${s.camera || 'smooth, cinematic'}.`,
     s.mood ? `Mood: ${s.mood}.` : '',
     lines ? `${lines} (lip-synced, natural voice${input.language ? `, in ${input.language}` : ''}).` : '',
-    s.sfx ? `Sound: ${s.sfx}.` : 'Ambient sound that fits the scene.',
+    input.music ? `Sound: ${s.sfx || 'natural ambient sound that fits the scene'}; no music.` : s.sfx ? `Sound: ${s.sfx}.` : 'Ambient sound that fits the scene.',
     `Keep the characters, setting and style of the first frame (${bible(script, input.style)}). No text on screen.`,
   ]
     .filter(Boolean)

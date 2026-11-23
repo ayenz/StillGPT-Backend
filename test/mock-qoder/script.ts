@@ -27,6 +27,8 @@ export interface ScriptOptions {
   slowDelayMs: number;
   /** Test hook: return a string to replace the scripted reply text (undefined = default behaviour). */
   reply?: (text: string, modelId: string) => string | undefined;
+  /** Test hook: files to deliver with DeliverArtifacts for a turn (e.g. sandbox-made audio). */
+  files?: (text: string) => { name: string; bytes: Buffer; mimeType: string }[] | undefined;
   /** Test hook: return an error text to make the ImageGen/VideoGen call fail (no artifact), like upstream throttling. */
   toolError?: (tool: 'ImageGen' | 'VideoGen', text: string) => string | undefined;
 }
@@ -137,6 +139,8 @@ export class TurnScript {
       if (images > 0) reply += ` (saw ${images} image(s))`;
       const custom = this.opts.reply?.(text, modelId);
       if (custom !== undefined) reply = custom;
+
+      for (const f of this.opts.files?.(text) ?? []) this.deliver(s, `/tmp/${f.name}`, f.name, f.bytes, f.mimeType);
 
       if (text.includes('[[history]]')) {
         reply += `\nHistory: ${s.userTexts.slice(0, -1).join(' | ')}`;

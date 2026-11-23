@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { type AssembleInput, buildSrt, chunkParts, filmSize, joinArgs, joinPlan, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
-import { applyFixes, normalize, type Script } from '../../src/core/runs/film.js';
+import { type AssembleInput, buildSrt, chunkParts, filmSize, joinArgs, joinPlan, mixArgs, mixPlan, parseProbe, segmentArgs, srtTime } from '../../src/core/runs/assembler.js';
+import { applyFixes, musicCues, narratorVoice, normalize, type Script } from '../../src/core/runs/film.js';
 import { makePng } from '../mock-qoder/index.js';
 import { type Harness, startHarness } from './harness.js';
 
@@ -9,6 +9,9 @@ import { type Harness, startHarness } from './harness.js';
 class FakeAssembler {
   calls: AssembleInput[] = [];
   stillCalls: { path: string; at: number[] }[] = [];
+  async audio() {
+    return Buffer.from('ID3 fake mp3');
+  }
   async stills(path: string, at: number[]) {
     this.stillCalls.push({ path, at });
     return at.map(() => makePng());
@@ -35,6 +38,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
   h.qoder.setReply(undefined);
+  h.qoder.setFiles(undefined);
   assembler.calls = [];
   pushes.length = 0;
 });
@@ -60,6 +64,9 @@ const SCRIPT: Script = {
     { id: 'budi', name: 'Budi', appearance: 'older man, grey beard', wardrobe: 'batik shirt', face: null },
   ],
   locations: [{ id: 'cafe', name: 'Small cafe', description: 'warm wooden cafe with a copper espresso machine' }],
+  score: '',
+  language: '',
+  act_music: [],
   scenes: [
     { seconds: 6, location_id: 'cafe', location: 'small cafe', action: 'Sari opens the shutters', camera: 'wide', characters: ['sari'], dialogue: [], sfx: 'metal shutter', mood: 'calm', continuous: true, transition: 'cut' },
     { seconds: 14, location_id: 'cafe', location: 'counter', action: 'Sari pours latte art', camera: 'close', characters: ['sari', 'ghost'], dialogue: [{ character: 'Sari', line: 'Selamat pagi!' }], sfx: '', mood: 'warm', continuous: false, transition: 'dissolve' },
@@ -408,5 +415,73 @@ describe('long films and quality', () => {
     const call = assembler.calls.at(-1)!;
     expect(call.clips).toHaveLength(4);
     expect(call.clips.map((c) => c.transition)).toEqual(['cut', 'cut', 'dissolve', 'cut']);
+  });
+});
+
+describe('music and narration', () => {
+  it('plans music cues, voices and the mix', () => {
+    const base = { ...SCRIPT, score: 'guzheng and strings', act_music: [] as string[], language: 'id' };
+    expect(musicCues(base, 30)).toEqual([{ cue: 'guzheng and strings', from: 0, to: 2 }]);
+    const long = { ...base, act_music: ['tense drums', ''], scenes: [1, 1, 2, 2, 2].map((act) => ({ ...SCRIPT.scenes[0]!, act })) };
+    expect(musicCues(long, 600)).toEqual([
+      { cue: 'tense drums', from: 0, to: 1 },
+      { cue: 'guzheng and strings', from: 2, to: 4 },
+    ]);
+    expect(narratorVoice('id', 'female')).toBe('id-ID-GadisNeural');
+    expect(narratorVoice('Indonesian', 'male')).toBe('id-ID-ArdiNeural');
+    expect(narratorVoice('xx', 'female')).toBe('en-US-AriaNeural');
+    // title card (3 s) + 3 clips of 8 s cut together: the music starts under the title, narration 0.3 s into its clip
+    const plan = mixPlan(
+      { clips: [{ path: 'a', captions: [] }, { path: 'b', captions: [], narration: 'n1.mp3' }, { path: 'c', captions: [] }], music: [{ path: 'm1.mp4', from: 0, to: 0 }, { path: 'm2.mp4', from: 1, to: 2 }] },
+      [0, 3, 11, 19],
+      [3, 8, 8, 8],
+      1,
+    );
+    expect(plan).toEqual({ music: [{ path: 'm1.mp4', start: 0, end: 12.5 }, { path: 'm2.mp4', start: 11, end: 27 }], narration: [{ path: 'n1.mp3', start: 11.3 }] });
+    const args = mixArgs('film.mp4', 27, plan, 'out.mp4').join(' ');
+    expect(args).toContain('-stream_loop -1 -i m1.mp4');
+    expect(args).toContain('sidechaincompress');
+    expect(args).toContain('adelay=11300:all=1');
+    expect(mixArgs('film.mp4', 27, { music: plan.music, narration: [] }, 'o.mp4').join(' ')).not.toContain('sidechaincompress');
+  });
+
+  it('scores a film with checked music and speaks the narration', async () => {
+    const scripted = {
+      ...SCRIPT,
+      language: 'id',
+      score: 'gentle guzheng over warm strings',
+      scenes: SCRIPT.scenes.map((sc, i) => ({ ...sc, dialogue: i === 1 ? [] : sc.dialogue, narration: i === 1 ? 'Pagi itu, Sari tahu harinya akan berubah.' : '' })),
+    };
+    let heard = 0;
+    const clipPrompts: string[] = [];
+    h.qoder.setReply((t) => {
+      if (t.startsWith('You are a screenwriter') || t.startsWith('You are a film editor')) return JSON.stringify(scripted);
+      if (t.includes('You check a keyframe') || t.includes('You check one scene')) return '{"score":5}';
+      // the first music clip has a voice in it: it is re-made once
+      if (t.includes('Check whether the attached music file')) return ++heard === 1 ? '{"speech":true,"words":"la la la"}' : '{"speech":false}';
+      if (t.includes('Make voice-over files')) return 'Delivered.';
+      return undefined;
+    });
+    h.qoder.setFiles((t) => (t.includes('Make voice-over files') ? [...t.matchAll(/"file": "(nar_\d+\.mp3)"/g)].map((m) => ({ name: m[1]!, bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' })) : undefined));
+    const run = await json(await h.api('/api/v1/runs', { method: 'POST', json: { kind: 'film', input: { prompt: 'barista pagi', duration_s: 30, review: 'none', narration: true, narrator: 'male' } } }));
+    const done = await waitRun(run.id);
+    expect(done.status, JSON.stringify(done.error)).toBe('completed');
+    const keys: string[] = done.steps.map((x: any) => x.key);
+    expect(keys).toEqual(expect.arrayContaining(['music:1', 'music:1:fix', 'tts:1']));
+    expect(keys.filter((k) => /^music:1:speech:/.test(k))).toHaveLength(1);
+    const music = await json(await h.api(`/api/v1/jobs/${done.steps.find((x: any) => x.key === 'music:1:fix').output.job_id}`));
+    expect(music.request).toMatchObject({ seconds: 30, resolution: '480P', mode: 'text_to_video', film_role: 'music' });
+    expect(music.request.prompt).toContain('absolutely NO voices');
+    for (const k of ['clip:1', 'clip:2']) {
+      const job = await json(await h.api(`/api/v1/jobs/${done.steps.find((x: any) => x.key === k).output.job_id}`));
+      clipPrompts.push(job.request.prompt);
+    }
+    expect(clipPrompts.every((p) => p.includes('no music'))).toBe(true);
+    expect(done.state.audio.narration).toEqual({ voice: 'id-ID-ArdiNeural', lines: 1, spoken: 1 });
+    expect(done.state.audio.music_1).toMatchObject({ voices_heard: true, remade: true });
+    const call = assembler.calls.at(-1)!;
+    expect(call.music).toEqual([{ path: expect.any(String), from: 0, to: 2 }]);
+    expect(call.clips.map((c) => !!c.narration)).toEqual([false, true, false]);
+    expect(call.clips[1]!.captions).toEqual(['Pagi itu, Sari tahu harinya akan berubah.']);
   });
 });
